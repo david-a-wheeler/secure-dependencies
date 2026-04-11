@@ -164,10 +164,12 @@ being updated. Look in:
 ~/.claude/skills/securely-update-dependencies/references/scripts/
 ```
 
-Scripts follow the naming pattern `basic-analysis-ECOSYSTEM.sh` and
-`indepth-analysis-ECOSYSTEM.sh` (e.g., `basic-analysis-ruby.sh`). If a script
-for the needed ecosystem does not exist, create it using the existing scripts and
-the ecosystem reference files in that same `references/` directory as a guide.
+Scripts follow the naming pattern `basic-analysis-ECOSYSTEM.py` (Python3,
+preferred) or `basic-analysis-ECOSYSTEM.sh` (shell fallback), and similarly
+`indepth-analysis-ECOSYSTEM.sh`. The Ruby basic analysis script is
+`basic-analysis-ruby.py`. If a script for the needed ecosystem does not exist,
+create it using the existing scripts and the ecosystem reference files in that
+same `references/` directory as a guide.
 The key properties any script must have:
 
 - Downloads without executing package code
