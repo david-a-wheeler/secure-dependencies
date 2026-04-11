@@ -166,8 +166,9 @@ being updated. Look in:
 
 Scripts follow the naming pattern `basic-analysis-ECOSYSTEM.py` (Python3,
 preferred) or `basic-analysis-ECOSYSTEM.sh` (shell fallback), and similarly
-`indepth-analysis-ECOSYSTEM.sh`. The Ruby basic analysis script is
-`basic-analysis-ruby.py`. If a script for the needed ecosystem does not exist,
+`indepth-analysis-ECOSYSTEM.py`. The Ruby scripts are
+`basic-analysis-ruby.py` and `indepth-analysis-ruby.py`.
+If a script for the needed ecosystem does not exist,
 create it using the existing scripts and the ecosystem reference files in that
 same `references/` directory as a guide.
 The key properties any script must have:
