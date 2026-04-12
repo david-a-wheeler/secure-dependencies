@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-# hooks_rubygems.py — Ruby-specific operations for the dependency analysis driver.
+# hooks_ruby.py — Ruby language operations for the dependency analysis driver.
+#
+# Handles the Ruby gem format (download, unpack, gemspec, Rakefile) and the
+# rubygems.org registry API. Used for --from rubygems; can be reused for other
+# Ruby gem registries (Gemfury, GitHub Packages, etc.) with a different registry
+# entry in REGISTRY_TO_HOOKS pointing here.
 #
 # Called by dep_review.py; do not invoke directly.
 # Each function accepts a `failures: list[str]` param and calls

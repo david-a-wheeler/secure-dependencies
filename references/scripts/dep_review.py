@@ -13,7 +13,7 @@
 #
 # Known registries: rubygems, pypi, npm
 #
-# Loads ecosystem hooks dynamically: importlib.import_module(f'hooks_{registry}').
+# Loads language hooks via REGISTRY_TO_HOOKS map (e.g. rubygems → hooks_ruby).
 # Output directory: ROOT/temp/PKGNAME-NEW_VERSION/  (ROOT defaults to cwd)
 #
 # AI agents: read verdict.txt for the complete self-describing report.
@@ -1026,7 +1026,16 @@ def run_analysis(  # noqa: C901
 # Entry point
 # ---------------------------------------------------------------------------
 
-KNOWN_REGISTRIES: list[str] = ['rubygems', 'pypi', 'npm']
+# Maps registry name (--from value) to the language-level hooks module.
+# Registry names describe where to download from; hooks modules describe how
+# to handle the package format. Multiple registries can share one hooks module
+# (e.g. a private gem server would also use hooks_ruby).
+REGISTRY_TO_HOOKS: dict[str, str] = {
+    'rubygems': 'hooks_ruby',
+    'pypi':     'hooks_python',
+    'npm':      'hooks_js',
+}
+KNOWN_REGISTRIES: list[str] = list(REGISTRY_TO_HOOKS)
 
 HELP = """\
 dep_review.py — dependency security review
@@ -1193,7 +1202,7 @@ def main() -> None:  # noqa: C901 (complexity acceptable for CLI validation)
         errors.append(
             f'Unknown registry: {registry!r}\n'
             f'  Known registries: {", ".join(KNOWN_REGISTRIES)}\n'
-            '  If you need a new registry, add a hooks_REGISTRY.py file.'
+            '  To add a new registry, add it to REGISTRY_TO_HOOKS and provide a hooks_LANGUAGE.py file.'
         )
 
     # --- Validate: at least one mode ---
@@ -1230,12 +1239,13 @@ def main() -> None:  # noqa: C901 (complexity acceptable for CLI validation)
         _die(f'--root directory does not exist: {root}')
 
     # --- Load ecosystem hooks ---
+    hooks_module = REGISTRY_TO_HOOKS[registry]
     try:
-        hooks = importlib.import_module(f'hooks_{registry}')
+        hooks = importlib.import_module(hooks_module)
     except ImportError as exc:
         _die(
             f'No hooks file for registry {registry!r}: {exc}\n'
-            f'  Expected: hooks_{registry}.py in the same directory as dep_review.py'
+            f'  Expected: {hooks_module}.py in the same directory as dep_review.py'
         )
 
     # --- Warn: no lockfile found ---

@@ -155,7 +155,7 @@ Locate scripts in:
 
 Scripts: `analysis_shared.py` (cross-ecosystem utilities), `dep_review.py`
 (single orchestration entry point), and one hooks file per ecosystem (e.g.
-`hooks_rubygems.py`). Always copy all three relevant files.
+`hooks_ruby.py`). Always copy all three relevant files.
 
 ```bash
 mkdir -p PROJECT_ROOT/temp/scripts/
@@ -163,7 +163,7 @@ cp ~/.claude/skills/secure-dependencies/references/scripts/analysis_shared.py \
    PROJECT_ROOT/temp/scripts/
 cp ~/.claude/skills/secure-dependencies/references/scripts/dep_review.py \
    PROJECT_ROOT/temp/scripts/
-cp ~/.claude/skills/secure-dependencies/references/scripts/hooks_rubygems.py \
+cp ~/.claude/skills/secure-dependencies/references/scripts/hooks_ruby.py \
    PROJECT_ROOT/temp/scripts/
 ```
 
