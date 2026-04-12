@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# hooks_ruby.py — Ruby-specific operations for the dependency analysis driver.
+# hooks_rubygems.py — Ruby-specific operations for the dependency analysis driver.
 #
 # Called by dep_review.py; do not invoke directly.
 # Each function accepts a `failures: list[str]` param and calls
