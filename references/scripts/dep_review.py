@@ -29,6 +29,7 @@ if sys.version_info < (3, 10):
     sys.exit(f'dep_review.py requires Python 3.10 or later (running {sys.version})')
 
 import importlib
+import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -720,7 +721,6 @@ def _write_session_update(
     install_time_code_reason: str,
 ) -> None:
     """Write session-update.json for dep_session.py complete to consume."""
-    import json as _json
     data = {
         'not_in_lockfile': not_in_lockfile,
         'alternatives_critical': alternatives_critical,
@@ -729,7 +729,7 @@ def _write_session_update(
     }
     work.mkdir(parents=True, exist_ok=True)
     (work / 'session-update.json').write_text(
-        _json.dumps(data, indent=2) + '\n', encoding='utf-8'
+        json.dumps(data, indent=2) + '\n', encoding='utf-8'
     )
 
 
@@ -1052,9 +1052,9 @@ def run_analysis(  # noqa: C901
     if session_file is not None:
         install_time = bool(manifest.get('extensions'))
         install_reason = 'native extension' if install_time else ''
-        if not install_time and manifest.get('has_postinstall'):
+        if not install_time and manifest.get('post_install_message'):
             install_time = True
-            install_reason = 'postinstall script'
+            install_reason = 'post_install_message'
         _write_session_update(
             work,
             not_in_lockfile=transitive.get('not_in_lockfile', []),
