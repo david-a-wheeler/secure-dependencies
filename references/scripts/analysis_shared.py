@@ -158,6 +158,21 @@ def evaluate_license(
 # Generic helpers
 # ---------------------------------------------------------------------------
 
+def levenshtein(a: str, b: str) -> int:
+    """Return the Levenshtein edit distance between two strings."""
+    if len(a) < len(b):
+        a, b = b, a
+    if not b:
+        return len(a)
+    prev = list(range(len(b) + 1))
+    for ca in a:
+        curr = [prev[0] + 1]
+        for j, cb in enumerate(b):
+            curr.append(min(prev[j + 1] + 1, curr[j] + 1, prev[j] + (ca != cb)))
+        prev = curr
+    return prev[-1]
+
+
 def sanitize(text: str) -> str:
     """Replace C0/C1 control chars with '?'.
 

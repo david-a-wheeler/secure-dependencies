@@ -11,8 +11,7 @@
 # failures.append(...) on errors rather than raising exceptions.
 #
 # Python stdlib only — no third-party packages required.
-
-from __future__ import annotations
+# Requires Python 3.10+ (enforced by dep_review.py).
 
 import json
 import re
@@ -612,6 +611,178 @@ def get_transitive_deps(
     (work / 'transitive-deps.txt').write_text('\n'.join(trans_lines) + '\n', encoding='utf-8')
 
     return {'total': total, 'not_in_lockfile': transitive_new}
+
+
+def check_alternatives(
+    pkgname: str,
+    version: str,
+    work: Path,
+    project_root: Path,
+    registry_url: str | None = None,
+) -> dict:
+    """Check for typosquat, slopsquat, and stdlib overlap signals.
+
+    Three checks:
+    A — Query 'gem list' for all installed/stdlib gems; flag exact matches and
+        near-matches (edit distance <= 2). Because 'gem list' includes default
+        and bundled gems, this covers the stdlib without a hardcoded list.
+    C — Read Gemfile.lock for the project's direct deps; flag near-matches.
+        Catches attacks targeting this project's specific dependency set.
+    D — Structural heuristics: hyphen/underscore normalization, and stripping
+        common Ruby-specific name prefixes/suffixes (ruby-, -rb, etc.) to see
+        if what remains matches an installed gem.
+
+    # TODO (Option B): Add registry search for top packages by download count
+    #   to catch typosquats of popular packages not yet installed locally.
+    #   Would call rubygems.org/api/v1/search.json?query=PKGNAME and compare
+    #   edit distance + download counts of the top results.
+
+    Writes: alternatives.txt to work dir.
+    Returns dict with keys: concerns (list[str]), notes (list[str]),
+      gem_count (int), lockfile_count (int).
+    """
+    concerns: list[str] = []
+    notes: list[str] = []
+
+    # --- A: Query runtime for all installed/stdlib gems ---
+    gem_names: list[str] = []
+    rc, out, _ = shared.run_cmd(['gem', 'list', '--no-versions'], timeout=30)
+    if rc == 0:
+        for line in out.splitlines():
+            name = line.strip()
+            if name:
+                gem_names.append(name)
+
+    pkg_lower = pkgname.lower()
+
+    for gem in gem_names:
+        gem_lower = gem.lower()
+        if gem_lower == pkg_lower:
+            concerns.append(
+                f'EXACT_STDLIB_MATCH: "{pkgname}" matches installed/stdlib gem "{gem}". '
+                'Installing an external gem with the same name as an already-available '
+                'gem is a strong slopsquat signal.'
+            )
+        else:
+            dist = shared.levenshtein(pkg_lower, gem_lower)
+            if dist == 1:
+                concerns.append(
+                    f'NEAR_MATCH(dist=1): "{pkgname}" is one edit from installed gem "{gem}". '
+                    'Classic typosquat pattern.'
+                )
+            elif dist == 2:
+                notes.append(
+                    f'NEAR_MATCH(dist=2): "{pkgname}" is two edits from installed gem "{gem}".'
+                )
+
+    # --- C: Read Gemfile.lock for project-specific deps ---
+    lockfile = project_root / 'Gemfile.lock'
+    lockfile_names: list[str] = []
+    if lockfile.is_file():
+        in_specs = False
+        for line in lockfile.read_text(encoding='utf-8', errors='replace').splitlines():
+            if line.strip() == 'specs:':
+                in_specs = True
+                continue
+            if in_specs:
+                # Gem entries are indented with exactly 4 spaces
+                m = re.match(r'^    ([A-Za-z0-9_\-\.]+)\s', line)
+                if m:
+                    lockfile_names.append(m.group(1))
+                elif line and not line[0].isspace():
+                    in_specs = False  # end of specs block
+
+    # Only flag lockfile matches not already caught by gem_names
+    installed_lower = {g.lower() for g in gem_names}
+    for dep in lockfile_names:
+        dep_lower = dep.lower()
+        if dep_lower in installed_lower:
+            continue  # already checked in A
+        if dep_lower == pkg_lower:
+            concerns.append(
+                f'EXACT_LOCKFILE_MATCH: "{pkgname}" matches existing lockfile dep "{dep}". '
+                'This name is already in use in this project.'
+            )
+        else:
+            dist = shared.levenshtein(pkg_lower, dep_lower)
+            if dist == 1:
+                concerns.append(
+                    f'NEAR_LOCKFILE_MATCH(dist=1): "{pkgname}" is one edit from '
+                    f'lockfile dep "{dep}". Possible targeted typosquat.'
+                )
+            elif dist == 2:
+                notes.append(
+                    f'NEAR_LOCKFILE_MATCH(dist=2): "{pkgname}" is two edits from '
+                    f'lockfile dep "{dep}".'
+                )
+
+    # --- D: Structural heuristics ---
+    # D1: hyphen/underscore normalization (ruby gems use both conventions)
+    normalized = pkg_lower.replace('-', '_')
+    if normalized != pkg_lower:
+        for gem in gem_names:
+            if gem.lower().replace('-', '_') == normalized and gem.lower() != pkg_lower:
+                concerns.append(
+                    f'NORMALIZATION_MATCH: "{pkgname}" normalizes to the same name as '
+                    f'installed gem "{gem}" (hyphen/underscore difference). '
+                    'Could be a naming-convention confusion attack.'
+                )
+
+    # D2: language prefix/suffix stripping
+    # If stripping a Ruby-specific wrapper prefix/suffix reveals an installed gem name,
+    # this package may be an unnecessary (or malicious) wrapper around stdlib.
+    strip_prefixes = ('ruby-', 'rb-', 'gem-')
+    strip_suffixes = ('-rb', '-ruby', '-gem')
+    all_known_lower = {g.lower() for g in gem_names} | {d.lower() for d in lockfile_names}
+    for prefix in strip_prefixes:
+        if pkg_lower.startswith(prefix):
+            base = pkg_lower[len(prefix):]
+            if base in all_known_lower:
+                concerns.append(
+                    f'PREFIX_SHADOW: "{pkgname}" appears to wrap installed gem '
+                    f'"{base}" (stripped prefix "{prefix}"). '
+                    'Verify this external wrapper is intentional.'
+                )
+    for suffix in strip_suffixes:
+        if pkg_lower.endswith(suffix):
+            base = pkg_lower[: -len(suffix)]
+            if base in all_known_lower:
+                concerns.append(
+                    f'SUFFIX_SHADOW: "{pkgname}" appears to wrap installed gem '
+                    f'"{base}" (stripped suffix "{suffix}"). '
+                    'Verify this external wrapper is intentional.'
+                )
+
+    # --- Write report ---
+    lines = [
+        f'=== Alternatives check: {pkgname} {version} ===',
+        f'Installed/stdlib gems checked : {len(gem_names)}',
+        f'Lockfile deps checked         : {len(lockfile_names)}',
+        '',
+    ]
+    if concerns:
+        lines.append(f'CONCERNS ({len(concerns)}):')
+        for c in concerns:
+            lines.append(f'  [!] {c}')
+    else:
+        lines.append('CONCERNS: none')
+    lines.append('')
+    if notes:
+        lines.append(f'NOTES ({len(notes)}):')
+        for n in notes:
+            lines.append(f'  [-] {n}')
+    else:
+        lines.append('NOTES: none')
+
+    work.mkdir(parents=True, exist_ok=True)
+    (work / 'alternatives.txt').write_text('\n'.join(lines) + '\n', encoding='utf-8')
+
+    return {
+        'concerns': concerns,
+        'notes': notes,
+        'gem_count': len(gem_names),
+        'lockfile_count': len(lockfile_names),
+    }
 
 
 def get_diff_excludes() -> list[str]:

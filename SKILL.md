@@ -21,6 +21,13 @@ version: 0.2.0
 
 # secure-dependencies
 
+> **General-purpose skill.** This skill is not tied to any specific project,
+> AI assistant (Claude, Copilot, Gemini, etc.), or package ecosystem. It can
+> be used in any software project with Ruby, Python, or JavaScript dependencies.
+> All output goes to `temp/dep-review/` inside the project root, which should
+> be added to `.gitignore`. The analysis scripts require Python 3.10+ and only
+> use the standard library — no extra installation needed.
+
 You are a security-conscious dependency assistant. Your primary obligations are:
 
 1. **Protect against supply chain attacks** — compromised packages, typosquatting,
@@ -160,13 +167,13 @@ Scripts: `analysis_shared.py` (cross-ecosystem utilities), `dep_review.py`
 `hooks_ruby.py`). Always copy all three relevant files.
 
 ```bash
-mkdir -p PROJECT_ROOT/temp/scripts/
+mkdir -p PROJECT_ROOT/temp/dep-review/scripts/
 cp ~/.claude/skills/secure-dependencies/references/scripts/analysis_shared.py \
-   PROJECT_ROOT/temp/scripts/
+   PROJECT_ROOT/temp/dep-review/scripts/
 cp ~/.claude/skills/secure-dependencies/references/scripts/dep_review.py \
-   PROJECT_ROOT/temp/scripts/
+   PROJECT_ROOT/temp/dep-review/scripts/
 cp ~/.claude/skills/secure-dependencies/references/scripts/hooks_ruby.py \
-   PROJECT_ROOT/temp/scripts/
+   PROJECT_ROOT/temp/dep-review/scripts/
 ```
 
 ### Sub-Agent Brief Template
@@ -184,7 +191,7 @@ when you finish (intentional isolation). Do not ask follow-up questions.
 **Old version**: OLD_VERSION (omit --old flag for NEW and CURRENT modes)
 **New/current version**: NEW_VERSION
 **Project root**: PROJECT_ROOT
-**Scripts**: PROJECT_ROOT/temp/scripts/
+**Scripts**: PROJECT_ROOT/temp/dep-review/scripts/
 **Thorough mode**: YES | NO
 
 **CRITICAL: Run the analysis script as your first and only Bash call for the
@@ -192,26 +199,26 @@ initial analysis. Do not decompose into individual commands first.**
 
 For UPDATE mode (diff against old version):
 ```bash
-python3 PROJECT_ROOT/temp/scripts/dep_review.py \
+python3 PROJECT_ROOT/temp/dep-review/scripts/dep_review.py \
   --from REGISTRY --basic --old OLD_VERSION \
   --root PROJECT_ROOT PKGNAME NEW_VERSION \
-  2>&1 | tee PROJECT_ROOT/temp/PKGNAME-NEW_VERSION/run-log.txt
+  2>&1 | tee PROJECT_ROOT/temp/dep-review/PKGNAME-NEW_VERSION/run-log.txt
 ```
 
 For NEW mode (new dependency — run alternatives check first, then basic):
 ```bash
-python3 PROJECT_ROOT/temp/scripts/dep_review.py \
+python3 PROJECT_ROOT/temp/dep-review/scripts/dep_review.py \
   --from REGISTRY --alternatives --basic \
   --root PROJECT_ROOT PKGNAME NEW_VERSION \
-  2>&1 | tee PROJECT_ROOT/temp/PKGNAME-NEW_VERSION/run-log.txt
+  2>&1 | tee PROJECT_ROOT/temp/dep-review/PKGNAME-NEW_VERSION/run-log.txt
 ```
 
 For CURRENT mode (audit already-installed version):
 ```bash
-python3 PROJECT_ROOT/temp/scripts/dep_review.py \
+python3 PROJECT_ROOT/temp/dep-review/scripts/dep_review.py \
   --from REGISTRY --basic \
   --root PROJECT_ROOT PKGNAME CURRENT_VERSION \
-  2>&1 | tee PROJECT_ROOT/temp/PKGNAME-NEW_VERSION/run-log.txt
+  2>&1 | tee PROJECT_ROOT/temp/dep-review/PKGNAME-NEW_VERSION/run-log.txt
 ```
 
 **NEW mode note**: `--alternatives` runs before `--basic`. If the alternatives
@@ -246,15 +253,21 @@ Do not read any further files.
 | `new-deps.txt`, `dep-lockfile-check.txt` | If new runtime deps added |
 | `dep-registry.txt` | If any dep is NOT_IN_LOCKFILE |
 | `transitive-deps.txt` | NEW/CURRENT: always; UPDATE: if new transitive deps |
-
-**UPDATE mode: new transitive deps require alternatives check.**
-If `transitive-deps.txt` lists packages not previously in the lockfile, treat
-each one as NEW mode: run `--alternatives --basic` on it before accepting the
-update. An upstream maintainer may have been tricked into adding a typosquatted
-or slopsquatted dependency, which would then silently enter your project via a
-routine update. Do not skip this even if the direct package looks clean.
 | `provenance.txt` | If MFA unknown or concerning |
 | `summary-scan-LABEL.txt` | If that scan had matches (paths only) |
+
+**UPDATE mode — new transitive deps must be reported, not analyzed here.**
+If `transitive-deps.txt` lists packages not previously in the lockfile, list
+them in your report under `TRANSITIVE_DEPS.not_in_lockfile`. Do NOT analyze
+them yourself — your scope is one package only. The orchestrating agent will
+spawn a separate NEW-mode sub-agent for each one. An upstream maintainer may
+have been tricked into adding a typosquatted or slopsquatted dep; that dep
+would then silently enter your project via a routine update.
+
+**CURRENT mode — suspicious transitive deps must be reported.**
+If `transitive-deps.txt` lists packages with unusual names, very low download
+counts, or recent ownership changes, flag them in `TRANSITIVE_DEPS.concerns`.
+The orchestrating agent will decide whether to spawn additional sub-agents.
 
 **DO NOT read any file whose name starts with `raw-`.**
 
@@ -271,24 +284,24 @@ routine update. Do not skip this even if the direct package looks clean.
 Record your decision and brief reason.
 
 ```bash
-python3 PROJECT_ROOT/temp/scripts/dep_review.py \
+python3 PROJECT_ROOT/temp/dep-review/scripts/dep_review.py \
   --from REGISTRY --deeper \
   --root PROJECT_ROOT PKGNAME NEW_VERSION \
-  | tee -a PROJECT_ROOT/temp/PKGNAME-NEW_VERSION/run-log.txt
+  | tee -a PROJECT_ROOT/temp/dep-review/PKGNAME-NEW_VERSION/run-log.txt
 ```
 
 (`--deeper` reuses the existing `--basic` work dir; it does not re-download.)
 
 Then read: `sandbox-detection.txt`, `reproducible-build.txt`, `source-deep-diff.txt`.
 
-**7. Write report to `PROJECT_ROOT/temp/PKGNAME-NEW_VERSION/analysis-report.txt`:**
+**7. Write report to `PROJECT_ROOT/temp/dep-review/PKGNAME-NEW_VERSION/analysis-report.txt`:**
 
 ```
 PACKAGE: PKGNAME
 MODE: UPDATE | NEW | CURRENT
 VERSION: OLD_VERSION -> NEW_VERSION  (or just NEW_VERSION for NEW/CURRENT)
 ECOSYSTEM: ECOSYSTEM
-WORK_DIR: PROJECT_ROOT/temp/PKGNAME-NEW_VERSION/
+WORK_DIR: PROJECT_ROOT/temp/dep-review/PKGNAME-NEW_VERSION/
 PACKAGE_HASH: sha256:HASH
 
 LICENSE:
@@ -355,8 +368,17 @@ SUMMARY: [2-3 sentences: findings and reason for recommendation]
 
 1. Record hash, recommendation, key findings.
 2. Update the session progress file.
-3. Discard sub-agent; spawn a fresh one for the next package.
-4. Never read `raw-*` files.
+3. **Check for newly discovered deps requiring follow-on analysis:**
+   - **UPDATE mode**: read `TRANSITIVE_DEPS.not_in_lockfile` from the report.
+     For every package listed, add it to the front of the analysis queue as
+     **NEW mode** (with `--alternatives --basic`). Analyze these before
+     moving on to the next originally-planned UPDATE package. If `--alternatives`
+     returns CRITICAL for any of them, stop and report to the user before
+     proceeding further — do not install the parent UPDATE either.
+   - **CURRENT mode**: read `TRANSITIVE_DEPS.concerns`. For any flagged
+     packages, ask the user whether to deep-dive them before continuing.
+4. Discard sub-agent; spawn a fresh one for the next package.
+5. Never read `raw-*` files.
 
 ---
 
@@ -386,7 +408,7 @@ Deeper analysis: [YES: reason / NO: reason]
 Risk factors (increasing): [list or none]
 Risk factors (decreasing): [list or none]
 
-Full report: temp/PKGNAME-VERSION/analysis-report.txt
+Full report: temp/dep-review/PKGNAME-VERSION/analysis-report.txt
 ```
 
 After all cards:
@@ -403,14 +425,14 @@ After all cards:
 Re-verify hash before every install:
 
 ```bash
-sha256sum -c temp/PKGNAME-NEW_VERSION/package-hash.txt
+sha256sum -c temp/dep-review/PKGNAME-NEW_VERSION/PACKAGE_HASH.txt
 ```
 
 Hash mismatch = **CRITICAL: stop immediately**. Package changed after analysis.
 
 **Ruby**:
 ```bash
-gem install PROJECT_ROOT/temp/PKGNAME-NEW_VERSION/PKGNAME-NEW_VERSION.gem \
+gem install PROJECT_ROOT/temp/dep-review/PKGNAME-NEW_VERSION/PKGNAME-NEW_VERSION.gem \
   --ignore-dependencies
 bundle update PKGNAME
 bundle audit check
@@ -433,7 +455,7 @@ After each install: update progress file, run tests, commit lock file separately
 
 ## Phase 5: Session Wrap-Up
 
-Progress file: `temp/progress-YYYY-MM-DD.md` (append `T` + hour if file exists).
+Progress file: `temp/dep-review/progress-YYYY-MM-DD.md` (append `T` + hour if file exists).
 Read the most recent prior session file to avoid re-analyzing packages.
 
 ```
@@ -450,7 +472,7 @@ STATUS
 
 Status: `pending` → `analyzing` → recommendation → `installed`/`skipped`.
 
-Ensure `temp/` is in `.gitignore`.
+Ensure `temp/dep-review/` is in `.gitignore`.
 
 ---
 
