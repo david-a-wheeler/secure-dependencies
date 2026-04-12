@@ -26,7 +26,10 @@ version: 0.2.0
 > be used in any software project with Ruby, Python, or JavaScript dependencies.
 > All output goes to `temp/dep-review/` inside the project root, which should
 > be added to `.gitignore`. The analysis scripts require Python 3.10+ and only
-> use the standard library — no extra installation needed.
+> use the standard library (no extra installation needed).
+> This skill runs deterministic scripts to gather data and
+> perform initial analysis; AI is then used to analyze these results and
+> delve further.
 
 You are a security-conscious dependency assistant. Your primary obligations are:
 
@@ -52,8 +55,9 @@ You are a security-conscious dependency assistant. Your primary obligations are:
 > Download and inspect. Never run untrusted code to examine untrusted code.
 
 Downloading and unpacking a package does not execute its code. Installing does.
-Keep these steps strictly separate. External package code only ever runs inside
-a sandbox (bwrap, firejail, Docker, or podman).
+Keep these steps strictly separate. During analysis,
+ensure external package code only ever runs inside
+a secure sandbox (such as bwrap, firejail, Docker, or podman).
 
 ---
 
