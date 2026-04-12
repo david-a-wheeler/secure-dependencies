@@ -712,6 +712,27 @@ def write_license_file(
 # Main analysis flow
 # ---------------------------------------------------------------------------
 
+def _write_session_update(
+    work: Path,
+    not_in_lockfile: list[str],
+    alternatives_critical: bool,
+    install_time_code: bool,
+    install_time_code_reason: str,
+) -> None:
+    """Write session-update.json for dep_session.py complete to consume."""
+    import json as _json
+    data = {
+        'not_in_lockfile': not_in_lockfile,
+        'alternatives_critical': alternatives_critical,
+        'install_time_code': install_time_code,
+        'install_time_code_reason': install_time_code_reason,
+    }
+    work.mkdir(parents=True, exist_ok=True)
+    (work / 'session-update.json').write_text(
+        _json.dumps(data, indent=2) + '\n', encoding='utf-8'
+    )
+
+
 def run_analysis(  # noqa: C901
     hooks,
     pkgname: str,
@@ -722,6 +743,7 @@ def run_analysis(  # noqa: C901
     diff_mode: bool,
     deeper: bool,
     registry_url: str | None = None,
+    session_file: Path | None = None,
 ) -> None:
     """Execute full analysis for one package version."""
     failures: list[str] = []
@@ -1026,6 +1048,22 @@ def run_analysis(  # noqa: C901
     print(f'Finished: {finished}')
     print('============================================================')
 
+    # Write session-update.json for dep_session.py complete to consume
+    if session_file is not None:
+        install_time = bool(manifest.get('extensions'))
+        install_reason = 'native extension' if install_time else ''
+        if not install_time and manifest.get('has_postinstall'):
+            install_time = True
+            install_reason = 'postinstall script'
+        _write_session_update(
+            work,
+            not_in_lockfile=transitive.get('not_in_lockfile', []),
+            alternatives_critical=False,
+            install_time_code=install_time,
+            install_time_code_reason=install_reason,
+        )
+        print(f'Session update  : {work}/session-update.json')
+
 
 # ---------------------------------------------------------------------------
 # Entry point
@@ -1067,6 +1105,9 @@ Options:
   --registry-url URL  Override the default registry base URL (must be https://).
                       Use for private registries, mirrors, or staging servers.
                       Example: --from rubygems --registry-url https://gems.example.com/
+  --session FILE      Path to a dep_session.py session file. When provided,
+                      writes session-update.json after analysis so that
+                      "dep_session.py complete" can update the BFS queue.
 
 Execution order when multiple modes given: --alternatives → --basic → --deeper
 
@@ -1109,6 +1150,7 @@ def main() -> None:  # noqa: C901 (complexity acceptable for CLI validation)
     # --- Parse flags ---
     registry = None
     registry_url: str | None = None
+    session_arg: str | None = None
     old_ver = None
     root_arg = None
     do_alternatives = False
@@ -1135,6 +1177,12 @@ def main() -> None:  # noqa: C901 (complexity acceptable for CLI validation)
             else:
                 i += 1
                 registry_url = argv[i]
+        elif tok == '--session':
+            if i + 1 >= len(argv):
+                errors.append('--session requires a file path')
+            else:
+                i += 1
+                session_arg = argv[i]
         elif tok == '--old':
             if i + 1 >= len(argv):
                 errors.append('--old requires a value (e.g. --old 1.2.3)')
@@ -1301,6 +1349,8 @@ def main() -> None:  # noqa: C901 (complexity acceptable for CLI validation)
 
     work.mkdir(parents=True, exist_ok=True)
     diff_mode = old_ver is not None
+    session_file = Path(session_arg).resolve() if session_arg else None
+    alternatives_critical = False
 
     # --- Execute requested modes in order ---
     if do_alternatives:
@@ -1336,6 +1386,7 @@ def main() -> None:  # noqa: C901 (complexity acceptable for CLI validation)
             critical = [c for c in concerns if c.startswith(_critical_prefixes)]
 
             if critical:
+                alternatives_critical = True
                 print(
                     '\nALTERNATIVES_RESULT: CRITICAL\n'
                     f'  {len(critical)} high-confidence attack signal(s) found.\n'
@@ -1350,6 +1401,11 @@ def main() -> None:  # noqa: C901 (complexity acceptable for CLI validation)
                     print('\n[STOPPED] --basic and --deeper skipped due to CRITICAL alternatives findings.')
                     do_basic = False
                     do_deeper = False
+                # Write session-update.json even on critical stop so dep_session.py
+                # complete can trigger CRITICAL propagation in the session.
+                if session_file is not None:
+                    _write_session_update(work, [], alternatives_critical=True,
+                                          install_time_code=False, install_time_code_reason='')
             elif concerns:
                 print(
                     '\nALTERNATIVES_RESULT: CONCERNS\n'
@@ -1363,7 +1419,7 @@ def main() -> None:  # noqa: C901 (complexity acceptable for CLI validation)
 
     if do_basic or do_deeper:
         run_analysis(hooks, pkgname, old_ver or 'none', new_ver, root, work, diff_mode, do_deeper,
-                     registry_url=registry_url)
+                     registry_url=registry_url, session_file=session_file)
 
 
 if __name__ == '__main__':
