@@ -104,15 +104,17 @@ When the user wants to add a dependency not currently in the lockfile:
    dependency or stdlib covers?" Record the answer. Every new dep expands attack
    surface; the burden of justification is on adding, not on rejecting.
 
-2. **Identity check** — search the registry for similarly-named packages. Flag
-   any that look like typosquats of the proposed name or of existing deps.
+2. **Alternatives check (run first, before downloading anything)** — run
+   `--alternatives` to check for typosquats, slopsquats, stdlib/framework
+   overlap, and suspiciously similar package names. If this raises serious
+   concerns (e.g. the package name is an edit-distance-1 variant of a popular
+   package, or the stdlib already provides this functionality), **stop here**
+   and present the findings to the user before proceeding. Do not run `--basic`
+   on a package that may be an attack.
 
-3. **Quick preview** — query the registry API for package age, last release
-   date, download count, owner count, and license. Show this before the user
-   confirms deeper analysis. A 2-week-old gem with one owner and no license
-   warrants a "are you sure?" before deeper work.
-
-4. Confirm with the user, then proceed to Phase 2 with `MODE: NEW`.
+3. **Confirm with the user**, then proceed to Phase 2 with `--alternatives
+   --basic` (both flags, so `--alternatives` runs first and `--basic` only
+   runs if the alternatives check passes).
 
 ### Path C — CURRENT mode
 
@@ -177,10 +179,10 @@ You are an isolated security analysis sub-agent. Your context will be discarded
 when you finish (intentional isolation). Do not ask follow-up questions.
 
 **Package**: PKGNAME
+**Registry**: REGISTRY  (e.g. rubygems, pypi, npm)
 **Mode**: UPDATE | NEW | CURRENT
-**Old version**: OLD_VERSION (use `none` for NEW and CURRENT modes)
+**Old version**: OLD_VERSION (omit --old flag for NEW and CURRENT modes)
 **New/current version**: NEW_VERSION
-**Ecosystem**: ECOSYSTEM
 **Project root**: PROJECT_ROOT
 **Scripts**: PROJECT_ROOT/temp/scripts/
 **Thorough mode**: YES | NO
@@ -188,15 +190,33 @@ when you finish (intentional isolation). Do not ask follow-up questions.
 **CRITICAL: Run the analysis script as your first and only Bash call for the
 initial analysis. Do not decompose into individual commands first.**
 
+For UPDATE mode (diff against old version):
 ```bash
-mkdir -p PROJECT_ROOT/temp/PKGNAME-NEW_VERSION && \
 python3 PROJECT_ROOT/temp/scripts/dep_review.py \
-  ECOSYSTEM PKGNAME OLD_VERSION NEW_VERSION PROJECT_ROOT \
+  --from REGISTRY --basic --old OLD_VERSION \
+  --root PROJECT_ROOT PKGNAME NEW_VERSION \
   2>&1 | tee PROJECT_ROOT/temp/PKGNAME-NEW_VERSION/run-log.txt
 ```
 
-Pass `none` as OLD_VERSION for NEW and CURRENT modes. The driver skips the
-version diff and instead runs full health/license/transitive-footprint steps.
+For NEW mode (new dependency — run alternatives check first, then basic):
+```bash
+python3 PROJECT_ROOT/temp/scripts/dep_review.py \
+  --from REGISTRY --alternatives --basic \
+  --root PROJECT_ROOT PKGNAME NEW_VERSION \
+  2>&1 | tee PROJECT_ROOT/temp/PKGNAME-NEW_VERSION/run-log.txt
+```
+
+For CURRENT mode (audit already-installed version):
+```bash
+python3 PROJECT_ROOT/temp/scripts/dep_review.py \
+  --from REGISTRY --basic \
+  --root PROJECT_ROOT PKGNAME CURRENT_VERSION \
+  2>&1 | tee PROJECT_ROOT/temp/PKGNAME-NEW_VERSION/run-log.txt
+```
+
+**NEW mode note**: `--alternatives` runs before `--basic`. If the alternatives
+check reveals a likely typosquat, slopsquat, or stdlib overlap, stop and report
+to the orchestrating agent before `--basic` downloads the package.
 
 **2. Read `run-log.txt`.**
 
@@ -226,6 +246,13 @@ Do not read any further files.
 | `new-deps.txt`, `dep-lockfile-check.txt` | If new runtime deps added |
 | `dep-registry.txt` | If any dep is NOT_IN_LOCKFILE |
 | `transitive-deps.txt` | NEW/CURRENT: always; UPDATE: if new transitive deps |
+
+**UPDATE mode: new transitive deps require alternatives check.**
+If `transitive-deps.txt` lists packages not previously in the lockfile, treat
+each one as NEW mode: run `--alternatives --basic` on it before accepting the
+update. An upstream maintainer may have been tricked into adding a typosquatted
+or slopsquatted dependency, which would then silently enter your project via a
+routine update. Do not skip this even if the direct package looks clean.
 | `provenance.txt` | If MFA unknown or concerning |
 | `summary-scan-LABEL.txt` | If that scan had matches (paths only) |
 
@@ -245,9 +272,12 @@ Record your decision and brief reason.
 
 ```bash
 python3 PROJECT_ROOT/temp/scripts/dep_review.py \
-  ECOSYSTEM PKGNAME OLD_VERSION NEW_VERSION PROJECT_ROOT --deeper \
+  --from REGISTRY --deeper \
+  --root PROJECT_ROOT PKGNAME NEW_VERSION \
   | tee -a PROJECT_ROOT/temp/PKGNAME-NEW_VERSION/run-log.txt
 ```
+
+(`--deeper` reuses the existing `--basic` work dir; it does not re-download.)
 
 Then read: `sandbox-detection.txt`, `reproducible-build.txt`, `source-deep-diff.txt`.
 
