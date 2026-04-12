@@ -152,17 +152,17 @@ Locate scripts in:
 ~/.claude/skills/secure-dependencies/references/scripts/
 ```
 
-Scripts: `analysis_shared.py` (cross-ecosystem), plus ecosystem-specific
-`basic-analysis-ruby.py` and `deeper-analysis-ruby.py`. Always copy all three;
-the ecosystem scripts import from `analysis_shared`.
+Scripts: `analysis_shared.py` (cross-ecosystem utilities), `analysis_driver.py`
+(single orchestration entry point), and one hooks file per ecosystem (e.g.
+`hooks_ruby.py`). Always copy all three relevant files.
 
 ```bash
 mkdir -p PROJECT_ROOT/temp/scripts/
 cp ~/.claude/skills/secure-dependencies/references/scripts/analysis_shared.py \
    PROJECT_ROOT/temp/scripts/
-cp ~/.claude/skills/secure-dependencies/references/scripts/basic-analysis-ruby.py \
+cp ~/.claude/skills/secure-dependencies/references/scripts/analysis_driver.py \
    PROJECT_ROOT/temp/scripts/
-cp ~/.claude/skills/secure-dependencies/references/scripts/deeper-analysis-ruby.py \
+cp ~/.claude/skills/secure-dependencies/references/scripts/hooks_ruby.py \
    PROJECT_ROOT/temp/scripts/
 ```
 
@@ -189,12 +189,12 @@ initial analysis. Do not decompose into individual commands first.**
 
 ```bash
 mkdir -p PROJECT_ROOT/temp/PKGNAME-NEW_VERSION && \
-python3 PROJECT_ROOT/temp/scripts/basic-analysis-ECOSYSTEM.py \
-  PKGNAME OLD_VERSION NEW_VERSION PROJECT_ROOT \
+python3 PROJECT_ROOT/temp/scripts/analysis_driver.py \
+  ECOSYSTEM PKGNAME OLD_VERSION NEW_VERSION PROJECT_ROOT \
   2>&1 | tee PROJECT_ROOT/temp/PKGNAME-NEW_VERSION/run-log.txt
 ```
 
-Pass `none` as OLD_VERSION for NEW and CURRENT modes. The script skips the
+Pass `none` as OLD_VERSION for NEW and CURRENT modes. The driver skips the
 version diff and instead runs full health/license/transitive-footprint steps.
 
 **2. Read `run-log.txt`.**
@@ -243,8 +243,8 @@ Do not read any further files.
 Record your decision and brief reason.
 
 ```bash
-python3 PROJECT_ROOT/temp/scripts/deeper-analysis-ECOSYSTEM.py \
-  PKGNAME OLD_VERSION NEW_VERSION PROJECT_ROOT \
+python3 PROJECT_ROOT/temp/scripts/analysis_driver.py \
+  ECOSYSTEM PKGNAME OLD_VERSION NEW_VERSION PROJECT_ROOT --deeper \
   | tee -a PROJECT_ROOT/temp/PKGNAME-NEW_VERSION/run-log.txt
 ```
 
