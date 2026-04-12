@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-# indepth-analysis-ruby.py — Reproducible-build and deep source analysis.
+# deeper-analysis-ruby.py — Reproducible-build and deeper source analysis.
 #
 # Run AFTER basic-analysis-ruby.py for the same PKGNAME/NEW_VERSION.
-# Usage: python3 indepth-analysis-ruby.py PKGNAME OLD_VERSION NEW_VERSION PROJECT_ROOT
+# Usage: python3 deeper-analysis-ruby.py PKGNAME OLD_VERSION NEW_VERSION PROJECT_ROOT
 #
 # Prints a summary of what was done to stdout.
 # Capture with: python3 ... | tee -a PROJECT_ROOT/temp/PKGNAME-NEW_VERSION/run-log.txt
@@ -443,7 +443,7 @@ def deep_source_comparison(pkgname: str, new_ver: str, work: Path) -> None:
 def main() -> None:
     if len(sys.argv) != 5:
         print(
-            'Usage: indepth-analysis-ruby.py PKGNAME OLD_VERSION NEW_VERSION PROJECT_ROOT',
+            'Usage: deeper-analysis-ruby.py PKGNAME OLD_VERSION NEW_VERSION PROJECT_ROOT',
             file=sys.stderr,
         )
         sys.exit(1)
@@ -459,7 +459,7 @@ def main() -> None:
 
     start_time = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
     print('============================================================')
-    print(' indepth-analysis-ruby.py')
+    print(' deeper-analysis-ruby.py')
     print(f' Package : {pkgname}')
     print(f' Update  : {old_ver} -> {new_ver}')
     print(f' Started : {start_time}')
@@ -493,13 +493,13 @@ def main() -> None:
     print('  Deep comparison saved to source-deep-diff.txt')
 
     # -----------------------------------------------------------------------
-    # Append in-depth addendum to verdict.txt
+    # Append deeper-analysis addendum to verdict.txt
     # -----------------------------------------------------------------------
     timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
     verdict_file = work / 'verdict.txt'
     addendum_lines = [
         '',
-        f'=== IN-DEPTH ADDENDUM ({timestamp}) ===',
+        f'=== DEEPER ANALYSIS ADDENDUM ({timestamp}) ===',
         f'SANDBOX: {sandbox}',
         f'REPRODUCIBLE_BUILD: {repro_result}',
         f'CODE_DIFFS: {code_diffs}',
@@ -517,7 +517,7 @@ def main() -> None:
     # -----------------------------------------------------------------------
     print()
     print('============================================================')
-    print(f' IN-DEPTH SUMMARY: {pkgname} {old_ver} -> {new_ver}')
+    print(f' DEEPER ANALYSIS SUMMARY: {pkgname} {old_ver} -> {new_ver}')
     print('============================================================')
     print()
     print(f'Sandbox used       : {sandbox}')
@@ -527,7 +527,7 @@ def main() -> None:
     if metadata_diffs > 0:
         print(f'  Metadata-only diffs: {metadata_diffs} files (expected)')
     print()
-    print('Updated verdict.txt with in-depth results.')
+    print('Updated verdict.txt with deeper analysis results.')
     print(f'Output directory: {work}')
     print()
     finished = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')

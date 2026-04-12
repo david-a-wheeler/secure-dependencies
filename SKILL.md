@@ -152,13 +152,13 @@ Locate scripts in:
 ~/.claude/skills/secure-dependencies/references/scripts/
 ```
 
-Ruby scripts: `basic-analysis-ruby.py` and `indepth-analysis-ruby.py`.
+Ruby scripts: `basic-analysis-ruby.py` and `deeper-analysis-ruby.py`.
 
 ```bash
 mkdir -p PROJECT_ROOT/temp/scripts/
 cp ~/.claude/skills/secure-dependencies/references/scripts/basic-analysis-ruby.py \
    PROJECT_ROOT/temp/scripts/
-cp ~/.claude/skills/secure-dependencies/references/scripts/indepth-analysis-ruby.py \
+cp ~/.claude/skills/secure-dependencies/references/scripts/deeper-analysis-ruby.py \
    PROJECT_ROOT/temp/scripts/
 ```
 
@@ -226,7 +226,7 @@ Do not read any further files.
 
 **DO NOT read any file whose name starts with `raw-`.**
 
-**6. Decide whether to run in-depth analysis. Run it if ANY of these:**
+**6. Decide whether to run deeper analysis. Run it if ANY of these:**
 - Thorough mode YES
 - Any RISK_FLAGS set
 - Binary files detected
@@ -239,7 +239,7 @@ Do not read any further files.
 Record your decision and brief reason.
 
 ```bash
-python3 PROJECT_ROOT/temp/scripts/indepth-analysis-ECOSYSTEM.py \
+python3 PROJECT_ROOT/temp/scripts/deeper-analysis-ECOSYSTEM.py \
   PKGNAME OLD_VERSION NEW_VERSION PROJECT_ROOT \
   | tee -a PROJECT_ROOT/temp/PKGNAME-NEW_VERSION/run-log.txt
 ```
@@ -300,7 +300,7 @@ RISK_FACTORS:
   increasing: [list or "none"]
   decreasing: [list or "none"]
 
-IN_DEPTH_ANALYSIS:
+DEEPER_ANALYSIS:
   performed: YES | NO
   reason: [if YES: trigger; if NO: why criteria not met]
 
@@ -346,7 +346,7 @@ Adversarial scans: [N clean / X matches — name any non-zero]
 Diff security scans: [N clean / X matches — UPDATE only]
 Source clone: [OK (URL) / SKIPPED: reason / FAILED]
 Reproducible build: [result / SKIPPED: reason]
-In-depth analysis: [YES: reason / NO: reason]
+Deeper analysis: [YES: reason / NO: reason]
 
 Risk factors (increasing): [list or none]
 Risk factors (decreasing): [list or none]
