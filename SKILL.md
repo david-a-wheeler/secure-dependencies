@@ -155,6 +155,45 @@ Spawn one **isolated sub-agent per package**, run **sequentially** (complete
 and discard each before starting the next). Content isolation prevents
 adversarial material in package N from contaminating analysis of package N+1.
 
+### Exhaustive dependency graph traversal
+
+**Never enter Phase 3 or Phase 4 until every new package in the full
+dependency subgraph has been analyzed.** Use a BFS queue:
+
+```
+queue    = {packages identified in Phase 1}
+analyzed = {packages already present in the current lockfile}  ← assumed accepted
+
+while queue is not empty:
+    pkg = dequeue(queue)
+    if pkg in analyzed: continue          ← cycle guard / already-known
+    run sub-agent for pkg
+    analyzed.add(pkg)
+    for each dep in report.TRANSITIVE_DEPS.not_in_lockfile:
+        if dep not in analyzed: queue.add(dep)
+
+→ present Phase 3 cards for everything in (analyzed − original lockfile)
+→ only then Phase 4
+```
+
+**Depth confirmation (not a hard stop):** If the queue grows beyond 10
+packages that were not in the original lockfile, pause and ask the user:
+
+> "Analyzing PKGNAME has uncovered N additional packages not currently in
+> your lockfile: [list]. This is a large transitive footprint for a single
+> dependency. Continue analyzing all of them, or stop and reconsider
+> whether to add PKGNAME at all?"
+
+A large transitive footprint is itself a risk signal; surface it explicitly
+rather than silently processing it. The user may decide the dependency is not
+worth the surface area. Continue only with explicit confirmation.
+
+**CRITICAL propagation:** If any package anywhere in the graph receives
+`ALTERNATIVES_RESULT: CRITICAL` or `RISK_ASSESSMENT: CRITICAL`, the entire
+graph is tainted. Stop immediately, report all findings so far, and recommend
+against installing any package in the set — including the root package that
+introduced the problematic transitive dep.
+
 ### Step 2-0: Prepare analysis scripts (once per session)
 
 Locate scripts in:
@@ -256,18 +295,13 @@ Do not read any further files.
 | `provenance.txt` | If MFA unknown or concerning |
 | `summary-scan-LABEL.txt` | If that scan had matches (paths only) |
 
-**UPDATE mode — new transitive deps must be reported, not analyzed here.**
-If `transitive-deps.txt` lists packages not previously in the lockfile, list
-them in your report under `TRANSITIVE_DEPS.not_in_lockfile`. Do NOT analyze
-them yourself — your scope is one package only. The orchestrating agent will
-spawn a separate NEW-mode sub-agent for each one. An upstream maintainer may
-have been tricked into adding a typosquatted or slopsquatted dep; that dep
-would then silently enter your project via a routine update.
-
-**CURRENT mode — suspicious transitive deps must be reported.**
-If `transitive-deps.txt` lists packages with unusual names, very low download
-counts, or recent ownership changes, flag them in `TRANSITIVE_DEPS.concerns`.
-The orchestrating agent will decide whether to spawn additional sub-agents.
+**All modes — report new transitive deps; do not analyze them yourself.**
+Your scope is exactly one package. List every package from `transitive-deps.txt`
+that is not in the current lockfile under `TRANSITIVE_DEPS.not_in_lockfile`.
+For CURRENT mode, also flag packages with unusual names, very low download
+counts, or recent ownership changes under `TRANSITIVE_DEPS.concerns`.
+The orchestrating agent drives the BFS queue; it will spawn a fresh NEW-mode
+sub-agent for each package you report.
 
 **DO NOT read any file whose name starts with `raw-`.**
 
@@ -366,19 +400,17 @@ SUMMARY: [2-3 sentences: findings and reason for recommendation]
 
 ### After Each Sub-Agent Completes
 
-1. Record hash, recommendation, key findings.
-2. Update the session progress file.
-3. **Check for newly discovered deps requiring follow-on analysis:**
-   - **UPDATE mode**: read `TRANSITIVE_DEPS.not_in_lockfile` from the report.
-     For every package listed, add it to the front of the analysis queue as
-     **NEW mode** (with `--alternatives --basic`). Analyze these before
-     moving on to the next originally-planned UPDATE package. If `--alternatives`
-     returns CRITICAL for any of them, stop and report to the user before
-     proceeding further — do not install the parent UPDATE either.
-   - **CURRENT mode**: read `TRANSITIVE_DEPS.concerns`. For any flagged
-     packages, ask the user whether to deep-dive them before continuing.
-4. Discard sub-agent; spawn a fresh one for the next package.
-5. Never read `raw-*` files.
+1. Record hash, recommendation, and key findings in the progress file.
+2. Read `TRANSITIVE_DEPS.not_in_lockfile` from the report. For every package
+   listed that is not already in `analyzed`, add it to the BFS queue as
+   **NEW mode** (`--alternatives --basic`). This applies regardless of whether
+   the current package was analyzed as UPDATE, NEW, or CURRENT.
+3. Check depth: if the queue addition brings total new packages (those not in
+   the original lockfile) above 10, pause for user confirmation before
+   continuing (see depth confirmation rule above).
+4. If any CRITICAL result was found, stop the entire queue and report.
+5. Discard sub-agent; spawn a fresh one for the next package in the queue.
+6. Never read `raw-*` files.
 
 ---
 
