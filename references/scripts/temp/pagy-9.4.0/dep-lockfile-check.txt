@@ -1,2 +1,0 @@
-=== Lockfile check ===
-(lockfile or dep list unavailable)

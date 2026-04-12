@@ -1,7 +1,0 @@
-=== OpenSSF Best Practices Badge: pagy ===
-SOURCE_URL_QUERIED: https://github.com/ddnexus/pagy
-BADGE_FOUND: yes
-BADGE_PROJECT_ID: 4329
-BADGE_LEVEL (metal): passing
-METAL_TIERED_PERCENTAGE: 111 (passing=100, silver=200, gold=300)
-BASELINE_TIERED_PERCENTAGE: 0 (baseline_1=100, baseline_2=200, baseline_3=300)

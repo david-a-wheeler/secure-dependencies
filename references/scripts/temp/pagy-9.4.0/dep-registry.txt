@@ -1,2 +1,0 @@
-=== Registry metadata for new-to-lockfile deps ===
-(no new-to-lockfile deps)

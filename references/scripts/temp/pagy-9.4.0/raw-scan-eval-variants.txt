@@ -1,1 +1,0 @@
-/home/dwheeler/.claude/skills/secure-dependencies/references/scripts/temp/pagy-9.4.0/unpacked/pagy-9.4.0/lib/optimist.rb:100:      # instance_eval(&b) if b # can't take arguments

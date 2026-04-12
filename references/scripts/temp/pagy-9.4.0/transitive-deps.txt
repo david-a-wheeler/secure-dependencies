@@ -1,6 +1,0 @@
-=== Transitive dependency footprint: pagy 9.4.0 ===
-TOTAL_TRANSITIVE_DEPS: 0
-NEW_NOT_IN_LOCKFILE: 0
-
-NEW_PACKAGES (not in current lockfile):
-  none

@@ -1,2 +1,0 @@
-label=zero-width-chars
-match_count=0

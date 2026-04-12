@@ -1,2 +1,0 @@
-/home/dwheeler/.claude/skills/secure-dependencies/references/scripts/temp/pagy-9.4.0/unpacked/pagy-9.4.0/lib/pagy/calendar.rb:43:      @conf  = Marshal.load(Marshal.dump(conf))  # store a copy
-/home/dwheeler/.claude/skills/secure-dependencies/references/scripts/temp/pagy-9.4.0/unpacked/pagy-9.4.0/lib/pagy/calendar.rb:70:      conf        = Marshal.load(Marshal.dump(@conf))
