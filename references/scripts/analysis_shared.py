@@ -216,15 +216,24 @@ def blind_scan(label: str, pattern: str, target: Path, work: Path) -> int:
     summary_file = work / f'summary-scan-{label}.txt'
 
     rc, stdout, stderr = run_cmd(['grep', '-rnP', pattern, str(target)], timeout=60)
-    raw_content = stdout + (stderr if rc > 1 else '')
-    raw_file.write_text(raw_content, encoding='utf-8', errors='replace')
 
-    count = len([line for line in raw_content.splitlines() if line])
+    if rc > 1:
+        # grep error (rc==2+): pattern failure or other error — not a match result
+        err_msg = sanitize(stderr.strip())
+        raw_file.write_text(f'GREP_ERROR: {stderr}', encoding='utf-8', errors='replace')
+        summary_file.write_text(
+            f'label={label}\nmatch_count=0\nGREP_ERROR: {err_msg}\n', encoding='utf-8'
+        )
+        return 0
+
+    # rc==0 means matches found; rc==1 means no matches — both are normal grep exits
+    raw_file.write_text(stdout, encoding='utf-8', errors='replace')
+    count = len([line for line in stdout.splitlines() if line])
     summary_lines = [f'label={label}', f'match_count={count}']
     if count > 0:
         summary_lines.append('files_with_matches:')
         seen: set[str] = set()
-        for line in raw_content.splitlines():
+        for line in stdout.splitlines():
             if ':' in line:
                 fname = line.split(':', 1)[0]
                 if fname not in seen:
@@ -268,9 +277,9 @@ def cmd_available(name: str) -> bool:
 
 ADVERSARIAL_PATTERNS: list[tuple[str, str]] = [
     ('bidi-controls',
-     r'[\u202a-\u202e\u2066-\u2069\u200e\u200f]'),
+     '[\u202a-\u202e\u2066-\u2069\u200e\u200f]'),
     ('zero-width-chars',
-     r'[\u200b-\u200d\ufeff\u00ad\u2060]'),
+     '[\u200b-\u200d\ufeff\u00ad\u2060]'),
     ('non-ascii-in-identifiers',
      r'[a-zA-Z0-9_][\x80-\xFF]+[a-zA-Z0-9_]'),
     ('prompt-injection',
@@ -344,18 +353,26 @@ def clone_source_repo(
             f'SOURCE_URL: {sanitize(source_url)}',
         ])
         source_dir = work / 'source'
-        rc_clone, _, clone_err = run_cmd(
-            ['git', 'clone', '--depth', '1', '--branch', tag, source_url, str(source_dir)],
-            timeout=120,
-        )
-        (work / 'raw-git-clone-output.txt').write_text(
-            clone_err, encoding='utf-8', errors='replace'
-        )
-        if rc_clone == 0:
-            clone_lines.append('CLONE_STATUS: OK')
+        if source_dir.exists() and any(source_dir.iterdir()):
+            # Already cloned in a previous run — reuse existing checkout
+            (work / 'raw-git-clone-output.txt').write_text(
+                'Reused existing clone from previous run.\n', encoding='utf-8'
+            )
+            clone_lines.append('CLONE_STATUS: OK (reused)')
             clone_ok = True
         else:
-            clone_lines.append('CLONE_STATUS: FAILED')
+            rc_clone, _, clone_err = run_cmd(
+                ['git', 'clone', '--depth', '1', '--branch', tag, source_url, str(source_dir)],
+                timeout=120,
+            )
+            (work / 'raw-git-clone-output.txt').write_text(
+                clone_err, encoding='utf-8', errors='replace'
+            )
+            if rc_clone == 0:
+                clone_lines.append('CLONE_STATUS: OK')
+                clone_ok = True
+            else:
+                clone_lines.append('CLONE_STATUS: FAILED')
 
     (work / 'clone-status.txt').write_text('\n'.join(clone_lines) + '\n', encoding='utf-8')
     return clone_ok, version_tag
@@ -606,12 +623,44 @@ def compute_diff(
         line for line in diff_out.splitlines()
         if line.startswith('Only in') or line.startswith('diff ')
     ]
-    changed_files_text = '\n'.join(sanitize(line) for line in file_headers)
+
+    # Extract short relative filenames for human-readable display.
+    # diff header: "diff -r [--exclude ...] OLD_PATH NEW_PATH"
+    # Only-in:     "Only in DIR: FILENAME"
+    old_prefix = str(old_dir).rstrip('/') + '/'
+    new_prefix = str(new_dir).rstrip('/') + '/'
+    short_names: list[str] = []
+    for line in file_headers:
+        if line.startswith('diff '):
+            parts = line.split()
+            # Last token is the new path; second-to-last is the old path
+            old_path = parts[-2] if len(parts) >= 2 else ''
+            rel = old_path.removeprefix(old_prefix) if old_path.startswith(old_prefix) else old_path
+            short_names.append(sanitize(rel))
+        elif line.startswith('Only in '):
+            # "Only in /path/dir: filename"
+            rest = line[len('Only in '):]
+            if ': ' in rest:
+                dir_part, fname = rest.split(': ', 1)
+                dir_part = dir_part.rstrip('/')
+                full = dir_part + '/' + fname
+                if full.startswith(old_prefix):
+                    short_names.append(sanitize(full.removeprefix(old_prefix)) + ' (removed)')
+                elif full.startswith(new_prefix):
+                    short_names.append(sanitize(full.removeprefix(new_prefix)) + ' (added)')
+                else:
+                    short_names.append(sanitize(full))
+            else:
+                short_names.append(sanitize(line))
+        else:
+            short_names.append(sanitize(line))
+
+    changed_files_text = '\n'.join(short_names)
     (work / 'diff-filenames.txt').write_text(
         '\n'.join([
             f'DIFF_TOTAL_LINES: {diff_lines}', '',
-            'Changed/added/removed files (sanitized filenames only):',
-        ] + [sanitize(line) for line in file_headers]) + '\n',
+            'Changed/added/removed files (relative paths):',
+        ] + short_names) + '\n',
         encoding='utf-8',
     )
     return diff_lines, changed_files_text

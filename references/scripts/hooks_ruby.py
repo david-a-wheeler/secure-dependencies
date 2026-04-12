@@ -365,15 +365,24 @@ def fetch_all_registry_data(
     )
 
     # Gems endpoint — MFA
+    # RubyGems stores MFA status in metadata.rubygems_mfa_required (a string "true"/"false")
+    # rather than a top-level boolean field.
     api_gem_data = shared.http_get(f'https://rubygems.org/api/v1/gems/{pkgname}.json')
     if api_gem_data:
         try:
             api_info = json.loads(api_gem_data.decode('utf-8', errors='replace'))
+            # Try top-level boolean first (older API format), then metadata string
             mfa_val = api_info.get('mfa_required')
             if mfa_val is True:
                 mfa_status = 'true'
             elif mfa_val is False:
                 mfa_status = 'false'
+            else:
+                meta_mfa = api_info.get('metadata', {}).get('rubygems_mfa_required', '')
+                if isinstance(meta_mfa, str) and meta_mfa.lower() == 'true':
+                    mfa_status = 'true'
+                elif isinstance(meta_mfa, str) and meta_mfa.lower() == 'false':
+                    mfa_status = 'false'
         except (ValueError, KeyError):
             pass
     prov_lines.extend([f'MFA_REQUIRED: {shared.sanitize(mfa_status)}', ''])
@@ -597,8 +606,37 @@ def get_diff_excludes() -> list[str]:
 
 
 def get_pkg_src_excludes() -> tuple[re.Pattern, re.Pattern]:
-    """Returns (pkg_excludes, src_excludes) compiled regex patterns."""
-    return re.compile(r'^\.git/'), re.compile(r'^\.git/')
+    """Returns (pkg_excludes, src_excludes) compiled regex patterns.
+
+    pkg_excludes: paths in the package to ignore during comparison (e.g.
+      standard files always present in gems but not necessarily in the gem/
+      subdirectory of a monorepo source).
+    src_excludes: paths in the source clone to ignore.
+    """
+    # Gems always include a license file; in monorepos it lives at the repo root,
+    # not inside the gem/ subdirectory, so exclude it from the "extra" check.
+    # Note: pattern is applied to relative paths WITHOUT a leading "./" prefix.
+    pkg_ex = re.compile(
+        r'^\.git/'
+        r'|^LICEN[SC]E(?:\.[a-zA-Z]+)?$'
+        r'|^COPYING(?:\.[a-zA-Z]+)?$'
+    )
+    src_ex = re.compile(r'^\.git/')
+    return pkg_ex, src_ex
+
+
+def find_source_gem_root(source_dir: Path) -> Path:
+    """Return the subdirectory of source_dir that contains the gem content.
+
+    Some gem repos keep the gem in a ``gem/`` subdirectory (pagy, rails, etc.)
+    rather than at the repo root. If a gemspec is found one level down, use
+    that subdirectory; otherwise fall back to source_dir itself.
+    """
+    # Look for a direct subdirectory that contains a .gemspec file
+    for candidate in source_dir.iterdir():
+        if candidate.is_dir() and any(candidate.glob('*.gemspec')):
+            return candidate
+    return source_dir
 
 
 def get_deep_source_config() -> dict:

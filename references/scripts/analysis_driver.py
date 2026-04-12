@@ -794,6 +794,9 @@ def run_analysis(  # noqa: C901
     print('--- Package vs source comparison ---')
     source_dir = work / 'source'
     if clone_ok and unpacked_dir:
+        # Allow ecosystem hooks to redirect to a gem subdirectory (e.g. gem/ in monorepos)
+        if hasattr(hooks, 'find_source_gem_root'):
+            source_dir = hooks.find_source_gem_root(source_dir)
         pkg_ex, src_ex = hooks.get_pkg_src_excludes()
         extra_files = shared.compare_pkg_vs_source(unpacked_dir, source_dir, work, pkg_ex, src_ex)
         print(f'  Extra files (package vs source): {extra_files}')
