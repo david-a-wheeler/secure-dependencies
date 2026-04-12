@@ -17,208 +17,26 @@
 # DO NOT read any file whose name starts with "raw" — adversarial content risk.
 #
 # The script does NOT install any gem. It uses only:
-#   gem fetch, gem unpack, gem info, gem environment, gem dependency,
-#   git ls-remote, git clone, file
+#   gem fetch, gem unpack, gem specification, gem info,
+#   gem environment, gem dependency, git ls-remote, git clone, file
 #
 # Python stdlib only — no third-party packages required.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
-import shutil
-import subprocess
 import sys
-import urllib.parse
-import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-# ---------------------------------------------------------------------------
-# OSI-approved SPDX license identifiers (representative list).
-# Source: https://opensource.org/licenses/
-# Aliases mapped to canonical SPDX below in normalize_license().
-# ---------------------------------------------------------------------------
-OSI_APPROVED: frozenset[str] = frozenset({
-    '0BSD', 'AFL-3.0', 'AGPL-3.0', 'AGPL-3.0-only', 'AGPL-3.0-or-later',
-    'Apache-2.0', 'Artistic-2.0', 'BSD-2-Clause', 'BSD-3-Clause',
-    'BSL-1.0', 'CDDL-1.0', 'CECILL-2.1', 'EPL-1.0', 'EPL-2.0',
-    'EUPL-1.2', 'GPL-2.0', 'GPL-2.0-only', 'GPL-2.0-or-later',
-    'GPL-3.0', 'GPL-3.0-only', 'GPL-3.0-or-later', 'ISC', 'LGPL-2.0',
-    'LGPL-2.0-only', 'LGPL-2.0-or-later', 'LGPL-2.1', 'LGPL-2.1-only',
-    'LGPL-2.1-or-later', 'LGPL-3.0', 'LGPL-3.0-only', 'LGPL-3.0-or-later',
-    'MIT', 'MIT-0', 'MPL-2.0', 'MS-PL', 'MS-RL', 'MulanPSL-2.0',
-    'NCSA', 'OSL-3.0', 'PSF-2.0', 'Python-2.0', 'Ruby', 'Unlicense',
-    'UPL-1.0', 'W3C', 'Zlib',
-})
-
-# Common gem license strings that aren't canonical SPDX
-_LICENSE_ALIASES: dict[str, str] = {
-    'apache 2.0': 'Apache-2.0',
-    'apache2': 'Apache-2.0',
-    'apache license 2.0': 'Apache-2.0',
-    'apache license, version 2.0': 'Apache-2.0',
-    'bsd': 'BSD-3-Clause',
-    'bsd-2': 'BSD-2-Clause',
-    'bsd-3': 'BSD-3-Clause',
-    'gplv2': 'GPL-2.0-or-later',
-    'gplv3': 'GPL-3.0-or-later',
-    'gpl2': 'GPL-2.0-or-later',
-    'gpl3': 'GPL-3.0-or-later',
-    'lgplv2': 'LGPL-2.1-or-later',
-    'lgpl': 'LGPL-2.1-or-later',
-    'mpl2': 'MPL-2.0',
-    'new bsd': 'BSD-3-Clause',
-    'simplified bsd': 'BSD-2-Clause',
-    '2-clause bsd': 'BSD-2-Clause',
-    '3-clause bsd': 'BSD-3-Clause',
-}
-
-
-def normalize_license(raw: str) -> str:
-    """Return canonical SPDX id or the original string lowercased for lookup."""
-    stripped = raw.strip().rstrip('.')
-    lower = stripped.lower()
-    if lower in _LICENSE_ALIASES:
-        return _LICENSE_ALIASES[lower]
-    return stripped  # return as-is; caller checks against OSI_APPROVED
-
-
-def license_osi_status(identifier: str) -> tuple[str, str]:
-    """Return (normalized_id, 'YES'|'NO'|'UNKNOWN')."""
-    norm = normalize_license(identifier)
-    if norm in OSI_APPROVED:
-        return norm, 'YES'
-    # Check without trailing -only/-or-later suffix
-    base = re.sub(r'-(only|or-later)$', '', norm)
-    if base in OSI_APPROVED:
-        return norm, 'YES'
-    if norm:
-        return norm, 'NO'
-    return 'MISSING', 'NO'
-
+sys.path.insert(0, str(Path(__file__).parent))
+import analysis_shared as shared
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Ruby-specific scan patterns
+# ADVERSARIAL_PATTERNS (bidi, zero-width, prompt injection) live in shared.
 # ---------------------------------------------------------------------------
-
-def sanitize(text: str) -> str:
-    """Replace C0/C1 control chars with '?'.
-
-    Strips bidi controls and zero-width chars used for visual spoofing
-    or prompt injection before any text reaches the AI.
-    """
-    result = []
-    for ch in text:
-        cp = ord(ch)
-        if (0x00 <= cp <= 0x1F) or (0x7F <= cp <= 0x9F):
-            result.append('?')
-        else:
-            result.append(ch)
-    return ''.join(result)
-
-
-def run_cmd(
-    args: list[str],
-    cwd: str | Path | None = None,
-    timeout: int = 120,
-    capture: bool = True,
-) -> tuple[int, str, str]:
-    """Run a subprocess; return (returncode, stdout, stderr). Never raises."""
-    try:
-        result = subprocess.run(
-            args,
-            cwd=str(cwd) if cwd else None,
-            capture_output=capture,
-            text=True,
-            timeout=timeout,
-        )
-        return result.returncode, result.stdout or '', result.stderr or ''
-    except subprocess.TimeoutExpired:
-        return 1, '', f'TIMEOUT after {timeout}s'
-    except FileNotFoundError:
-        return 1, '', f'command not found: {args[0]}'
-    except Exception as exc:  # noqa: BLE001
-        return 1, '', str(exc)
-
-
-def sha256_file(path: Path) -> str:
-    """Return hex SHA-256 of a file."""
-    h = hashlib.sha256()
-    with open(path, 'rb') as f:
-        for chunk in iter(lambda: f.read(65536), b''):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def blind_scan(label: str, pattern: str, target: Path, work: Path) -> int:
-    """Run grep; save raw matches (DO NOT read); write sanitized summary.
-
-    Returns number of matching lines.
-    """
-    raw_file = work / f'raw-scan-{label}.txt'
-    summary_file = work / f'summary-scan-{label}.txt'
-
-    rc, stdout, stderr = run_cmd(['grep', '-rnP', pattern, str(target)], timeout=60)
-    raw_content = stdout + (stderr if rc > 1 else '')
-    raw_file.write_text(raw_content, encoding='utf-8', errors='replace')
-
-    count = len([l for l in raw_content.splitlines() if l])
-    summary_lines = [f'label={label}', f'match_count={count}']
-    if count > 0:
-        summary_lines.append('files_with_matches:')
-        seen: set[str] = set()
-        for line in raw_content.splitlines():
-            if ':' in line:
-                fname = line.split(':', 1)[0]
-                if fname not in seen:
-                    seen.add(fname)
-                    summary_lines.append(sanitize(fname))
-    summary_file.write_text('\n'.join(summary_lines) + '\n', encoding='utf-8')
-    return count
-
-
-def http_get(url: str, timeout: int = 15) -> bytes | None:
-    """Fetch a URL; return bytes or None on error."""
-    try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp:
-            return resp.read()
-    except Exception:  # noqa: BLE001
-        return None
-
-
-def days_since(date_str: str) -> int | None:
-    """Parse an ISO-8601 date string and return days elapsed, or None."""
-    try:
-        m = re.search(r'(\d{4}-\d{2}-\d{2})', date_str)
-        if not m:
-            return None
-        dt = datetime.strptime(m.group(1), '%Y-%m-%d').replace(tzinfo=timezone.utc)
-        return (datetime.now(timezone.utc) - dt).days
-    except (ValueError, OverflowError):
-        return None
-
-
-# ---------------------------------------------------------------------------
-# Scan pattern dictionaries
-# Patterns vary structure from run to run to prevent adversary bypass.
-# ---------------------------------------------------------------------------
-
-ADVERSARIAL_PATTERNS: list[tuple[str, str]] = [
-    ('bidi-controls',
-     r'[\u202a-\u202e\u2066-\u2069\u200e\u200f]'),
-    ('zero-width-chars',
-     r'[\u200b-\u200d\ufeff\u00ad\u2060]'),
-    ('non-ascii-in-identifiers',
-     r'[a-zA-Z0-9_][\x80-\xFF]+[a-zA-Z0-9_]'),
-    ('prompt-injection',
-     r'(?i)(?:disregard\s+(?:prior|previous|earlier|above)\s+(?:instructions?|rules?|constraints?)'
-     r'|you\s+(?:must|should|shall|are\s+required\s+to)\s+(?:approve|skip|allow|install|bypass|ignore)'
-     r'|new\s+(?:directives?|instructions?)\s*:'
-     r'|(?:as|being)\s+an?\s+(?:AI|LLM|assistant|language\s+model)\b)'),
-    ('long-lines', r'.{480,}'),
-]
 
 DANGEROUS_PATTERNS: list[tuple[str, str]] = [
     ('eval-variants',
@@ -257,6 +75,18 @@ DIFF_PATTERNS: list[tuple[str, str]] = [
 
 
 # ---------------------------------------------------------------------------
+# Ruby-specific helper
+# ---------------------------------------------------------------------------
+
+def extract_source_url(gemspec_text: str) -> str:
+    """Extract source/homepage URL from gemspec text."""
+    m = re.search(
+        r'(?:source_code_uri|homepage_uri|homepage)\s*=\s*["\']([^"\']+)', gemspec_text
+    )
+    return m.group(1).strip() if m else ''
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -274,7 +104,7 @@ def main() -> None:  # noqa: C901
     work = root / 'temp' / f'{pkgname}-{new_ver}'
     work.mkdir(parents=True, exist_ok=True)
 
-    # Diff mode: when old_ver is 'none', skip Steps 8-10 (no previous version)
+    # When old_ver is 'none', skip old-version download, diff, and diff scans
     diff_mode = old_ver.lower() != 'none'
     mode_label = 'UPDATE' if diff_mode else 'NEW/CURRENT'
 
@@ -299,24 +129,26 @@ def main() -> None:  # noqa: C901
         print(f'  [FAIL] {tag}')
 
     # -----------------------------------------------------------------------
-    # Step 1: Download new version
+    # Download: PKGNAME VERSION
     # -----------------------------------------------------------------------
-    print(f'--- Step 1: Download {pkgname} {new_ver} ---')
+    print(f'--- Download: {pkgname} {new_ver} ---')
     unpacked_dir_base = work / 'unpacked'
     unpacked_dir_base.mkdir(exist_ok=True)
 
     gem_file = work / f'{pkgname}-{new_ver}.gem'
     sha256 = ''
 
-    rc, _, err = run_cmd(['gem', 'fetch', pkgname, '-v', new_ver], cwd=work)
+    rc, _, err = shared.run_cmd(['gem', 'fetch', pkgname, '-v', new_ver], cwd=work)
     if rc == 0 and gem_file.is_file():
-        sha256 = sha256_file(gem_file)
+        sha256 = shared.sha256_file(gem_file)
         (work / 'package-hash.txt').write_text(
             f'{sha256}  {pkgname}-{new_ver}.gem\n', encoding='utf-8'
         )
         print(f'  Downloaded: {gem_file}')
         print(f'  SHA256: {sha256}')
-        rc2, _, _ = run_cmd(['gem', 'unpack', str(gem_file), '--target', str(unpacked_dir_base)])
+        rc2, _, _ = shared.run_cmd(
+            ['gem', 'unpack', str(gem_file), '--target', str(unpacked_dir_base)]
+        )
         if rc2 == 0:
             print(f'  Unpacked: {unpacked_dir_base}/{pkgname}-{new_ver}/')
         else:
@@ -324,7 +156,7 @@ def main() -> None:  # noqa: C901
     else:
         note_failure('gem-fetch-new')
         print(f'  ERROR: gem fetch failed for {pkgname}-{new_ver}')
-        print(f'  stderr: {sanitize(err[:200])}')
+        print(f'  stderr: {shared.sanitize(err[:200])}')
         (work / 'package-hash.txt').write_text('ERROR: gem fetch failed\n', encoding='utf-8')
 
     unpacked_dir = unpacked_dir_base / f'{pkgname}-{new_ver}'
@@ -333,17 +165,19 @@ def main() -> None:  # noqa: C901
     # Fall back to extracting from metadata.gz via `gem specification`.
     gemspec_file = unpacked_dir / f'{pkgname}.gemspec'
     if not gemspec_file.is_file() and gem_file.is_file():
-        rc_spec, spec_out, _ = run_cmd(['gem', 'specification', str(gem_file), '--ruby'])
+        rc_spec, spec_out, _ = shared.run_cmd(
+            ['gem', 'specification', str(gem_file), '--ruby']
+        )
         if rc_spec == 0 and spec_out.strip():
             extracted = work / 'gemspec.txt'
             extracted.write_text(spec_out, encoding='utf-8', errors='replace')
             gemspec_file = extracted
 
     # -----------------------------------------------------------------------
-    # Step 2: Read and save gemspec
+    # Manifest analysis
     # -----------------------------------------------------------------------
     print()
-    print('--- Step 2: Gemspec ---')
+    print('--- Manifest analysis ---')
     extensions = 'NO'
     executables = 'NO'
     executables_list = ''
@@ -351,6 +185,8 @@ def main() -> None:  # noqa: C901
     has_rakefile_tasks = 'NO'
     runtime_deps_text = ''
     gemspec_license_raw = ''
+    source_url = ''
+    gemspec_text = ''
 
     if gemspec_file.is_file():
         dest_gemspec = work / 'gemspec.txt'
@@ -370,7 +206,7 @@ def main() -> None:  # noqa: C901
         exec_lines = [l for l in gemspec_text.splitlines() if 'executables' in l]
         if exec_lines:
             executables = 'YES'
-            executables_list = sanitize('; '.join(exec_lines[:3]))
+            executables_list = shared.sanitize('; '.join(exec_lines[:3]))
             manifest_lines.extend(['HAS_EXECUTABLES: YES', f'EXECUTABLES_LINES: {executables_list}'])
         else:
             manifest_lines.append('HAS_EXECUTABLES: NO')
@@ -389,32 +225,32 @@ def main() -> None:  # noqa: C901
                ('add_dependency' in l and 'development' not in l)
         ]
         if dep_lines:
-            runtime_deps_text = '\n'.join(sanitize(l) for l in dep_lines)
-            manifest_lines.extend(sanitize(l) for l in dep_lines)
+            runtime_deps_text = '\n'.join(shared.sanitize(l) for l in dep_lines)
+            manifest_lines.extend(shared.sanitize(l) for l in dep_lines)
         else:
             manifest_lines.append('  (none)')
 
         manifest_lines.extend(['', 'DEV_DEPS:'])
         dev_lines = [l for l in gemspec_text.splitlines() if 'add_development_dependency' in l]
-        manifest_lines.extend(sanitize(l) for l in dev_lines) if dev_lines else manifest_lines.append('  (none)')
+        (manifest_lines.extend(shared.sanitize(l) for l in dev_lines)
+         if dev_lines else manifest_lines.append('  (none)'))
 
         hp_match = re.search(
             r'(?:homepage|source_code_uri|homepage_uri)\s*=\s*["\']([^"\']+)', gemspec_text
         )
-        homepage_val = sanitize(hp_match.group(1)) if hp_match else '(not found)'
+        homepage_val = shared.sanitize(hp_match.group(1)) if hp_match else '(not found)'
         manifest_lines.extend(['', f'HOMEPAGE: {homepage_val}'])
 
         auth_match = re.search(r'authors?\s*=\s*([^\n]+)', gemspec_text)
-        authors_val = sanitize(auth_match.group(1)[:200]) if auth_match else '(not found)'
+        authors_val = shared.sanitize(auth_match.group(1)[:200]) if auth_match else '(not found)'
         manifest_lines.append(f'AUTHORS: {authors_val}')
 
-        # Extract license from gemspec
-        lic_match = re.search(
-            r'\.licenses?\s*=\s*\[?["\']([^"\']+)["\']', gemspec_text
-        )
+        lic_match = re.search(r'\.licenses?\s*=\s*\[?["\']([^"\']+)["\']', gemspec_text)
         if lic_match:
             gemspec_license_raw = lic_match.group(1).strip()
-        manifest_lines.extend(['', f'LICENSE_DECLARED: {sanitize(gemspec_license_raw) or "(not declared)"}'])
+        manifest_lines.extend(
+            ['', f'LICENSE_DECLARED: {shared.sanitize(gemspec_license_raw) or "(not declared)"}']
+        )
 
         manifest_lines.append('')
         rakefile = unpacked_dir / 'Rakefile'
@@ -436,22 +272,24 @@ def main() -> None:  # noqa: C901
         print(f'  Executables: {executables}')
         print(f'  Post-install message: {post_install_msg}')
         print(f'  Rakefile install tasks: {has_rakefile_tasks}')
-        print(f'  License (gemspec): {sanitize(gemspec_license_raw) or "(not declared)"}')
+        print(f'  License (gemspec): {shared.sanitize(gemspec_license_raw) or "(not declared)"}')
+
+        source_url = extract_source_url(gemspec_text)
     else:
         note_failure('gemspec-missing')
         (work / 'manifest-analysis.txt').write_text('ERROR: gemspec not found\n', encoding='utf-8')
         print('  ERROR: gemspec not found')
 
     # -----------------------------------------------------------------------
-    # Step 3: Blind scans on new version
+    # Adversarial and dangerous-code scans
     # -----------------------------------------------------------------------
     print()
-    print('--- Step 3: Blind scans ---')
+    print('--- Adversarial and dangerous-code scans ---')
     total_matches = 0
 
     if unpacked_dir.is_dir():
-        for label, pattern in ADVERSARIAL_PATTERNS + DANGEROUS_PATTERNS:
-            n = blind_scan(label, pattern, unpacked_dir, work)
+        for label, pattern in shared.ADVERSARIAL_PATTERNS + DANGEROUS_PATTERNS:
+            n = shared.blind_scan(label, pattern, unpacked_dir, work)
             total_matches += n
             if n > 0:
                 print(f'  {label}: {n} matches  [see summary-scan-{label}.txt]')
@@ -464,247 +302,82 @@ def main() -> None:  # noqa: C901
         print('  WARNING: unpacked dir not found; all scans skipped')
 
     # -----------------------------------------------------------------------
-    # Step 4: Source repository
+    # Source repository clone
     # -----------------------------------------------------------------------
     print()
-    print('--- Step 4: Source repository ---')
-    source_url = ''
-    clone_ok = False
-    version_tag = ''
-
-    if gemspec_file.is_file():
-        gemspec_text = gemspec_file.read_text(encoding='utf-8', errors='replace')
-        m = re.search(
-            r'(?:source_code_uri|homepage_uri|homepage)\s*=\s*["\']([^"\']+)', gemspec_text
-        )
-        if m:
-            source_url = m.group(1).strip()
-
-    (work / 'source-url.txt').write_text(sanitize(source_url) + '\n', encoding='utf-8')
-
-    clone_lines: list[str] = []
-    if not source_url:
-        clone_lines.append('CLONE_STATUS: SKIPPED (no source URL in gemspec)')
-    else:
-        rc_ls, ls_out, _ = run_cmd(['git', 'ls-remote', '--tags', source_url], timeout=30)
-        tag = ''
-        if rc_ls == 0:
-            escaped_ver = re.escape(new_ver)
-            for line in ls_out.splitlines():
-                m_tag = re.search(r'refs/tags/([^\^]+)', line)
-                if not m_tag:
-                    continue
-                candidate = m_tag.group(1)
-                if re.search(
-                    rf'(?:v?|{re.escape(pkgname)}[-_]?){escaped_ver}(?:[^0-9]|$)',
-                    candidate, re.IGNORECASE,
-                ):
-                    tag = candidate
-                    break
-            if not tag:
-                for line in ls_out.splitlines():
-                    m_tag = re.search(r'refs/tags/([^\^]+)', line)
-                    if m_tag and re.search(rf'{escaped_ver}$', m_tag.group(1)):
-                        tag = m_tag.group(1)
-                        break
-
-        if not tag:
-            clone_lines.extend([
-                'CLONE_STATUS: SKIPPED (no matching version tag)',
-                f'SOURCE_URL: {sanitize(source_url)}',
-            ])
-        else:
-            version_tag = tag
-            clone_lines.extend([
-                f'VERSION_TAG: {sanitize(tag)}',
-                f'SOURCE_URL: {sanitize(source_url)}',
-            ])
-            source_dir = work / 'source'
-            rc_clone, _, clone_err = run_cmd(
-                ['git', 'clone', '--depth', '1', '--branch', tag, source_url, str(source_dir)],
-                timeout=120,
-            )
-            (work / 'raw-git-clone-output.txt').write_text(clone_err, encoding='utf-8', errors='replace')
-            if rc_clone == 0:
-                clone_lines.append('CLONE_STATUS: OK')
-                clone_ok = True
-            else:
-                clone_lines.append('CLONE_STATUS: FAILED')
-
-    (work / 'clone-status.txt').write_text('\n'.join(clone_lines) + '\n', encoding='utf-8')
-    clone_status_str = next(
-        (l.split(':', 1)[1].strip() for l in clone_lines if l.startswith('CLONE_STATUS:')), 'UNKNOWN'
-    )
-    print(f'  Source URL: {sanitize(source_url) or "(none)"}')
-    print(f'  Clone: {clone_status_str}')
+    print('--- Source repository clone ---')
+    clone_ok, version_tag = shared.clone_source_repo(source_url, pkgname, new_ver, work)
+    clone_status = 'OK' if clone_ok else ('SKIPPED' if not source_url else 'FAILED/SKIPPED')
+    print(f'  Source URL: {shared.sanitize(source_url) or "(none)"}')
+    print(f'  Clone: {clone_status}')
 
     # -----------------------------------------------------------------------
-    # Step 5: OpenSSF Best Practices Badge
+    # OpenSSF Best Practices Badge
     # -----------------------------------------------------------------------
     print()
-    print('--- Step 5: OpenSSF Best Practices Badge ---')
-    badge_found = False
-    badge_id = ''
-    badge_level = ''
-    badge_tiered = ''
-    badge_baseline_tiered = ''
-
-    if source_url:
-        encoded_url = urllib.parse.quote(source_url, safe='')
-        search_data = http_get(f'https://www.bestpractices.dev/projects.json?url={encoded_url}')
-        if search_data is not None:
-            (work / 'raw-badge-search.json').write_bytes(search_data)
-            try:
-                projects = json.loads(search_data.decode('utf-8', errors='replace'))
-                if isinstance(projects, list) and projects:
-                    pid = int(projects[0].get('id', 0))
-                    if pid > 0:
-                        badge_id = str(pid)
-            except (ValueError, KeyError, TypeError):
-                pass
-
-        if badge_id:
-            detail_data = http_get(f'https://www.bestpractices.dev/projects/{badge_id}.json')
-            if detail_data is not None:
-                (work / 'raw-badge-data.json').write_bytes(detail_data)
-                try:
-                    d = json.loads(detail_data.decode('utf-8', errors='replace'))
-                    badge_found = True
-                    raw_level = str(d.get('badge_level', ''))
-                    badge_level = re.sub(r'[^a-z0-9_\-]', '', raw_level)[:32] or 'in_progress'
-                    tp = d.get('tiered_percentage')
-                    if isinstance(tp, (int, float)):
-                        badge_tiered = str(int(tp))
-                    btp = d.get('baseline_tiered_percentage')
-                    if isinstance(btp, (int, float)):
-                        badge_baseline_tiered = str(int(btp))
-                except (ValueError, KeyError, TypeError):
-                    badge_found = False
-
-    badge_lines = [
-        f'=== OpenSSF Best Practices Badge: {pkgname} ===',
-        f'SOURCE_URL_QUERIED: {sanitize(source_url)}',
-        f'BADGE_FOUND: {"yes" if badge_found else "no"}',
-    ]
-    if badge_found:
-        badge_lines.extend([
-            f'BADGE_PROJECT_ID: {sanitize(badge_id)}',
-            f'BADGE_LEVEL (metal): {sanitize(badge_level)}',
-        ])
-        if badge_tiered:
-            badge_lines.append(f'METAL_TIERED_PERCENTAGE: {badge_tiered} (passing=100, silver=200, gold=300)')
-        if badge_baseline_tiered:
-            badge_lines.append(f'BASELINE_TIERED_PERCENTAGE: {badge_baseline_tiered} (baseline_1=100, baseline_2=200, baseline_3=300)')
-    (work / 'badge-status.txt').write_text('\n'.join(badge_lines) + '\n', encoding='utf-8')
-
-    if badge_found:
-        tiered_suffix = f' ({badge_tiered}/300)' if badge_tiered else ''
-        print(f'  Metal badge: {badge_level}{tiered_suffix}')
-        print(f'  Baseline badge: {badge_baseline_tiered or "unknown"}/300')
-        print(f'  Project ID: {badge_id}')
+    print('--- OpenSSF Best Practices Badge ---')
+    badge = shared.lookup_openssf_badge(source_url, pkgname, work)
+    if badge['found']:
+        tiered_suffix = f' ({badge["tiered"]}/300)' if badge['tiered'] else ''
+        print(f'  Metal badge: {badge["level"]}{tiered_suffix}')
+        print(f'  Baseline badge: {badge["baseline_tiered"] or "unknown"}/300')
+        print(f'  Project ID: {badge["id"]}')
     else:
         print('  Badge: not found in OpenSSF Best Practices database')
 
     # -----------------------------------------------------------------------
-    # Step 6: Package vs source file comparison
+    # Package vs source comparison
     # -----------------------------------------------------------------------
     print()
-    print('--- Step 6: Package vs source comparison ---')
-    extra_files = 0
+    print('--- Package vs source comparison ---')
     source_dir = work / 'source'
-
-    if clone_ok and unpacked_dir.is_dir() and source_dir.is_dir():
-        exclude_pkg = re.compile(r'\.pyc$|\.pyo$|/__pycache__/|\.dist-info/|^\.git/')
-        exclude_src = re.compile(r'\.pyc$|\.pyo$|/__pycache__/|^\.git/')
-
-        def collect_paths(base: Path, excludes: re.Pattern) -> list[str]:
-            paths = []
-            for p in base.rglob('*'):
-                if not p.is_file():
-                    continue
-                rel = str(p.relative_to(base))
-                if not excludes.search(rel):
-                    paths.append('./' + rel)
-            return sorted(paths)
-
-        pkg_paths = collect_paths(unpacked_dir, exclude_pkg)
-        src_paths = collect_paths(source_dir, exclude_src)
-        extra = sorted(set(pkg_paths) - set(src_paths))
-
-        (work / 'raw-pkg-paths.txt').write_text('\n'.join(pkg_paths) + '\n', encoding='utf-8')
-        (work / 'raw-src-paths.txt').write_text('\n'.join(src_paths) + '\n', encoding='utf-8')
-        (work / 'raw-extra-in-package.txt').write_text('\n'.join(extra) + '\n', encoding='utf-8')
-
-        extra_files = len(extra)
-        (work / 'extra-in-package.txt').write_text(
-            '\n'.join([
-                f'EXTRA_FILES_IN_PACKAGE: {extra_files}',
-                '(files in distributed gem but absent from source repo)',
-                'Expected extras: METADATA, RECORD, PKG-INFO, .gemspec, Gemfile.lock',
-                '',
-            ] + [sanitize(p) for p in extra]) + '\n',
-            encoding='utf-8',
+    if clone_ok:
+        extra_files = shared.compare_pkg_vs_source(
+            unpacked_dir, source_dir, work,
+            pkg_excludes=re.compile(r'^\.git/'),
+            src_excludes=re.compile(r'^\.git/'),
         )
         print(f'  Extra files (package vs source): {extra_files}')
     else:
         (work / 'extra-in-package.txt').write_text(
             'EXTRA_FILES_IN_PACKAGE: N/A (no clone)\n', encoding='utf-8'
         )
+        extra_files = 0
         print('  Skipped (no source clone)')
 
     # -----------------------------------------------------------------------
-    # Step 7: Binary files in package
+    # Binary file detection
     # -----------------------------------------------------------------------
     print()
-    print('--- Step 7: Binary files ---')
-    binary_files = 0
-
-    if unpacked_dir.is_dir():
-        text_indicators = re.compile(r'ASCII|UTF|JSON|XML|text|script|empty|directory|\.pyc:|\.pyo:')
-        raw_binary_lines: list[str] = []
-        for fp in unpacked_dir.rglob('*'):
-            if not fp.is_file():
-                continue
-            rc_f, fout, _ = run_cmd(['file', str(fp)], timeout=10)
-            if rc_f == 0 and fout.strip() and not text_indicators.search(fout):
-                raw_binary_lines.append(fout.rstrip())
-
-        (work / 'raw-binary-in-package.txt').write_text(
-            '\n'.join(raw_binary_lines) + '\n', encoding='utf-8'
-        )
-        binary_files = len(raw_binary_lines)
-        (work / 'binary-files.txt').write_text(
-            '\n'.join([f'BINARY_FILES_IN_PACKAGE: {binary_files}', '']
-                      + [sanitize(l) for l in raw_binary_lines]) + '\n',
-            encoding='utf-8',
-        )
-        print(f'  Binary files detected: {binary_files}')
-    else:
-        (work / 'binary-files.txt').write_text('BINARY_FILES_IN_PACKAGE: N/A\n', encoding='utf-8')
-        print('  Skipped (no unpacked dir)')
+    print('--- Binary file detection ---')
+    binary_files = shared.detect_binary_files(unpacked_dir, work)
+    print(f'  Binary files detected: {binary_files}')
 
     # -----------------------------------------------------------------------
-    # Steps 8-10: Old version, diff, diff scans (UPDATE mode only)
+    # Old version download, diff, diff scans (UPDATE mode only)
     # -----------------------------------------------------------------------
     old_ok = False
     old_source = ''
     diff_lines = 0
     changed_files_text = ''
     diff_scan_matches = 0
+    old_dir_path: Path | None = None
 
     if diff_mode:
-        # ----- Step 8: Download old version -----
+        # --- Old version download ---
         print()
-        print('--- Step 8: Old version for diff ---')
+        print('--- Old version download ---')
         old_dir_base = work / 'old'
         old_dir_base.mkdir(exist_ok=True)
 
-        rc_gemdir, gemdir_out, _ = run_cmd(['gem', 'environment', 'gemdir'])
+        rc_gemdir, gemdir_out, _ = shared.run_cmd(['gem', 'environment', 'gemdir'])
         gemdir = gemdir_out.strip() if rc_gemdir == 0 else ''
-        old_cached_gem = Path(gemdir) / 'cache' / f'{pkgname}-{old_ver}.gem' if gemdir else None
+        old_cached_gem = (
+            Path(gemdir) / 'cache' / f'{pkgname}-{old_ver}.gem' if gemdir else None
+        )
 
         if old_cached_gem and old_cached_gem.is_file():
-            rc_up, _, _ = run_cmd(
+            rc_up, _, _ = shared.run_cmd(
                 ['gem', 'unpack', str(old_cached_gem), '--target', str(old_dir_base)]
             )
             if rc_up == 0:
@@ -715,11 +388,13 @@ def main() -> None:  # noqa: C901
         else:
             raw_old_pkg = work / 'raw-old-pkg'
             raw_old_pkg.mkdir(exist_ok=True)
-            rc_fetch, _, _ = run_cmd(['gem', 'fetch', pkgname, '-v', old_ver], cwd=raw_old_pkg)
+            rc_fetch, _, _ = shared.run_cmd(
+                ['gem', 'fetch', pkgname, '-v', old_ver], cwd=raw_old_pkg
+            )
             if rc_fetch == 0:
                 old_gem = raw_old_pkg / f'{pkgname}-{old_ver}.gem'
                 if old_gem.is_file():
-                    rc_up2, _, _ = run_cmd(
+                    rc_up2, _, _ = shared.run_cmd(
                         ['gem', 'unpack', str(old_gem), '--target', str(old_dir_base)]
                     )
                     if rc_up2 == 0:
@@ -736,38 +411,20 @@ def main() -> None:  # noqa: C901
             f'OLD_VERSION_SOURCE: {old_source or "unavailable"}\n', encoding='utf-8'
         )
         print(f'  Old version: {old_ok} ({old_source or "unavailable"})')
+        old_dir_path = old_dir_base / f'{pkgname}-{old_ver}'
 
-        # ----- Step 9: Diff -----
+        # --- Diff ---
         print()
-        print('--- Step 9: Diff ---')
-        old_dir = old_dir_base / f'{pkgname}-{old_ver}'
-
-        if old_ok and old_dir.is_dir() and unpacked_dir.is_dir():
-            rc_diff, diff_out, _ = run_cmd(
-                ['diff', '-r', str(old_dir), str(unpacked_dir),
-                 '--exclude=*.gem', '--exclude=*.pyc'],
-                timeout=60,
-            )
-            (work / 'raw-diff-full.txt').write_text(diff_out, encoding='utf-8', errors='replace')
-            diff_lines = len(diff_out.splitlines())
-
-            file_headers = [
-                l for l in diff_out.splitlines()
-                if l.startswith('Only in') or l.startswith('diff ')
-            ]
-            changed_files_text = '\n'.join(sanitize(l) for l in file_headers)
-            (work / 'diff-filenames.txt').write_text(
-                '\n'.join([
-                    f'DIFF_TOTAL_LINES: {diff_lines}', '',
-                    'Changed/added/removed files (sanitized filenames only):',
-                ] + [sanitize(l) for l in file_headers]) + '\n',
-                encoding='utf-8',
+        print('--- Diff ---')
+        if old_ok and old_dir_path.is_dir() and unpacked_dir.is_dir():
+            diff_lines, changed_files_text = shared.compute_diff(
+                old_dir_path, unpacked_dir, work, excludes=['*.gem']
             )
             print(f'  Diff size: {diff_lines} lines changed')
             print('  Changed files:')
-            for l in file_headers[:10]:
-                print(f'    {sanitize(l)}')
-            if len(file_headers) > 10:
+            for line in changed_files_text.splitlines()[:10]:
+                print(f'    {line}')
+            if len(changed_files_text.splitlines()) > 10:
                 print('    ... (full list in diff-filenames.txt)')
         else:
             (work / 'diff-filenames.txt').write_text(
@@ -776,13 +433,13 @@ def main() -> None:  # noqa: C901
             (work / 'raw-diff-full.txt').write_text('', encoding='utf-8')
             print('  Skipped (old version unavailable)')
 
-        # ----- Step 10: Blind scans on diff -----
+        # --- Blind scans on diff ---
         print()
-        print('--- Step 10: Blind scans on diff ---')
+        print('--- Blind scans on diff ---')
         diff_full_path = work / 'raw-diff-full.txt'
         if diff_full_path.is_file() and diff_lines > 0:
             for label, pattern in DIFF_PATTERNS:
-                n = blind_scan(label, pattern, diff_full_path, work)
+                n = shared.blind_scan(label, pattern, diff_full_path, work)
                 diff_scan_matches += n
                 print(f'  {label}: {n}' + (f'  [see summary-scan-{label}.txt]' if n > 0 else ''))
             print(f'  Total diff scan matches: {diff_scan_matches}')
@@ -790,39 +447,38 @@ def main() -> None:  # noqa: C901
             print('  Skipped (no diff available)')
     else:
         # NEW/CURRENT mode — write placeholder files
-        (work / 'old-version-status.txt').write_text('OLD_VERSION_SOURCE: N/A (NEW/CURRENT mode)\n', encoding='utf-8')
-        (work / 'diff-filenames.txt').write_text('DIFF: N/A (NEW/CURRENT mode — no old version)\n', encoding='utf-8')
+        (work / 'old-version-status.txt').write_text(
+            'OLD_VERSION_SOURCE: N/A (NEW/CURRENT mode)\n', encoding='utf-8'
+        )
+        (work / 'diff-filenames.txt').write_text(
+            'DIFF: N/A (NEW/CURRENT mode — no old version)\n', encoding='utf-8'
+        )
         (work / 'raw-diff-full.txt').write_text('', encoding='utf-8')
-        print('--- Steps 8-10: Skipped (NEW/CURRENT mode — no old version) ---')
+        print('--- Old version / diff / diff scans: Skipped (NEW/CURRENT mode) ---')
 
     # -----------------------------------------------------------------------
-    # Step 11: Dependency check
+    # Dependency analysis
     # -----------------------------------------------------------------------
     print()
-    print('--- Step 11: New dependencies ---')
+    print('--- Dependency analysis ---')
     new_deps_added = 'none'
     not_in_lockfile: list[str] = []
 
     dep_lines_new: list[str] = []
     dep_lines_old: list[str] = []
 
-    if gemspec_file.is_file():
-        gs = gemspec_file.read_text(encoding='utf-8', errors='replace')
+    if gemspec_text:
         dep_lines_new = sorted(
-            sanitize(l) for l in gs.splitlines()
+            shared.sanitize(l) for l in gemspec_text.splitlines()
             if 'add_runtime_dependency' in l or
                ('add_dependency' in l and 'development' not in l)
         )
 
-    old_dir_path = (work / 'old' / f'{pkgname}-{old_ver}') if diff_mode else None
-    if old_dir_path and old_dir_path.is_file():
-        # shouldn't happen; guard anyway
-        pass
     old_gemspec_path = old_dir_path / f'{pkgname}.gemspec' if old_dir_path else None
     if old_gemspec_path and old_gemspec_path.is_file():
         old_gs = old_gemspec_path.read_text(encoding='utf-8', errors='replace')
         dep_lines_old = sorted(
-            sanitize(l) for l in old_gs.splitlines()
+            shared.sanitize(l) for l in old_gs.splitlines()
             if 'add_runtime_dependency' in l or
                ('add_dependency' in l and 'development' not in l)
         )
@@ -843,7 +499,6 @@ def main() -> None:  # noqa: C901
         dep_comparison.extend(added_deps)
         new_deps_added = '\n'.join(added_deps)
     elif not diff_mode and dep_lines_new:
-        # In NEW mode, all deps are "added" (no baseline)
         dep_comparison.extend(dep_lines_new)
         new_deps_added = '\n'.join(dep_lines_new)
     else:
@@ -853,7 +508,7 @@ def main() -> None:  # noqa: C901
     dep_comparison.extend(removed_deps) if removed_deps else dep_comparison.append('  (none)')
     (work / 'new-deps.txt').write_text('\n'.join(dep_comparison) + '\n', encoding='utf-8')
 
-    # Lockfile check
+    # Lockfile check — Ruby: Gemfile.lock
     lockfile = root / 'Gemfile.lock'
     lockfile_lines: list[str] = ['=== Lockfile check ===']
     if lockfile.is_file() and dep_lines_new:
@@ -863,7 +518,7 @@ def main() -> None:  # noqa: C901
             if not m_dep:
                 continue
             dep_name = m_dep.group(1)
-            safe_dep = sanitize(dep_name)
+            safe_dep = shared.sanitize(dep_name)
             if re.search(rf'^    {re.escape(dep_name)} ', lf_text, re.MULTILINE):
                 lockfile_lines.append(f'IN_LOCKFILE: {safe_dep}')
             else:
@@ -873,22 +528,24 @@ def main() -> None:  # noqa: C901
         lockfile_lines.append('(lockfile or dep list unavailable)')
     (work / 'dep-lockfile-check.txt').write_text('\n'.join(lockfile_lines) + '\n', encoding='utf-8')
 
-    # Registry check for not-in-lockfile deps
+    # Registry metadata for deps not in lockfile — Ruby: RubyGems API
     registry_lines: list[str] = ['=== Registry metadata for new-to-lockfile deps ===']
     if not_in_lockfile:
         for dep_name in not_in_lockfile:
             registry_lines.append(f'Checking: {dep_name}')
-            api_data = http_get(f'https://rubygems.org/api/v1/gems/{dep_name}.json')
+            api_data = shared.http_get(f'https://rubygems.org/api/v1/gems/{dep_name}.json')
             if api_data:
                 try:
                     info = json.loads(api_data.decode('utf-8', errors='replace'))
                     downloads = info.get('downloads', 'unknown')
                     created = info.get('created_at', 'unknown')
                     homepage_v = info.get('homepage_uri', 'unknown')
-                    registry_lines.append(f'  downloads: {sanitize(str(downloads))[:50]}')
+                    registry_lines.append(f'  downloads: {shared.sanitize(str(downloads))[:50]}')
                     date_m = re.search(r'\d{4}-\d{2}-\d{2}', str(created))
-                    registry_lines.append(f'  first_seen: {sanitize(date_m.group() if date_m else "unknown")}')
-                    registry_lines.append(f'  homepage: {sanitize(str(homepage_v))[:200]}')
+                    registry_lines.append(
+                        f'  first_seen: {shared.sanitize(date_m.group() if date_m else "unknown")}'
+                    )
+                    registry_lines.append(f'  homepage: {shared.sanitize(str(homepage_v))[:200]}')
                 except (ValueError, KeyError):
                     registry_lines.append('  (parse error)')
             else:
@@ -904,18 +561,20 @@ def main() -> None:  # noqa: C901
     print(f'  Not in lockfile: {not_in_lockfile_display}')
 
     # -----------------------------------------------------------------------
-    # Step 12: Provenance
+    # Provenance — Ruby: RubyGems API
     # -----------------------------------------------------------------------
     print()
-    print('--- Step 12: Provenance ---')
+    print('--- Provenance ---')
     mfa_status = 'unknown'
     ver_api_data_bytes: bytes | None = None
 
     prov_lines: list[str] = [f'=== Provenance: {pkgname} {new_ver} ===', '']
-    rc_gi, gi_out, _ = run_cmd(['gem', 'info', pkgname, '-r'])
-    prov_lines.extend(['GEM_INFO:', sanitize(gi_out[:2000]) if rc_gi == 0 else '(unavailable)', ''])
+    rc_gi, gi_out, _ = shared.run_cmd(['gem', 'info', pkgname, '-r'])
+    prov_lines.extend(
+        ['GEM_INFO:', shared.sanitize(gi_out[:2000]) if rc_gi == 0 else '(unavailable)', '']
+    )
 
-    api_gem_data = http_get(f'https://rubygems.org/api/v1/gems/{pkgname}.json')
+    api_gem_data = shared.http_get(f'https://rubygems.org/api/v1/gems/{pkgname}.json')
     if api_gem_data:
         try:
             api_info = json.loads(api_gem_data.decode('utf-8', errors='replace'))
@@ -927,9 +586,11 @@ def main() -> None:  # noqa: C901
         except (ValueError, KeyError):
             pass
 
-    prov_lines.extend([f'MFA_REQUIRED: {sanitize(mfa_status)}', ''])
+    prov_lines.extend([f'MFA_REQUIRED: {shared.sanitize(mfa_status)}', ''])
 
-    ver_api_data_bytes = http_get(f'https://rubygems.org/api/v1/versions/{pkgname}.json')
+    ver_api_data_bytes = shared.http_get(
+        f'https://rubygems.org/api/v1/versions/{pkgname}.json'
+    )
     if ver_api_data_bytes:
         try:
             versions = json.loads(ver_api_data_bytes.decode('utf-8', errors='replace'))
@@ -941,7 +602,7 @@ def main() -> None:  # noqa: C901
                 for key in ('number', 'created_at', 'authors', 'sha',
                             'ruby_version', 'rubygems_version', 'licenses'):
                     val = target_ver_info.get(key, '')
-                    prov_lines.append(f'  {key}: {sanitize(str(val))[:200]}')
+                    prov_lines.append(f'  {key}: {shared.sanitize(str(val))[:200]}')
         except (ValueError, KeyError, TypeError):
             prov_lines.append('VERSION_INFO: (parse error)')
     else:
@@ -951,37 +612,35 @@ def main() -> None:  # noqa: C901
     print(f'  MFA required: {mfa_status}')
 
     # -----------------------------------------------------------------------
-    # Step 13: Project health
+    # Project health — age/release from RubyGems versions API; Scorecard
+    # from shared (works for any GitHub-hosted project)
     # -----------------------------------------------------------------------
     print()
-    print('--- Step 13: Project health ---')
-    age_years: str = 'unknown'
+    print('--- Project health ---')
+    age_years_float: float | None = None
     last_release_days: int | None = None
-    owner_count: str = 'unknown'
-    scorecard_score: str = 'not found'
-    version_stability: str = 'unknown'
-    health_concerns: list[str] = []
+    owner_count_int: int | None = None
+    version_stability = 'unknown'
 
     health_lines: list[str] = [f'=== Project health: {pkgname} {new_ver} ===', '']
 
-    # Age and last release from versions API (already fetched in Step 12)
     if ver_api_data_bytes:
         try:
             versions = json.loads(ver_api_data_bytes.decode('utf-8', errors='replace'))
             if isinstance(versions, list) and versions:
-                # Versions are newest-first; oldest is last
-                oldest = versions[-1] if versions else {}
-                newest = versions[0] if versions else {}
+                oldest = versions[-1]
+                newest = versions[0]
 
                 first_date = str(oldest.get('created_at', ''))
-                age_days_val = days_since(first_date)
+                age_days_val = shared.days_since(first_date)
                 if age_days_val is not None:
-                    age_years = f'{age_days_val / 365:.1f}'
+                    age_years_float = age_days_val / 365
 
-                latest_date = str(newest.get('latest_version_created_at', '') or newest.get('created_at', ''))
-                last_release_days = days_since(latest_date)
+                latest_date = str(
+                    newest.get('latest_version_created_at', '') or newest.get('created_at', '')
+                )
+                last_release_days = shared.days_since(latest_date)
 
-                # Check version stability
                 ver_num = str(newest.get('number', new_ver))
                 if re.search(r'(?i)(alpha|beta|rc|pre|dev)', ver_num) or ver_num.startswith('0.'):
                     version_stability = 'pre-release'
@@ -990,85 +649,66 @@ def main() -> None:  # noqa: C901
         except (ValueError, KeyError, TypeError):
             pass
 
+    age_years_str = f'{age_years_float:.1f}' if age_years_float is not None else 'unknown'
     health_lines.extend([
-        f'AGE_YEARS: {age_years}',
+        f'AGE_YEARS: {age_years_str}',
         f'LAST_RELEASE_DAYS_AGO: {last_release_days if last_release_days is not None else "unknown"}',
         f'VERSION_STABILITY: {version_stability}',
     ])
 
-    if last_release_days is not None and last_release_days > 548:  # ~18 months
-        health_concerns.append(f'no release in {last_release_days} days (>18 months — likely unmaintained)')
-
-    if age_years != 'unknown' and float(age_years) < 0.5:
-        health_concerns.append('package is less than 6 months old')
-
-    # Owner count from RubyGems owners API
-    owners_data = http_get(f'https://rubygems.org/api/v1/owners/{pkgname}.json')
+    # Owner count — RubyGems owners API
+    owners_data = shared.http_get(f'https://rubygems.org/api/v1/owners/{pkgname}.json')
     if owners_data:
         (work / 'raw-owners.json').write_bytes(owners_data)
         try:
             owners = json.loads(owners_data.decode('utf-8', errors='replace'))
             if isinstance(owners, list):
-                owner_count = str(len(owners))
-                if len(owners) == 1:
-                    health_concerns.append('single owner (no succession plan)')
+                owner_count_int = len(owners)
         except (ValueError, TypeError):
             pass
-    health_lines.append(f'OWNER_COUNT: {owner_count}')
+    owner_count_str = str(owner_count_int) if owner_count_int is not None else 'unknown'
+    health_lines.append(f'OWNER_COUNT: {owner_count_str}')
 
-    # OpenSSF Scorecard via api.securityscorecards.dev
-    if source_url and 'github.com' in source_url:
-        m_gh = re.search(r'github\.com[/:]([^/]+)/([^/\.#?]+)', source_url)
-        if m_gh:
-            gh_owner = m_gh.group(1)
-            gh_repo = m_gh.group(2)
-            scorecard_data = http_get(
-                f'https://api.securityscorecards.dev/projects/github.com/{gh_owner}/{gh_repo}',
-                timeout=20,
-            )
-            if scorecard_data:
-                (work / 'raw-scorecard.json').write_bytes(scorecard_data)
-                try:
-                    sc = json.loads(scorecard_data.decode('utf-8', errors='replace'))
-                    sc_score = sc.get('score')
-                    if sc_score is not None:
-                        scorecard_score = f'{float(sc_score):.1f}/10'
-                        if float(sc_score) < 4.0:
-                            health_concerns.append(f'OpenSSF Scorecard {scorecard_score} (<4.0)')
-                except (ValueError, KeyError, TypeError):
-                    pass
+    # Scorecard — shared, works for any GitHub repo URL
+    scorecard_score = shared.lookup_scorecard(source_url, work)
+    health_lines.append(f'SCORECARD: {scorecard_score}')
 
-    health_lines.extend([
-        f'SCORECARD: {scorecard_score}',
-        '',
-        'HEALTH_CONCERNS:',
-    ])
-    health_lines.extend(f'  - {c}' for c in health_concerns) if health_concerns else health_lines.append('  none')
+    # Compute concerns — shared thresholds
+    health_concerns = shared.compute_health_concerns(
+        last_release_days=last_release_days,
+        age_years=age_years_float,
+        owner_count=owner_count_int,
+        scorecard_score=scorecard_score,
+        version_stability=version_stability,
+    )
+
+    health_lines.extend(['', 'HEALTH_CONCERNS:'])
+    (health_lines.extend(f'  - {c}' for c in health_concerns)
+     if health_concerns else health_lines.append('  none'))
 
     (work / 'project-health.txt').write_text('\n'.join(health_lines) + '\n', encoding='utf-8')
 
-    last_release_str = (f'{last_release_days} days ago' if last_release_days is not None else 'unknown')
-    print(f'  Age: {age_years} years')
+    last_release_str = (
+        f'{last_release_days} days ago' if last_release_days is not None else 'unknown'
+    )
+    print(f'  Age: {age_years_str} years')
     print(f'  Last release: {last_release_str}')
-    print(f'  Owners: {owner_count}')
+    print(f'  Owners: {owner_count_str}')
     print(f'  Scorecard: {scorecard_score}')
     print(f'  Stability: {version_stability}')
-    if health_concerns:
-        for c in health_concerns:
-            print(f'  [!] {c}')
+    for c in health_concerns:
+        print(f'  [!] {c}')
 
     # -----------------------------------------------------------------------
-    # Step 14: License evaluation
+    # License evaluation
     # -----------------------------------------------------------------------
     print()
-    print('--- Step 14: License ---')
+    print('--- License evaluation ---')
 
-    # Collect license candidates: gemspec, versions API, gems API
+    # Collect license candidates: gemspec first, then versions API
     license_candidates: list[str] = []
     if gemspec_license_raw:
         license_candidates.append(gemspec_license_raw)
-
-    # From versions API license field for this specific version
     if ver_api_data_bytes:
         try:
             versions = json.loads(ver_api_data_bytes.decode('utf-8', errors='replace'))
@@ -1078,12 +718,11 @@ def main() -> None:  # noqa: C901
             if target:
                 lic_field = target.get('licenses')
                 if isinstance(lic_field, list):
-                    license_candidates.extend(str(l) for l in lic_field if l)
+                    license_candidates.extend(str(lc) for lc in lic_field if lc)
                 elif lic_field:
                     license_candidates.append(str(lic_field))
         except (ValueError, KeyError, TypeError):
             pass
-
     # Deduplicate, preserve order
     seen_lics: set[str] = set()
     unique_candidates: list[str] = []
@@ -1092,50 +731,28 @@ def main() -> None:  # noqa: C901
             seen_lics.add(lc)
             unique_candidates.append(lc)
 
-    license_spdx = 'MISSING'
-    license_osi = 'NO'
-    license_status = 'CRITICAL'
-    license_note = (
-        'No license declared. No legal basis for security audits or external '
-        'contributions; strong predictor of long-term abandonment and unpatched CVEs.'
-    )
-
-    if unique_candidates:
-        # Evaluate the first declared license (primary)
-        primary = unique_candidates[0]
-        norm, osi = license_osi_status(primary)
-        license_spdx = norm
-        license_osi = osi
-        if osi == 'YES':
-            license_status = 'OK'
-            license_note = 'OSI-approved license; external security review legally permitted.'
-        else:
-            license_status = 'CONCERN'
-            license_note = (
-                f'License "{norm}" is not OSI-approved. External researchers cannot '
-                'legally audit or fix security issues; community cannot fork to continue '
-                'security maintenance if the project is abandoned.'
-            )
-
-    # Also check if license changed between versions (UPDATE mode only)
-    license_changed = False
+    # Extract old license for change detection (UPDATE mode only)
+    old_license: str | None = None
     if diff_mode and old_dir_path and old_dir_path.is_dir():
         old_gs_path = old_dir_path / f'{pkgname}.gemspec'
         if old_gs_path.is_file():
             old_gs_text = old_gs_path.read_text(encoding='utf-8', errors='replace')
             old_lic_m = re.search(r'\.licenses?\s*=\s*\[?["\']([^"\']+)["\']', old_gs_text)
-            old_lic = old_lic_m.group(1).strip() if old_lic_m else ''
-            if old_lic and gemspec_license_raw and old_lic != gemspec_license_raw:
-                license_changed = True
-                license_note += f' [!] License changed: "{old_lic}" -> "{gemspec_license_raw}"'
-                if license_status == 'OK':
-                    license_status = 'CONCERN'
+            if old_lic_m:
+                old_license = old_lic_m.group(1).strip()
+
+    lic = shared.evaluate_license(unique_candidates, old_license)
+    license_spdx: str = lic['spdx']   # type: ignore[assignment]
+    license_osi: str = lic['osi']     # type: ignore[assignment]
+    license_status: str = lic['status']  # type: ignore[assignment]
+    license_note: str = lic['note']   # type: ignore[assignment]
+    license_changed: bool = lic['changed']  # type: ignore[assignment]
 
     license_lines = [
         f'=== License: {pkgname} {new_ver} ===',
         '',
-        f'DECLARED: {sanitize(", ".join(unique_candidates)) if unique_candidates else "MISSING"}',
-        f'SPDX_NORMALIZED: {sanitize(license_spdx)}',
+        f'DECLARED: {shared.sanitize(", ".join(unique_candidates)) if unique_candidates else "MISSING"}',
+        f'SPDX_NORMALIZED: {shared.sanitize(license_spdx)}',
         f'OSI_APPROVED: {license_osi}',
         f'STATUS: {license_status}',
         f'NOTE: {license_note}',
@@ -1145,30 +762,28 @@ def main() -> None:  # noqa: C901
     (work / 'license.txt').write_text('\n'.join(license_lines) + '\n', encoding='utf-8')
 
     osi_marker = '[OK]' if license_osi == 'YES' else '[!]'
-    print(f'  License: {sanitize(license_spdx)}  OSI-approved: {license_osi}  {osi_marker}')
+    print(f'  License: {shared.sanitize(license_spdx)}  OSI-approved: {license_osi}  {osi_marker}')
     print(f'  Status: {license_status}')
     if license_changed:
         print('  [!] License changed between versions')
 
     # -----------------------------------------------------------------------
-    # Step 15: Transitive dependency footprint (NEW/CURRENT mode, or when
-    #          new deps were added in UPDATE mode)
+    # Transitive dependency footprint
+    # (always in NEW/CURRENT; UPDATE only when there are new unlockfile deps)
     # -----------------------------------------------------------------------
     print()
-    print('--- Step 15: Transitive dependency footprint ---')
+    print('--- Transitive dependency footprint ---')
     transitive_new: list[str] = []
     transitive_total = 0
-
     run_transitive = not diff_mode or bool(not_in_lockfile)
 
     if run_transitive:
-        rc_dep, dep_out, _ = run_cmd(
+        rc_dep, dep_out, _ = shared.run_cmd(
             ['gem', 'dependency', pkgname, '-v', new_ver, '--remote', '--pipe'],
             timeout=60,
         )
         (work / 'raw-transitive-deps.txt').write_text(dep_out, encoding='utf-8', errors='replace')
 
-        # Parse "gem 'name', 'constraint'" lines; extract dep names
         all_transitive: list[str] = []
         for line in dep_out.splitlines():
             m_dep = re.match(r"gem\s+['\"]([a-z][a-z0-9_-]+)['\"]", line.strip())
@@ -1179,7 +794,6 @@ def main() -> None:  # noqa: C901
 
         transitive_total = len(all_transitive)
 
-        # Find which are not in the current lockfile
         lf_text = ''
         if lockfile.is_file():
             lf_text = lockfile.read_text(encoding='utf-8', errors='replace')
@@ -1195,7 +809,8 @@ def main() -> None:  # noqa: C901
             '',
             'NEW_PACKAGES (not in current lockfile):',
         ]
-        trans_lines.extend(f'  {sanitize(d)}' for d in transitive_new) if transitive_new else trans_lines.append('  none')
+        (trans_lines.extend(f'  {shared.sanitize(d)}' for d in transitive_new)
+         if transitive_new else trans_lines.append('  none'))
         (work / 'transitive-deps.txt').write_text('\n'.join(trans_lines) + '\n', encoding='utf-8')
 
         print(f'  Total transitive deps: {transitive_total}')
@@ -1203,7 +818,7 @@ def main() -> None:  # noqa: C901
         if len(transitive_new) > 10:
             print(f'  [!] {len(transitive_new)} new transitive packages — large footprint increase')
         for d in transitive_new[:10]:
-            print(f'    {sanitize(d)}')
+            print(f'    {shared.sanitize(d)}')
         if len(transitive_new) > 10:
             print(f'    ... ({len(transitive_new) - 10} more in transitive-deps.txt)')
     else:
@@ -1214,10 +829,10 @@ def main() -> None:  # noqa: C901
         print('  Skipped (UPDATE mode with no new unlockfile deps)')
 
     # -----------------------------------------------------------------------
-    # Compute verdict
+    # Verdict
     # -----------------------------------------------------------------------
     print()
-    print('--- Computing verdict ---')
+    print('--- Verdict ---')
 
     risk_parts: list[str] = []
     if total_matches > 0:
@@ -1234,18 +849,15 @@ def main() -> None:  # noqa: C901
         risk_parts.append(f'DIFF_SCAN_MATCHES({diff_scan_matches})')
     if failures:
         risk_parts.append('STEP_FAILURES')
-    # License risk flags
     if license_status == 'CRITICAL':
         risk_parts.append('LICENSE_MISSING')
     elif license_status == 'CONCERN':
         risk_parts.append(f'LICENSE_CONCERN({license_spdx})')
     if license_changed:
         risk_parts.append('LICENSE_CHANGED')
-    # Health risk flags
     for hc in health_concerns:
         label = re.sub(r'[^a-zA-Z0-9_]', '_', hc[:40]).upper()
         risk_parts.append(f'HEALTH({label})')
-    # Footprint flag
     if len(transitive_new) > 10:
         risk_parts.append(f'LARGE_TRANSITIVE_FOOTPRINT({len(transitive_new)})')
 
@@ -1258,8 +870,8 @@ def main() -> None:  # noqa: C901
         positive_parts.append('OLD_VERSION_DIFFED')
     if license_status == 'OK':
         positive_parts.append('LICENSE_OSI_APPROVED')
-    if badge_found:
-        positive_parts.append(f'OPENSSF_BADGE({badge_level})')
+    if badge['found']:
+        positive_parts.append(f'OPENSSF_BADGE({badge["level"]})')
     if scorecard_score != 'not found':
         try:
             if float(scorecard_score.split('/')[0]) >= 7.0:
@@ -1301,9 +913,9 @@ def main() -> None:  # noqa: C901
         f'  status: {license_status}',
         '',
         'Project health:',
-        f'  age_years: {age_years}',
+        f'  age_years: {age_years_str}',
         f'  last_release_days_ago: {last_release_days if last_release_days is not None else "unknown"}',
-        f'  owner_count: {owner_count}',
+        f'  owner_count: {owner_count_str}',
         f'  scorecard: {scorecard_score}',
         f'  version_stability: {version_stability}',
         f'  concerns: {"; ".join(health_concerns) or "none"}',
@@ -1311,21 +923,20 @@ def main() -> None:  # noqa: C901
         'Scan totals:',
         f'  Total (full package): {total_matches}',
         f'  Total (diff only): {diff_scan_matches}',
-        '',
-        'Per-scan:',
+        '  Per scan:',
     ] + scan_per + [
         '',
         'Manifest:',
         f'  extensions: {extensions}',
         f'  executables: {executables}',
-        f'  post_install_message: {post_install_msg}',
+        f'  post_install_msg: {post_install_msg}',
         f'  rakefile_install_tasks: {has_rakefile_tasks}',
         '',
         'Source:',
-        f'  clone: {"yes" if clone_ok else "no"}',
+        f'  clone_ok: {"YES" if clone_ok else "NO"}',
+        f'  version_tag: {shared.sanitize(version_tag) if version_tag else "(none)"}',
         f'  extra_files: {extra_files}',
         f'  binary_files: {binary_files}',
-        f'  diff_lines: {diff_lines}',
         '',
         'Dependencies:',
         f'  new_deps_added: {"none" if new_deps_added == "none" else "YES"}',
@@ -1335,18 +946,13 @@ def main() -> None:  # noqa: C901
         'Provenance:',
         f'  mfa_required: {mfa_status}',
         '',
-        'OpenSSF Best Practices Badge:',
-        f'  found: {"yes" if badge_found else "no"}',
-    ]
-    if badge_found:
-        verdict_lines.append(f'  metal_level: {badge_level}')
-        if badge_tiered:
-            verdict_lines.append(f'  metal_tiered: {badge_tiered}')
-        if badge_baseline_tiered:
-            verdict_lines.append(f'  baseline_tiered: {badge_baseline_tiered}')
-    verdict_lines += [
+        'Badge:',
+        f'  found: {"YES" if badge["found"] else "NO"}',
+        f'  level: {badge["level"] or "n/a"}',
+        f'  tiered: {badge["tiered"] or "n/a"}/300',
+        f'  baseline_tiered: {badge["baseline_tiered"] or "n/a"}/300',
         '',
-        'Step failures:',
+        'Failures:',
         ('\n'.join(failures) if failures else '  none'),
         '',
         'Safe files for AI review:',
@@ -1383,21 +989,22 @@ def main() -> None:  # noqa: C901
     print(f'POSITIVE FLAGS: {positive_flags}')
     print()
     print('License:')
-    osi_marker = '[OK]' if license_osi == 'YES' else '[CONCERN]' if license_status == 'CONCERN' else '[CRITICAL]'
-    print(f'  {sanitize(license_spdx)} — OSI-approved: {license_osi}  {osi_marker}')
+    osi_marker2 = '[OK]' if license_osi == 'YES' else '[CONCERN]' if license_status == 'CONCERN' else '[CRITICAL]'
+    print(f'  {shared.sanitize(license_spdx)} — OSI-approved: {license_osi}  {osi_marker2}')
     if license_status != 'OK':
         print(f'  Note: {license_note[:120]}')
     print()
-    print(f'Project health: age={age_years}yr  last_release={last_release_str}'
-          f'  owners={owner_count}  scorecard={scorecard_score}  stability={version_stability}')
-    if health_concerns:
-        for c in health_concerns:
-            print(f'  [!] {c}')
+    print(
+        f'Project health: age={age_years_str}yr  last_release={last_release_str}'
+        f'  owners={owner_count_str}  scorecard={scorecard_score}  stability={version_stability}'
+    )
+    for c in health_concerns:
+        print(f'  [!] {c}')
     print()
     print(f'Scan results (full package, {total_matches} total):')
     for f in sorted(work.glob('summary-scan-*.txt')):
-        label_val = count_val_i = 0
         label_str = ''
+        count_val_i = 0
         for line in f.read_text(encoding='utf-8').splitlines():
             if line.startswith('label='):
                 label_str = line[6:]
@@ -1422,8 +1029,8 @@ def main() -> None:  # noqa: C901
     print()
     if diff_mode:
         print(f'Diff ({old_ver} -> {new_ver}): {diff_lines} lines')
-        for l in changed_files_text.splitlines()[:8]:
-            print(f'  {l}')
+        for line in changed_files_text.splitlines()[:8]:
+            print(f'  {line}')
         if len(changed_files_text.splitlines()) > 8:
             print('  ... (full list in diff-filenames.txt)')
         print()
@@ -1438,16 +1045,16 @@ def main() -> None:  # noqa: C901
     print()
     print(f'Provenance: MFA required = {mfa_status}')
     print()
-    if badge_found:
-        tiered_suffix = f' ({badge_tiered}/300)' if badge_tiered else ''
-        print(f'OpenSSF Best Practices Badge (project {badge_id}):')
-        print(f'  Metal:    {badge_level}{tiered_suffix}')
-        print(f'  Baseline: {badge_baseline_tiered or "unknown"}/300')
+    if badge['found']:
+        tiered_suffix = f' ({badge["tiered"]}/300)' if badge['tiered'] else ''
+        print(f'OpenSSF Best Practices Badge (project {badge["id"]}):')
+        print(f'  Metal:    {badge["level"]}{tiered_suffix}')
+        print(f'  Baseline: {badge["baseline_tiered"] or "unknown"}/300')
     else:
         print('OpenSSF Best Practices Badge: not found in database')
     print()
     if failures:
-        print('STEP FAILURES:')
+        print('FAILURES:')
         for fail in failures:
             print(fail)
         print()

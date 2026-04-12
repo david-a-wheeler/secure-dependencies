@@ -152,10 +152,14 @@ Locate scripts in:
 ~/.claude/skills/secure-dependencies/references/scripts/
 ```
 
-Ruby scripts: `basic-analysis-ruby.py` and `deeper-analysis-ruby.py`.
+Scripts: `analysis_shared.py` (cross-ecosystem), plus ecosystem-specific
+`basic-analysis-ruby.py` and `deeper-analysis-ruby.py`. Always copy all three;
+the ecosystem scripts import from `analysis_shared`.
 
 ```bash
 mkdir -p PROJECT_ROOT/temp/scripts/
+cp ~/.claude/skills/secure-dependencies/references/scripts/analysis_shared.py \
+   PROJECT_ROOT/temp/scripts/
 cp ~/.claude/skills/secure-dependencies/references/scripts/basic-analysis-ruby.py \
    PROJECT_ROOT/temp/scripts/
 cp ~/.claude/skills/secure-dependencies/references/scripts/deeper-analysis-ruby.py \
