@@ -93,6 +93,7 @@ def download_new(
     version: str,
     work: Path,
     failures: list[str],
+    registry_url: str | None = None,
 ) -> dict:
     """gem fetch + gem unpack into work/unpacked/.
 
@@ -105,7 +106,10 @@ def download_new(
     gem_file = work / f'{pkgname}-{version}.gem'
     sha256 = ''
 
-    rc, _, err = shared.run_cmd(['gem', 'fetch', pkgname, '-v', version], cwd=work)
+    fetch_cmd = ['gem', 'fetch', pkgname, '-v', version]
+    if registry_url:
+        fetch_cmd += ['--source', registry_url]
+    rc, _, err = shared.run_cmd(fetch_cmd, cwd=work)
     if rc == 0 and gem_file.is_file():
         sha256 = shared.sha256_file(gem_file)
         (work / 'package-hash.txt').write_text(
@@ -269,6 +273,7 @@ def download_old(
     old_ver: str,
     work: Path,
     failures: list[str],
+    registry_url: str | None = None,
 ) -> dict:
     """Download old version; check gem environment gemdir cache first, then gem fetch.
 
@@ -299,9 +304,10 @@ def download_old(
     else:
         raw_old_pkg = work / 'raw-old-pkg'
         raw_old_pkg.mkdir(exist_ok=True)
-        rc_fetch, _, _ = shared.run_cmd(
-            ['gem', 'fetch', pkgname, '-v', old_ver], cwd=raw_old_pkg
-        )
+        fetch_cmd = ['gem', 'fetch', pkgname, '-v', old_ver]
+        if registry_url:
+            fetch_cmd += ['--source', registry_url]
+        rc_fetch, _, _ = shared.run_cmd(fetch_cmd, cwd=raw_old_pkg)
         if rc_fetch == 0:
             old_gem = raw_old_pkg / f'{pkgname}-{old_ver}.gem'
             if old_gem.is_file():
@@ -348,13 +354,18 @@ def fetch_all_registry_data(
     pkgname: str,
     version: str,
     work: Path,
+    registry_url: str | None = None,
 ) -> dict:
     """Fetch RubyGems API: gems endpoint (MFA), versions endpoint (age/stability), owners.
+
+    registry_url overrides the default rubygems.org base URL for private registries.
+    Most private gem servers (Gemfury, Gemstash) implement the same /api/v1/ paths.
 
     Writes: provenance.txt, raw-owners.json.
     Returns dict with keys: mfa_status, age_years_float, last_release_days,
     owner_count_int, version_stability, license_from_registry, ver_info_lines.
     """
+    api_base = (registry_url.rstrip('/') if registry_url else 'https://rubygems.org')
     mfa_status = 'unknown'
     age_years_float: float | None = None
     last_release_days: int | None = None
@@ -372,7 +383,7 @@ def fetch_all_registry_data(
     # Gems endpoint — MFA
     # RubyGems stores MFA status in metadata.rubygems_mfa_required (a string "true"/"false")
     # rather than a top-level boolean field.
-    api_gem_data = shared.http_get(f'https://rubygems.org/api/v1/gems/{pkgname}.json')
+    api_gem_data = shared.http_get(f'{api_base}/api/v1/gems/{pkgname}.json')
     if api_gem_data:
         try:
             api_info = json.loads(api_gem_data.decode('utf-8', errors='replace'))
@@ -393,9 +404,7 @@ def fetch_all_registry_data(
     prov_lines.extend([f'MFA_REQUIRED: {shared.sanitize(mfa_status)}', ''])
 
     # Versions endpoint — age, stability, license
-    ver_api_data_bytes = shared.http_get(
-        f'https://rubygems.org/api/v1/versions/{pkgname}.json'
-    )
+    ver_api_data_bytes = shared.http_get(f'{api_base}/api/v1/versions/{pkgname}.json')
     if ver_api_data_bytes:
         try:
             versions = json.loads(ver_api_data_bytes.decode('utf-8', errors='replace'))
@@ -442,7 +451,7 @@ def fetch_all_registry_data(
     prov_lines.extend(ver_info_lines)
 
     # Owners endpoint
-    owners_data = shared.http_get(f'https://rubygems.org/api/v1/owners/{pkgname}.json')
+    owners_data = shared.http_get(f'{api_base}/api/v1/owners/{pkgname}.json')
     if owners_data:
         (work / 'raw-owners.json').write_bytes(owners_data)
         try:

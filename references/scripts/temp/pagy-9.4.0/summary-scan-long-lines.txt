@@ -1,0 +1,6 @@
+label=long-lines
+match_count=5
+files_with_matches:
+/home/dwheeler/.claude/skills/secure-dependencies/references/scripts/temp/pagy-9.4.0/unpacked/pagy-9.4.0/javascripts/pagy.min.js
+/home/dwheeler/.claude/skills/secure-dependencies/references/scripts/temp/pagy-9.4.0/unpacked/pagy-9.4.0/javascripts/pagy.min.js.map
+/home/dwheeler/.claude/skills/secure-dependencies/references/scripts/temp/pagy-9.4.0/unpacked/pagy-9.4.0/lib/optimist.rb

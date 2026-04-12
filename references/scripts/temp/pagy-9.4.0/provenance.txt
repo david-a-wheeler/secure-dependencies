@@ -1,0 +1,8 @@
+=== Provenance: pagy 9.4.0 ===
+
+GEM_INFO:
+pagy (43.5.0)?    Author: Domizio Demichelis?    Homepage: https://github.com/ddnexus/pagy??    Pagy 🐸 The Leaping Gem!?
+
+MFA_REQUIRED: unknown
+
+VERSION_INFO: (unavailable)

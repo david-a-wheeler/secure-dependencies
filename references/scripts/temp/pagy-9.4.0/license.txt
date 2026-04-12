@@ -1,0 +1,7 @@
+=== License: pagy 9.4.0 ===
+
+DECLARED: MIT
+SPDX_NORMALIZED: MIT
+OSI_APPROVED: YES
+STATUS: OK
+NOTE: OSI-approved license; external security review legally permitted.

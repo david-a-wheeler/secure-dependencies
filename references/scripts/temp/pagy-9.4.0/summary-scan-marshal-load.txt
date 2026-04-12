@@ -1,0 +1,4 @@
+label=marshal-load
+match_count=2
+files_with_matches:
+/home/dwheeler/.claude/skills/secure-dependencies/references/scripts/temp/pagy-9.4.0/unpacked/pagy-9.4.0/lib/pagy/calendar.rb

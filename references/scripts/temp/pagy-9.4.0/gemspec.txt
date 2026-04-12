@@ -1,0 +1,23 @@
+# -*- encoding: utf-8 -*-
+# stub: pagy 9.4.0 ruby lib
+
+Gem::Specification.new do |s|
+  s.name = "pagy".freeze
+  s.version = "9.4.0"
+
+  s.required_rubygems_version = Gem::Requirement.new(">= 0".freeze) if s.respond_to? :required_rubygems_version=
+  s.metadata = { "bug_tracker_uri" => "https://github.com/ddnexus/pagy/issues", "changelog_uri" => "https://github.com/ddnexus/pagy/blob/master/CHANGELOG.md", "documentation_uri" => "https://ddnexus.github.io/pagy", "homepage_uri" => "https://github.com/ddnexus/pagy", "rubygems_mfa_required" => "true", "support" => "https://github.com/ddnexus/pagy/discussions/categories/q-a" } if s.respond_to? :metadata=
+  s.require_paths = ["lib".freeze]
+  s.authors = ["Domizio Demichelis".freeze]
+  s.date = "1980-01-02"
+  s.description = "Agnostic pagination in plain ruby. It does it all. Better.".freeze
+  s.email = ["dd.nexus@gmail.com".freeze]
+  s.executables = ["pagy".freeze]
+  s.files = ["LICENSE.txt".freeze, "apps/calendar.ru".freeze, "apps/demo.ru".freeze, "apps/index.rb".freeze, "apps/keyset_ar.ru".freeze, "apps/keyset_s.ru".freeze, "apps/rails.ru".freeze, "apps/repro.ru".freeze, "bin/pagy".freeze, "config/pagy.rb".freeze, "javascripts/pagy.d.ts".freeze, "javascripts/pagy.min.js".freeze, "javascripts/pagy.min.js.map".freeze, "javascripts/pagy.mjs".freeze, "lib/optimist.rb".freeze, "lib/pagy.rb".freeze, "lib/pagy/b64.rb".freeze, "lib/pagy/backend.rb".freeze, "lib/pagy/calendar.rb".freeze, "lib/pagy/calendar/day.rb".freeze, "lib/pagy/calendar/month.rb".freeze, "lib/pagy/calendar/quarter.rb".freeze, "lib/pagy/calendar/unit.rb".freeze, "lib/pagy/calendar/week.rb".freeze, "lib/pagy/calendar/year.rb".freeze, "lib/pagy/console.rb".freeze, "lib/pagy/countless.rb".freeze, "lib/pagy/exceptions.rb".freeze, "lib/pagy/extras/arel.rb".freeze, "lib/pagy/extras/array.rb".freeze, "lib/pagy/extras/bootstrap.rb".freeze, "lib/pagy/extras/bulma.rb".freeze, "lib/pagy/extras/calendar.rb".freeze, "lib/pagy/extras/countless.rb".freeze, "lib/pagy/extras/elasticsearch_rails.rb".freeze, "lib/pagy/extras/gearbox.rb".freeze, "lib/pagy/extras/headers.rb".freeze, "lib/pagy/extras/i18n.rb".freeze, "lib/pagy/extras/js_tools.rb".freeze, "lib/pagy/extras/jsonapi.rb".freeze, "lib/pagy/extras/keyset.rb".freeze, "lib/pagy/extras/limit.rb".freeze, "lib/pagy/extras/meilisearch.rb".freeze, "lib/pagy/extras/metadata.rb".freeze, "lib/pagy/extras/overflow.rb".freeze, "lib/pagy/extras/pagy.rb".freeze, "lib/pagy/extras/searchkick.rb".freeze, "lib/pagy/extras/size.rb".freeze, "lib/pagy/extras/standalone.rb".freeze, "lib/pagy/extras/trim.rb".freeze, "lib/pagy/frontend.rb".freeze, "lib/pagy/i18n.rb".freeze, "lib/pagy/keyset.rb".freeze, "lib/pagy/keyset/active_record.rb".freeze, "lib/pagy/keyset/sequel.rb".freeze, "lib/pagy/shared_methods.rb".freeze, "lib/pagy/url_helpers.rb".freeze, "locales/ar.yml".freeze, "locales/be.yml".freeze, "locales/bg.yml".freeze, "locales/bs.yml".freeze, "locales/ca.yml".freeze, "locales/ckb.yml".freeze, "locales/cs.yml".freeze, "locales/da.yml".freeze, "locales/de.yml".freeze, "locales/dz.yml".freeze, "locales/en.yml".freeze, "locales/es.yml".freeze, "locales/fr.yml".freeze, "locales/hr.yml".freeze, "locales/id.yml".freeze, "locales/it.yml".freeze, "locales/ja.yml".freeze, "locales/km.yml".freeze, "locales/ko.yml".freeze, "locales/nb.yml".freeze, "locales/nl.yml".freeze, "locales/nn.yml".freeze, "locales/pl.yml".freeze, "locales/pt-BR.yml".freeze, "locales/pt.yml".freeze, "locales/ru.yml".freeze, "locales/sk.yml".freeze, "locales/sr.yml".freeze, "locales/sv-SE.yml".freeze, "locales/sv.yml".freeze, "locales/sw.yml".freeze, "locales/ta.yml".freeze, "locales/tr.yml".freeze, "locales/uk.yml".freeze, "locales/vi.yml".freeze, "locales/zh-CN.yml".freeze, "locales/zh-HK.yml".freeze, "locales/zh-TW.yml".freeze, "stylesheets/pagy.css".freeze, "stylesheets/pagy.scss".freeze, "stylesheets/pagy.tailwind.css".freeze]
+  s.homepage = "https://github.com/ddnexus/pagy".freeze
+  s.licenses = ["MIT".freeze]
+  s.required_ruby_version = Gem::Requirement.new(">= 3.1".freeze)
+  s.rubygems_version = "3.4.20".freeze
+  s.summary = "The best pagination ruby gem".freeze
+end
+

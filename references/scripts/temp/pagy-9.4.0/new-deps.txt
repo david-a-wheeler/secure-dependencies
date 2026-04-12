@@ -1,0 +1,7 @@
+=== Runtime dependencies: pagy 9.4.0 ===
+
+ADDED_RUNTIME_DEPS:
+  (none)
+
+REMOVED_RUNTIME_DEPS:
+  (none)

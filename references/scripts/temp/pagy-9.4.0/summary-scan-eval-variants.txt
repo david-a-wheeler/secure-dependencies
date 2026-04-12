@@ -1,0 +1,4 @@
+label=eval-variants
+match_count=1
+files_with_matches:
+/home/dwheeler/.claude/skills/secure-dependencies/references/scripts/temp/pagy-9.4.0/unpacked/pagy-9.4.0/lib/optimist.rb

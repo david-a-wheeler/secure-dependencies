@@ -717,6 +717,7 @@ def run_analysis(  # noqa: C901
     work: Path,
     diff_mode: bool,
     deeper: bool,
+    registry_url: str | None = None,
 ) -> None:
     """Execute full analysis for one package version."""
     failures: list[str] = []
@@ -739,7 +740,7 @@ def run_analysis(  # noqa: C901
 
     # 1. Download new version
     print(f'--- Download: {pkgname} {new_ver} ---')
-    dl = hooks.download_new(pkgname, new_ver, work, failures)
+    dl = hooks.download_new(pkgname, new_ver, work, failures, registry_url=registry_url)
     sha256 = dl.get('sha256', '')
     unpacked_dir = dl.get('unpacked_dir')
     if sha256:
@@ -827,7 +828,7 @@ def run_analysis(  # noqa: C901
     if diff_mode:
         print()
         print('--- Old version download ---')
-        old_result = hooks.download_old(pkgname, old_ver, work, failures)
+        old_result = hooks.download_old(pkgname, old_ver, work, failures, registry_url=registry_url)
         print(f'  Old version: {old_result.get("ok")} ({old_result.get("source") or "unavailable"})')
 
         print()
@@ -875,7 +876,7 @@ def run_analysis(  # noqa: C901
     # 9. Registry data
     print()
     print('--- Registry / provenance data ---')
-    registry = hooks.fetch_all_registry_data(pkgname, new_ver, work)
+    registry = hooks.fetch_all_registry_data(pkgname, new_ver, work, registry_url=registry_url)
     print(f'  MFA required: {registry.get("mfa_status", "unknown")}')
 
     # 10. Scorecard
@@ -1059,6 +1060,9 @@ Options:
                       Omit for a new dependency (NEW mode).
   --root DIR          Project root directory. Defaults to current directory.
                       Used to locate lockfiles and store output under DIR/temp/.
+  --registry-url URL  Override the default registry base URL (must be https://).
+                      Use for private registries, mirrors, or staging servers.
+                      Example: --from rubygems --registry-url https://gems.example.com/
 
 Execution order when multiple modes given: --alternatives → --basic → --deeper
 
@@ -1100,6 +1104,7 @@ def main() -> None:  # noqa: C901 (complexity acceptable for CLI validation)
 
     # --- Parse flags ---
     registry = None
+    registry_url: str | None = None
     old_ver = None
     root_arg = None
     do_alternatives = False
@@ -1120,6 +1125,12 @@ def main() -> None:  # noqa: C901 (complexity acceptable for CLI validation)
             else:
                 i += 1
                 registry = argv[i]
+        elif tok == '--registry-url':
+            if i + 1 >= len(argv):
+                errors.append('--registry-url requires a value (e.g. --registry-url https://gems.example.com/)')
+            else:
+                i += 1
+                registry_url = argv[i]
         elif tok == '--old':
             if i + 1 >= len(argv):
                 errors.append('--old requires a value (e.g. --old 1.2.3)')
@@ -1205,6 +1216,22 @@ def main() -> None:  # noqa: C901 (complexity acceptable for CLI validation)
             '  To add a new registry, add it to REGISTRY_TO_HOOKS and provide a hooks_LANGUAGE.py file.'
         )
 
+    # --- Validate: --registry-url ---
+    if registry_url is not None:
+        if not registry_url.startswith('https://'):
+            errors.append(
+                f'--registry-url must start with https://, got: {registry_url!r}\n'
+                '  Plain HTTP is not allowed (vulnerable to MITM/supply-chain attacks).'
+            )
+        elif registry in KNOWN_REGISTRIES:
+            # Not an error — overriding a known registry is valid (mirrors, staging) —
+            # but worth a visible note so the human can catch a mistaken invocation.
+            print(
+                f'NOTE: --registry-url overrides the default URL for {registry!r}.\n'
+                f'  Using: {registry_url}',
+                file=sys.stderr,
+            )
+
     # --- Validate: at least one mode ---
     if not (do_alternatives or do_basic or do_deeper):
         errors.append(
@@ -1277,7 +1304,8 @@ def main() -> None:  # noqa: C901 (complexity acceptable for CLI validation)
         # TODO: implement hooks.check_alternatives(pkgname, new_ver, root, work)
 
     if do_basic or do_deeper:
-        run_analysis(hooks, pkgname, old_ver or 'none', new_ver, root, work, diff_mode, do_deeper)
+        run_analysis(hooks, pkgname, old_ver or 'none', new_ver, root, work, diff_mode, do_deeper,
+                     registry_url=registry_url)
 
 
 if __name__ == '__main__':

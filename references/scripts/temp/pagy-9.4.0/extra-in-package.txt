@@ -1,0 +1,4 @@
+EXTRA_FILES_IN_PACKAGE: 0
+(files in distributed package but absent from source repo)
+Expected extras: METADATA, RECORD, PKG-INFO, .gemspec, Gemfile.lock, dist-info/
+
