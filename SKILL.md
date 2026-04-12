@@ -153,7 +153,7 @@ Locate scripts in:
 ~/.claude/skills/secure-dependencies/references/scripts/
 ```
 
-Scripts: `analysis_shared.py` (cross-ecosystem utilities), `analysis_driver.py`
+Scripts: `analysis_shared.py` (cross-ecosystem utilities), `dep_review.py`
 (single orchestration entry point), and one hooks file per ecosystem (e.g.
 `hooks_ruby.py`). Always copy all three relevant files.
 
@@ -161,7 +161,7 @@ Scripts: `analysis_shared.py` (cross-ecosystem utilities), `analysis_driver.py`
 mkdir -p PROJECT_ROOT/temp/scripts/
 cp ~/.claude/skills/secure-dependencies/references/scripts/analysis_shared.py \
    PROJECT_ROOT/temp/scripts/
-cp ~/.claude/skills/secure-dependencies/references/scripts/analysis_driver.py \
+cp ~/.claude/skills/secure-dependencies/references/scripts/dep_review.py \
    PROJECT_ROOT/temp/scripts/
 cp ~/.claude/skills/secure-dependencies/references/scripts/hooks_ruby.py \
    PROJECT_ROOT/temp/scripts/
@@ -190,7 +190,7 @@ initial analysis. Do not decompose into individual commands first.**
 
 ```bash
 mkdir -p PROJECT_ROOT/temp/PKGNAME-NEW_VERSION && \
-python3 PROJECT_ROOT/temp/scripts/analysis_driver.py \
+python3 PROJECT_ROOT/temp/scripts/dep_review.py \
   ECOSYSTEM PKGNAME OLD_VERSION NEW_VERSION PROJECT_ROOT \
   2>&1 | tee PROJECT_ROOT/temp/PKGNAME-NEW_VERSION/run-log.txt
 ```
@@ -244,7 +244,7 @@ Do not read any further files.
 Record your decision and brief reason.
 
 ```bash
-python3 PROJECT_ROOT/temp/scripts/analysis_driver.py \
+python3 PROJECT_ROOT/temp/scripts/dep_review.py \
   ECOSYSTEM PKGNAME OLD_VERSION NEW_VERSION PROJECT_ROOT --deeper \
   | tee -a PROJECT_ROOT/temp/PKGNAME-NEW_VERSION/run-log.txt
 ```

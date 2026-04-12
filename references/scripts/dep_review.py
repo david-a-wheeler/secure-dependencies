@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-# analysis_driver.py — Single entry point for dependency security analysis.
+# dep_review.py — Single entry point for dependency security analysis.
 #
 # Usage:
-#   python3 analysis_driver.py ECOSYSTEM PKGNAME OLD_VERSION NEW_VERSION PROJECT_ROOT [--deeper]
+#   python3 dep_review.py ECOSYSTEM PKGNAME OLD_VERSION NEW_VERSION PROJECT_ROOT [--deeper]
 #
 # Examples:
 #   python3 analysis_driver.py ruby pagy 9.3.3 9.4.0 /home/user/myproject

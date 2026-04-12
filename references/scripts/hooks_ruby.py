@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # hooks_ruby.py — Ruby-specific operations for the dependency analysis driver.
 #
-# Called by analysis_driver.py; do not invoke directly.
+# Called by dep_review.py; do not invoke directly.
 # Each function accepts a `failures: list[str]` param and calls
 # failures.append(...) on errors rather than raising exceptions.
 #
@@ -80,7 +80,7 @@ def _extract_gemspec_license(gemspec_text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Public API — called by analysis_driver.py
+# Public API — called by dep_review.py
 # ---------------------------------------------------------------------------
 
 def download_new(
