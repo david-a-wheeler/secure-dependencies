@@ -106,7 +106,7 @@ def _read_lockfile_baseline(root: Path, registry: str) -> list[str]:
                     if m:
                         names.append(m.group(1).lower())
                     elif line and not line[0].isspace():
-                        break
+                        in_specs = False  # end of this specs block; keep scanning for more
             return names
 
     # TODO: Python (requirements.txt, poetry.lock, uv.lock)

@@ -1050,9 +1050,9 @@ def run_analysis(  # noqa: C901
 
     # Write session-update.json for dep_session.py complete to consume
     if session_file is not None:
-        install_time = bool(manifest.get('extensions'))
+        install_time = manifest.get('extensions') == 'YES'
         install_reason = 'native extension' if install_time else ''
-        if not install_time and manifest.get('post_install_message'):
+        if not install_time and manifest.get('post_install_message') == 'YES':
             install_time = True
             install_reason = 'post_install_message'
         _write_session_update(
