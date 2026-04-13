@@ -200,7 +200,7 @@ def print_next_action(session: dict, session_path: Path) -> None:
             print(f'WARNING: {len(bad)} package(s) flagged DO_NOT_INSTALL:')
             for k in bad:
                 v = analyzed[k]
-                print(f'  {k}: {v.get("recommendation")} / risk={v.get("risk")}')
+                print(f'  {k}: recommend {v.get("recommendation")} / {v.get("risk")} risk')
             print()
             print('Do NOT proceed to Phase 4 (install) without resolving these.')
         else:
@@ -210,8 +210,8 @@ def print_next_action(session: dict, session_path: Path) -> None:
         print('Full results:')
         for key, v in analyzed.items():
             itc = ' [INSTALL-TIME CODE]' if v.get('install_time_code') else ''
-            print(f'  {key}: {v.get("recommendation", "UNKNOWN")} / '
-                  f'risk={v.get("risk", "UNKNOWN")}{itc}')
+            print(f'  {key}: recommend {v.get("recommendation", "UNKNOWN")} / '
+                  f'{v.get("risk", "UNKNOWN")} risk{itc}')
         return
 
     # --- DEPTH CONFIRMATION NEEDED ---
@@ -224,7 +224,8 @@ def print_next_action(session: dict, session_path: Path) -> None:
         for v in analyzed.values():
             if v['name'].lower() not in baseline:
                 print(f'  [done]   {v["name"]} {v["version"]} '
-                      f'— {v.get("recommendation", "?")} via {v.get("introduced_by", "?")}')
+                      f'— recommend {v.get("recommendation", "?")} / {v.get("risk", "?")} risk'
+                      f' via {v.get("introduced_by", "?")}')
         for entry in queue:
             if entry['name'].lower() not in baseline:
                 print(f'  [queued] {entry["name"]} {entry.get("version", "?")} '
