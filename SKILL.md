@@ -182,7 +182,8 @@ When the user wants to audit what is already installed:
 ## Phase 2: Per-Package Analysis via Sub-Agent
 
 Spawn one **isolated sub-agent per package**, run **sequentially** (complete
-and discard each before starting the next). Content isolation prevents
+and discard each before starting the next). Content isolation reduces the
+risk of
 adversarial material in package N from contaminating analysis of package N+1.
 
 ### Exhaustive dependency graph traversal: managed by scripts
