@@ -39,6 +39,7 @@ if sys.version_info < (3, 10):
 import argparse
 import json
 import re
+import shutil
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -149,9 +150,19 @@ def print_next_action(session: dict, session_path: Path) -> None:
     The orchestrating agent reads this after every dep_session.py call and
     follows the instruction exactly — no state tracking required on its part.
     """
-    scripts = session['scripts_dir']
+    root = Path(session['project_root'])
+    # Use paths relative to project root so commands stay short.
+    # dep_session.py copies scripts to temp/dep-review/scripts/ at init time.
+    scripts = Path(session['scripts_dir'])
+    try:
+        scripts_rel = scripts.relative_to(root)
+    except ValueError:
+        scripts_rel = scripts  # fallback: scripts not under root (e.g. older session)
+    try:
+        session_rel = session_path.relative_to(root)
+    except ValueError:
+        session_rel = session_path
     registry = session['registry']
-    root = session['project_root']
     ru = session.get('registry_url')
     registry_url_flag = f' --registry-url {ru}' if ru else ''
 
@@ -224,8 +235,8 @@ def print_next_action(session: dict, session_path: Path) -> None:
         print('  in your lockfile. That is a large transitive footprint and a risk signal.')
         print('  Continue analyzing all of them, or stop and reconsider the root dependency?"')
         print()
-        print(f'If user says continue : python3 {scripts}/dep_session.py confirm-depth {session_path}')
-        print(f'If user says stop     : python3 {scripts}/dep_session.py abort {session_path} "user declined large footprint"')
+        print(f'If user says continue : python3 {scripts_rel}/dep_session.py confirm-depth {session_rel}')
+        print(f'If user says stop     : python3 {scripts_rel}/dep_session.py abort {session_rel} "user declined large footprint"')
         return
 
     # --- NEXT PACKAGE ---
@@ -244,19 +255,19 @@ def print_next_action(session: dict, session_path: Path) -> None:
         print(f'Introduced by: {introduced_by}')
         print(f'Version      : UNKNOWN — registry lookup required')
         print()
-        print(f'Run: python3 {scripts}/dep_session.py resolve {session_path} {name}')
+        print(f'Run: python3 {scripts_rel}/dep_session.py resolve {session_rel} {name}')
         print('(This will query the registry, update the session, and print the next command.)')
         return
 
     # --- ANALYZE ---
     mode_flags = '--alternatives --basic' if mode == 'NEW' else '--basic'
     old_flag = f' --old {old_version}' if old_version else ''
+    # --session is omitted: dep_review.py defaults to ROOT/temp/dep-review/session.json
     cmd = (
-        f'python3 {scripts}/dep_review.py'
+        f'python3 {scripts_rel}/dep_review.py'
         f' --from {registry}{registry_url_flag}'
         f' {mode_flags}{old_flag}'
-        f' --session {session_path}'
-        f' --root {root}'
+        f' --root .'
         f' {name} {version}'
     )
 
@@ -272,7 +283,7 @@ def print_next_action(session: dict, session_path: Path) -> None:
     print(f'Step 2 — read output, make security judgment, write analysis-report.txt')
     print()
     print(f'Step 3 — record verdict:')
-    print(f'  python3 {scripts}/dep_session.py complete {session_path} \\')
+    print(f'  python3 {scripts_rel}/dep_session.py complete {session_rel} \\')
     print(f'    {name} {version} RECOMMENDATION RISK')
     print()
     print('  RECOMMENDATION: APPROVE | APPROVE_WITH_CAUTION | REVIEW_MANUALLY | DO_NOT_INSTALL')
@@ -285,10 +296,19 @@ def print_next_action(session: dict, session_path: Path) -> None:
 
 def cmd_init(args: argparse.Namespace) -> None:
     root = Path(args.root).resolve()
-    scripts_dir = Path(__file__).parent.resolve()
+    scripts_src = Path(__file__).parent.resolve()
     session_path = (Path(args.session).resolve() if args.session
                     else root / 'temp' / 'dep-review' / 'session.json')
     session_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Copy scripts into the project so all subsequent commands use short local paths.
+    local_scripts = root / 'temp' / 'dep-review' / 'scripts'
+    local_scripts.mkdir(parents=True, exist_ok=True)
+    for src_file in scripts_src.glob('*.py'):
+        dest = local_scripts / src_file.name
+        if not dest.exists() or src_file.stat().st_mtime > dest.stat().st_mtime:
+            shutil.copy2(src_file, dest)
+    scripts_dir = local_scripts
 
     registry = args.registry
     registry_url = getattr(args, 'registry_url', None)

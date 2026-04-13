@@ -1198,9 +1198,10 @@ Options:
   --registry-url URL  Override the default registry base URL (must be https://).
                       Use for private registries, mirrors, or staging servers.
                       Example: --from rubygems --registry-url https://gems.example.com/
-  --session FILE      Path to a dep_session.py session file. When provided,
-                      writes session-update.json after analysis so that
-                      "dep_session.py complete" can update the BFS queue.
+  --session FILE      Path to a dep_session.py session file. Defaults to
+                      ROOT/temp/dep-review/session.json if that file exists.
+                      Writes session-update.json so "dep_session.py complete"
+                      can update the BFS queue. Rarely needed explicitly.
 
 Execution order when multiple modes given: --alternatives → --basic → --deeper
 
@@ -1447,7 +1448,12 @@ def main() -> None:  # noqa: C901 (complexity acceptable for CLI validation)
 
     work.mkdir(parents=True, exist_ok=True)
     diff_mode = old_ver is not None
-    session_file = Path(session_arg).resolve() if session_arg else None
+    if session_arg:
+        session_file = Path(session_arg).resolve()
+    else:
+        # Default: use ROOT/temp/dep-review/session.json if it exists.
+        default_session = root / 'temp' / 'dep-review' / 'session.json'
+        session_file = default_session if default_session.exists() else None
     alternatives_critical = False
 
     # --- Execute requested modes in order ---
