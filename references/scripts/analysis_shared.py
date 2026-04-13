@@ -302,8 +302,15 @@ ADVERSARIAL_PATTERNS: list[tuple[str, str]] = [
      r'|you\s+(?:must|should|shall|are\s+required\s+to)\s+(?:approve|skip|allow|install|bypass|ignore)'
      r'|new\s+(?:directives?|instructions?)\s*:'
      r'|(?:as|being)\s+an?\s+(?:AI|LLM|assistant|language\s+model)\b)'),
-    ('long-lines', r'.{480,}'),
+    # 1000+ spaces/tabs followed by a non-whitespace character: content hidden
+    # after padding that won't be visible in most editors or diff views.
+    ('whitespace-hiding', r'[ \t]{1000,}[^ \t\r\n]'),
 ]
+
+# Structural anomaly patterns — lower severity than ADVERSARIAL_PATTERNS.
+# Kept as a separate list for future patterns that are suspicious but commonly
+# benign (e.g. very long lines in generated docs). Currently empty.
+STRUCTURAL_PATTERNS: list[tuple[str, str]] = []
 
 
 # ---------------------------------------------------------------------------
@@ -315,22 +322,25 @@ def clone_source_repo(
     pkgname: str,
     new_ver: str,
     work: Path,
-) -> tuple[bool, str]:
+) -> tuple[bool, str, bool]:
     """Shallow-clone the upstream source at the version tag.
 
     Writes: source-url.txt, clone-status.txt, raw-git-clone-output.txt.
-    Returns: (clone_ok, version_tag).
+    Returns: (clone_ok, version_tag, commit_guessed).
+    commit_guessed is True when no version tag existed and the commit was
+    inferred from commit-message content — less reliable than a signed tag.
     """
     (work / 'source-url.txt').write_text(sanitize(source_url) + '\n', encoding='utf-8')
 
     clone_lines: list[str] = []
     clone_ok = False
     version_tag = ''
+    commit_guessed = False
 
     if not source_url:
         clone_lines.append('CLONE_STATUS: SKIPPED (no source URL)')
         (work / 'clone-status.txt').write_text('\n'.join(clone_lines) + '\n', encoding='utf-8')
-        return False, ''
+        return False, '', False
 
     # Find a matching version tag via ls-remote (no clone needed)
     rc_ls, ls_out, _ = run_cmd(['git', 'ls-remote', '--tags', source_url], timeout=30)
@@ -357,10 +367,86 @@ def clone_source_repo(
                     break
 
     if not tag:
-        clone_lines.extend([
-            'CLONE_STATUS: SKIPPED (no matching version tag)',
-            f'SOURCE_URL: {sanitize(source_url)}',
-        ])
+        # No version tag found. Attempt to locate the release commit by scanning
+        # recent history for a commit message that mentions the version string.
+        clone_lines.append(f'SOURCE_URL: {sanitize(source_url)}')
+        clone_lines.append('NO_TAG: no matching version tag found in repository')
+        source_dir = work / 'source'
+        guessed_sha = ''
+        commits: list[tuple[str, str, str]] = []  # (sha, date, subject)
+
+        if source_dir.exists() and any(source_dir.iterdir()):
+            clone_err_text = 'Reused existing clone from previous run.\n'
+        else:
+            source_dir.mkdir(parents=True, exist_ok=True)
+            rc_shallow, _, clone_err_text = run_cmd(
+                ['git', 'clone', '--depth', '20', source_url, str(source_dir)],
+                timeout=120,
+            )
+            if rc_shallow != 0:
+                clone_err_text = clone_err_text or 'git clone failed'
+        (work / 'raw-git-clone-output.txt').write_text(
+            clone_err_text, encoding='utf-8', errors='replace'
+        )
+
+        # Parse recent commit log: hash, author-date (ISO), subject
+        rc_log, log_out, _ = run_cmd(
+            ['git', '-C', str(source_dir), 'log', '--format=%H\t%ai\t%s', '-20'],
+            timeout=15,
+        )
+        if rc_log == 0:
+            for log_line in log_out.splitlines():
+                parts = log_line.split('\t', 2)
+                if len(parts) == 3:
+                    commits.append((parts[0], parts[1], parts[2]))
+
+        # Search for a commit whose subject mentions the version number
+        ver_pat = re.compile(
+            rf'(?:version|release|bump|tag)[^0-9]*{re.escape(new_ver)}|{re.escape(new_ver)}',
+            re.IGNORECASE,
+        )
+        guessed_idx = -1
+        for i, (sha, _date, subject) in enumerate(commits):
+            if ver_pat.search(subject):
+                guessed_sha = sha
+                guessed_idx = i
+                break
+
+        if guessed_sha:
+            # Check out exactly that commit so pkg-vs-source comparison works
+            run_cmd(['git', '-C', str(source_dir), 'checkout', guessed_sha], timeout=15)
+            commit_guessed = True
+            clone_ok = True
+            version_tag = f'GUESSED:{guessed_sha}'
+
+            # Show ±2 commits around the guessed one so the AI can see context
+            start = max(0, guessed_idx - 2)
+            end = min(len(commits), guessed_idx + 3)
+            nearby: list[str] = []
+            for j in range(start, end):
+                sha, date, subject = commits[j]
+                marker = '>>>' if j == guessed_idx else '   '
+                nearby.append(
+                    f'  {marker} {sha[:12]}  {date[:19]}  {sanitize(subject)}'
+                )
+
+            clone_lines.extend([
+                f'CLONE_STATUS: GUESSED (commit inferred from history, no version tag)',
+                f'GUESSED_COMMIT: {guessed_sha}',
+                'NEARBY_COMMITS (>>> = guessed commit):',
+            ] + nearby + [
+                'WARNING: Commit was inferred by matching commit message text, not a',
+                '  cryptographically-anchored version tag. The AI reviewer MUST explicitly',
+                '  flag this uncertainty in the analysis report and ask the human to verify.',
+            ])
+        else:
+            clone_lines.append('CLONE_STATUS: SKIPPED (no matching tag or commit message found)')
+            if commits:
+                clone_lines.append('RECENT_COMMITS (for manual inspection):')
+                for sha, date, subject in commits[:5]:
+                    clone_lines.append(
+                        f'  {sha[:12]}  {date[:19]}  {sanitize(subject)}'
+                    )
     else:
         version_tag = tag
         clone_lines.extend([
@@ -390,7 +476,7 @@ def clone_source_repo(
                 clone_lines.append('CLONE_STATUS: FAILED')
 
     (work / 'clone-status.txt').write_text('\n'.join(clone_lines) + '\n', encoding='utf-8')
-    return clone_ok, version_tag
+    return clone_ok, version_tag, commit_guessed
 
 
 # ---------------------------------------------------------------------------
@@ -564,40 +650,87 @@ def compare_pkg_vs_source(
 # Binary file detection
 # ---------------------------------------------------------------------------
 
+# Magic-byte signatures for precompiled executable formats.
+# Each entry is (prefix_bytes, human_readable_format_name).
+# Only formats that should never appear in a source package without
+# a corresponding build recipe are listed here.
+_EXEC_MAGIC: list[tuple[bytes, str]] = [
+    (b'\x7fELF',           'ELF (Linux/Unix executable or shared library)'),
+    (b'MZ',                'PE (Windows .exe / .dll / .com)'),
+    (b'\xce\xfa\xed\xfe',  'Mach-O 32-bit little-endian (macOS)'),
+    (b'\xcf\xfa\xed\xfe',  'Mach-O 64-bit little-endian (macOS)'),
+    (b'\xfe\xed\xfa\xce',  'Mach-O 32-bit big-endian (macOS)'),
+    (b'\xfe\xed\xfa\xcf',  'Mach-O 64-bit big-endian (macOS)'),
+    (b'\xca\xfe\xba\xbe',  'Mach-O fat binary or Java .class'),
+    (b'\x00asm',           'WebAssembly binary (.wasm)'),
+]
+_EXEC_HEADER_LEN: int = max(len(magic) for magic, _ in _EXEC_MAGIC)
+
+# Extensions that reliably indicate compiled executables even when the file
+# format uses a container (like zip) that would be too broad to match by magic.
+# .exe is redundant with MZ magic but included as belt-and-suspenders.
+_EXEC_EXTENSIONS: dict[str, str] = {
+    '.exe': 'PE executable (Windows)',
+    '.jar': 'Java archive (compiled bytecode)',
+    '.war': 'Java Web Archive (compiled bytecode)',
+    '.ear': 'Java Enterprise Archive (compiled bytecode)',
+    '.aar': 'Android Archive (compiled bytecode)',
+}
+
+
 def detect_binary_files(unpacked_dir: Path, work: Path) -> int:
-    """Find non-text files in the unpacked package.
+    """Find precompiled executable files in the unpacked package.
+
+    Detection is by magic-byte prefix only — no file-command invocation,
+    no extension guessing. Detects ELF, PE (Windows), Mach-O, WebAssembly,
+    and Java .class files. PNG, JPEG, zip, gzip, and other non-executable
+    binaries are intentionally NOT flagged.
 
     Writes: binary-files.txt, raw-binary-in-package.txt.
-    Returns: count of binary files found.
+    Returns: count of embedded executables found.
     """
     if not unpacked_dir.is_dir():
         (work / 'binary-files.txt').write_text(
-            'BINARY_FILES_IN_PACKAGE: N/A\n', encoding='utf-8'
+            'EMBEDDED_EXECUTABLES: N/A\n', encoding='utf-8'
         )
         return 0
 
-    text_indicators = re.compile(
-        r'ASCII|UTF|JSON|XML|text|script|empty|directory|\.pyc:|\.pyo:'
-    )
-    raw_lines: list[str] = []
-    for fp in unpacked_dir.rglob('*'):
-        if not fp.is_file():
+    hits: list[str] = []
+    for fp in sorted(unpacked_dir.rglob('*')):
+        if not fp.is_file() or fp.is_symlink():
             continue
-        rc_f, fout, _ = run_cmd(['file', str(fp)], timeout=10)
-        if rc_f == 0 and fout.strip() and not text_indicators.search(fout):
-            raw_lines.append(fout.rstrip())
+        rel = sanitize(str(fp.relative_to(unpacked_dir)))
+        fmt = ''
+
+        # Check by file extension first (catches zip-container formats like .jar)
+        ext_fmt = _EXEC_EXTENSIONS.get(fp.suffix.lower())
+        if ext_fmt:
+            fmt = ext_fmt
+        else:
+            # Check magic bytes
+            try:
+                header = fp.read_bytes()[:_EXEC_HEADER_LEN]
+            except OSError:
+                continue
+            for magic, magic_fmt in _EXEC_MAGIC:
+                if header.startswith(magic):
+                    fmt = magic_fmt
+                    break
+
+        if fmt:
+            hits.append(f'{rel}: {fmt}')
 
     (work / 'raw-binary-in-package.txt').write_text(
-        '\n'.join(raw_lines) + '\n', encoding='utf-8'
+        '\n'.join(hits) + '\n', encoding='utf-8'
     )
     (work / 'binary-files.txt').write_text(
         '\n'.join(
-            [f'BINARY_FILES_IN_PACKAGE: {len(raw_lines)}', '']
-            + [sanitize(line) for line in raw_lines]
+            [f'EMBEDDED_EXECUTABLES: {len(hits)}', '']
+            + hits
         ) + '\n',
         encoding='utf-8',
     )
-    return len(raw_lines)
+    return len(hits)
 
 
 # ---------------------------------------------------------------------------

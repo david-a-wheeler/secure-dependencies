@@ -53,17 +53,22 @@ def sec(title: str) -> str:
 # ---------------------------------------------------------------------------
 
 def run_scans(hooks, unpacked_dir: Path, work: Path) -> tuple[int, list[tuple[str, int]]]:
-    """Run adversarial + dangerous-pattern scans on the full package.
+    """Run adversarial + structural + dangerous-pattern scans on the full package.
 
     Returns (total_matches, [(label, count), ...]).
+    total_matches counts only adversarial and dangerous patterns — NOT structural
+    anomalies (long-lines). Structural matches are included in scan_details for
+    rendering but do not raise SCAN_MATCHES risk flags.
     """
     total = 0
     details: list[tuple[str, int]] = []
     if not unpacked_dir.is_dir():
         return 0, []
-    for label, pattern in shared.ADVERSARIAL_PATTERNS + hooks.DANGEROUS_PATTERNS:
+    structural_labels = {label for label, _ in shared.STRUCTURAL_PATTERNS}
+    for label, pattern in shared.ADVERSARIAL_PATTERNS + shared.STRUCTURAL_PATTERNS + hooks.DANGEROUS_PATTERNS:
         n = shared.blind_scan(label, pattern, unpacked_dir, work)
-        total += n
+        if label not in structural_labels:
+            total += n
         details.append((label, n))
     return total, details
 
@@ -124,6 +129,7 @@ def write_verdict(  # noqa: C901
     diff_scan_matches: int,
     clone_ok: bool,
     version_tag: str,
+    commit_guessed: bool,
     source_url: str,
     badge: dict,
     extra_files: int,
@@ -158,7 +164,7 @@ def write_verdict(  # noqa: C901
     if extra_files > 5:
         risk_parts.append(f'MANY_EXTRA_FILES({extra_files})')
     if binary_files > 0:
-        risk_parts.append(f'BINARY_FILES({binary_files})')
+        risk_parts.append(f'EMBEDDED_EXECUTABLES({binary_files})')
     if manifest.get('extensions') == 'YES':
         risk_parts.append('NATIVE_EXTENSION')
     if manifest.get('post_install_msg') == 'YES':
@@ -263,7 +269,7 @@ def write_verdict(  # noqa: C901
     lines.append(sec('ADVERSARIAL CONTENT SCANS'))
     lines.append('Scanned full package for: Unicode bidi controls, zero-width characters,')
     lines.append('non-ASCII in identifiers (homoglyph attacks), prompt-injection text targeting')
-    lines.append('AI reviewers, suspiciously long lines (possible hidden content).')
+    lines.append('AI reviewers, lines with 1000+ spaces/tabs before non-whitespace (hidden content).')
     adversarial_labels = {label for label, _ in shared.ADVERSARIAL_PATTERNS}
     adversarial_matches = 0
     for label, count in scan_details:
@@ -278,6 +284,24 @@ def write_verdict(  # noqa: C901
         lines.append('    Do NOT approve without human inspection of the matched file paths.')
     else:
         lines.append('All clean \u2014 no evidence of content designed to deceive reviewers.')
+
+    # ---- STRUCTURAL ANOMALIES ----
+    # Rendered only when STRUCTURAL_PATTERNS is non-empty.
+    if shared.STRUCTURAL_PATTERNS:
+        lines.append(sec('STRUCTURAL ANOMALIES'))
+        structural_labels = {label for label, _ in shared.STRUCTURAL_PATTERNS}
+        structural_matches = 0
+        for label, count in scan_details:
+            if label not in structural_labels:
+                continue
+            marker = '[!]' if count > 0 else '[ ]'
+            suffix = f'  \u2014 see summary-scan-{label}.txt for affected files' if count > 0 else ''
+            lines.append(f'{marker} {label}: {count}{suffix}')
+            structural_matches += count
+        if structural_matches > 0:
+            lines.append('[~] Structural anomalies detected. Review matched file paths.')
+        else:
+            lines.append('All clean.')
 
     # ---- DANGEROUS CODE PATTERNS ----
     lines.append(sec('DANGEROUS CODE PATTERNS'))
@@ -304,7 +328,15 @@ def write_verdict(  # noqa: C901
     # ---- SOURCE REPOSITORY ----
     lines.append(sec('SOURCE REPOSITORY'))
     lines.append(f'URL  : {shared.sanitize(source_url) if source_url else "(not found in manifest)"}')
-    if clone_ok:
+    if clone_ok and commit_guessed:
+        sha_display = version_tag.removeprefix('GUESSED:')[:12]
+        lines.append(f'Clone: GUESSED — no version tag; commit {sha_display} inferred from history')
+        lines.append('Context: *** COMMIT IDENTITY NOT CONFIRMED BY A VERSION TAG ***')
+        lines.append('  The script matched the version string in recent commit messages and checked')
+        lines.append('  out the best candidate. This is less reliable than a signed version tag.')
+        lines.append('  Nearby commits are listed in clone-status.txt for human verification.')
+        lines.append('  The AI reviewer MUST explicitly flag this in the analysis report.')
+    elif clone_ok:
         tag_str = f'tag: {shared.sanitize(version_tag)}' if version_tag else 'no tag recorded'
         lines.append(f'Clone: OK ({tag_str})')
         lines.append('Context: Package verified to come from a tagged commit. The tag match does not')
@@ -340,17 +372,25 @@ def write_verdict(  # noqa: C901
         lines.append('None (or clone not available).')
     lines.append('Details: extra-in-package.txt')
 
-    # ---- BINARY FILES ----
-    lines.append(sec('BINARY FILES'))
-    lines.append(f'Binary files in package: {binary_files}')
+    # ---- EMBEDDED EXECUTABLES ----
+    lines.append(sec('EMBEDDED EXECUTABLES'))
+    lines.append('Detected by magic-byte prefix (ELF, PE, Mach-O, WebAssembly, Java .class)')
+    lines.append('and by extension (.exe, .jar, .war, .ear, .aar).')
+    lines.append(f'Precompiled executables in package: {binary_files}')
     if binary_files > 0:
         bin_path = work / 'binary-files.txt'
         if bin_path.is_file():
-            for bline in bin_path.read_text(encoding='utf-8').splitlines()[2:12]:
-                if bline.strip():
-                    lines.append(f'  {shared.sanitize(bline)}')
-        lines.append('Context: Binary files without corresponding source are difficult to audit and')
-        lines.append('  may contain malicious code. Native extensions with source in the repo are expected.')
+            entries = [
+                l for l in bin_path.read_text(encoding='utf-8').splitlines()
+                if l.strip() and not l.startswith('EMBEDDED_EXECUTABLES:')
+            ]
+            for bline in entries[:10]:
+                lines.append(f'  {shared.sanitize(bline)}')
+            if len(entries) > 10:
+                lines.append(f'  ... and {len(entries) - 10} more (see binary-files.txt)')
+        lines.append('Context: Precompiled executables that have no corresponding source in the')
+        lines.append('  repository cannot be audited and may contain malicious code. Native')
+        lines.append('  extensions built from source at install time are expected to have source.')
     else:
         lines.append('None detected.')
     lines.append('Details: binary-files.txt')
@@ -519,7 +559,14 @@ def write_verdict(  # noqa: C901
             f'- Large diff ({diff_lines} lines): automated scans passed, but this volume of change\n'
             '  was not semantically reviewed. Consider whether a manual diff review is warranted.'
         )
-    if not clone_ok:
+    if clone_ok and commit_guessed:
+        questions.append(
+            '- Source commit was GUESSED (no version tag exists). The script inferred the commit\n'
+            '  from commit-message text. Review clone-status.txt for the guessed commit hash and\n'
+            '  nearby commits. Explicitly note this uncertainty in your analysis report and ask\n'
+            '  the human reviewer to verify the commit identity independently.'
+        )
+    elif not clone_ok:
         questions.append(
             '- Source clone failed or no source URL: package content was not verified against\n'
             '  upstream source. This is a meaningful verification gap.'
@@ -531,8 +578,8 @@ def write_verdict(  # noqa: C901
         )
     if binary_files > 0:
         questions.append(
-            f'- {binary_files} binary files detected. Review binary-files.txt to confirm all have\n'
-            '  corresponding source code.'
+            f'- {binary_files} precompiled executable(s) detected (ELF/PE/Mach-O/Wasm/Java .class).\n'
+            '  Review binary-files.txt and confirm each has corresponding source in the repository.'
         )
     scan_hits = [label for label, count in scan_details if count > 0]
     if scan_hits:
@@ -567,7 +614,7 @@ def write_verdict(  # noqa: C901
         for label in scan_hits:
             lines.append(f'  summary-scan-{label}.txt')
     if extra_files > 0 or binary_files > 0:
-        lines.append('If extra files or binary files found:')
+        lines.append('If extra files or embedded executables found:')
         lines.append('  extra-in-package.txt, binary-files.txt')
     if not_in_lf or (added and diff_mode):
         lines.append('If dependencies concern:')
@@ -805,9 +852,12 @@ def run_analysis(  # noqa: C901
     # 4. Source clone
     print()
     print('--- Source repository clone ---')
-    clone_ok, version_tag = shared.clone_source_repo(source_url, pkgname, new_ver, work)
+    clone_ok, version_tag, commit_guessed = shared.clone_source_repo(source_url, pkgname, new_ver, work)
     print(f'  Source URL: {shared.sanitize(source_url) or "(none)"}')
-    print(f'  Clone: {"OK" if clone_ok else ("SKIPPED" if not source_url else "FAILED/SKIPPED")}')
+    if clone_ok and commit_guessed:
+        print(f'  Clone: GUESSED (no version tag; commit inferred from history)')
+    else:
+        print(f'  Clone: {"OK" if clone_ok else ("SKIPPED" if not source_url else "FAILED/SKIPPED")}')
 
     # 5. OpenSSF Badge
     print()
@@ -840,9 +890,9 @@ def run_analysis(  # noqa: C901
 
     # 7. Binary files
     print()
-    print('--- Binary file detection ---')
+    print('--- Embedded executable detection ---')
     binary_files = shared.detect_binary_files(unpacked_dir, work) if unpacked_dir else 0
-    print(f'  Binary files detected: {binary_files}')
+    print(f'  Precompiled executables detected: {binary_files}')
 
     # 8. Old version + diff + diff scans (UPDATE mode only)
     old_result: dict = {}
@@ -1000,7 +1050,7 @@ def run_analysis(  # noqa: C901
     write_verdict(
         work, pkgname, old_ver, new_ver, diff_mode, deeper, sha256,
         manifest, scan_details, total_matches, diff_scan_details, diff_scan_matches,
-        clone_ok, version_tag, source_url, badge,
+        clone_ok, version_tag, commit_guessed, source_url, badge,
         extra_files, binary_files,
         diff_lines, changed_files,
         registry, scorecard, health_concerns,
