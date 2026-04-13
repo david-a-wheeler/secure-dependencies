@@ -494,6 +494,108 @@ def cmd_status(args: argparse.Namespace) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Environment / tool check
+# ---------------------------------------------------------------------------
+
+def _which(cmd: str) -> bool:
+    """Return True if cmd is on PATH."""
+    import shutil
+    return shutil.which(cmd) is not None
+
+
+def cmd_env_check(_args: argparse.Namespace) -> None:  # noqa: C901
+    """Check for optional tools that improve install-probe analysis.
+
+    Prints a structured report and, for any tool that is missing but would
+    meaningfully improve the analysis, prints an INSTALL_SUGGESTION line so
+    the AI can relay it to the user.
+
+    Exit codes:
+      0  all install-probe tools found (best backend available)
+      1  some tools missing (degraded or no install-probe available)
+    """
+    found: dict[str, bool] = {
+        'strace':            _which('strace'),
+        'bwrap':             _which('bwrap'),
+        'docker':            _which('docker'),
+        'runsc':             _which('runsc'),          # gVisor kernel
+        'package-analysis':  _which('package-analysis'),
+    }
+
+    # Determine install-probe backend
+    if found['package-analysis'] and found['docker']:
+        backend = 'package-analysis'
+        backend_note = 'best: gVisor isolation + structured output'
+    elif found['bwrap'] and found['strace']:
+        backend = 'bwrap+strace'
+        backend_note = 'good: namespace isolation + syscall tracing'
+    elif found['strace']:
+        backend = 'strace-only'
+        backend_note = 'limited: syscall tracing, no filesystem isolation'
+    else:
+        backend = 'none'
+        backend_note = '--install-probe unavailable'
+
+    print('=== INSTALL-PROBE ENVIRONMENT CHECK ===')
+    print()
+    print('Tool availability:')
+    for tool, ok in found.items():
+        status = 'found' if ok else 'NOT FOUND'
+        print(f'  {tool:<22} {status}')
+
+    print()
+    print(f'INSTALL_PROBE_BACKEND: {backend}  ({backend_note})')
+
+    # Suggest missing tools that would meaningfully improve the backend
+    suggestions: list[tuple[str, str, str]] = []  # (tool, reason, install_hint)
+
+    if not found['package-analysis'] or not found['docker']:
+        if backend != 'package-analysis':
+            suggestions.append((
+                'ossf/package-analysis + Docker',
+                'provides gVisor-sandboxed install with structured behavioral output; '
+                'detects network calls, file writes, and credential access better than strace alone',
+                'Install Docker (https://docs.docker.com/get-docker/), then:\n'
+                '    go install github.com/ossf/package-analysis/cmd/package-analysis@latest\n'
+                '  or download a pre-built binary from the releases page.',
+            ))
+
+    if not found['bwrap'] and backend not in ('package-analysis', 'bwrap+strace'):
+        suggestions.append((
+            'bubblewrap (bwrap)',
+            'lightweight Linux namespace sandbox; needed for bwrap+strace backend',
+            'apt install bubblewrap  # Debian/Ubuntu\n'
+            '    dnf install bubblewrap  # Fedora/RHEL',
+        ))
+
+    if not found['strace'] and backend == 'none':
+        suggestions.append((
+            'strace',
+            'syscall tracer; minimum requirement for any install-probe monitoring',
+            'apt install strace  # Debian/Ubuntu\n'
+            '    dnf install strace  # Fedora/RHEL',
+        ))
+
+    if suggestions:
+        print()
+        print('Optional tools not installed that would improve install-probe analysis:')
+        for tool, reason, hint in suggestions:
+            print()
+            print(f'  [{tool}]')
+            print(f'  Why: {reason}')
+            print(f'  How: {hint}')
+        print()
+        print('SUGGESTION: Ask the user if they would like to install the above tool(s)')
+        print('  before proceeding. If yes, install and re-run env-check to confirm.')
+        print('  If no, proceed — install-probe will use the available backend.')
+        sys.exit(1)
+    else:
+        print()
+        print('All recommended tools present. install-probe is fully operational.')
+        sys.exit(0)
+
+
+# ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
 
@@ -557,6 +659,13 @@ def main() -> None:
     p_status = sub.add_parser('status', help='Print session state and NEXT_ACTION.')
     p_status.add_argument('session', metavar='SESSION_FILE')
 
+    # env-check
+    sub.add_parser(
+        'env-check',
+        help='Check for optional tools that improve --install-probe analysis. '
+             'Run once at the start of each session.',
+    )
+
     args = parser.parse_args()
     dispatch = {
         'init': cmd_init,
@@ -565,6 +674,7 @@ def main() -> None:
         'confirm-depth': cmd_confirm_depth,
         'abort': cmd_abort,
         'status': cmd_status,
+        'env-check': cmd_env_check,
     }
     dispatch[args.command](args)
 

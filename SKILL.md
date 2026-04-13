@@ -75,6 +75,27 @@ This skill operates in one of three modes determined by what the user asks for:
 
 ## Phase 1: Identify What to Analyze
 
+### Step 0: Environment check (once per session)
+
+Before doing anything else, run:
+
+```bash
+python3 SCRIPTS_DIR/dep_session.py env-check
+```
+
+Read the output. It will either confirm all tools are present, or list missing
+tools that would improve `--install-probe` analysis, with install instructions.
+If tools are suggested, relay this to the user:
+
+> "Optional tool(s) not installed: [X]. [One-sentence reason it helps].
+> Would you like to install it before we start?"
+
+If yes, follow the printed install instructions and re-run `env-check` to
+confirm. If no, proceed — the available backend will be used automatically.
+**Ask only once; do not re-prompt per package.**
+
+---
+
 Detect the project's ecosystem(s):
 
 | Ecosystem | Indicator files |

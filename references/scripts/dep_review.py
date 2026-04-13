@@ -789,13 +789,28 @@ def run_analysis(  # noqa: C901
     work: Path,
     diff_mode: bool,
     deeper: bool,
+    install_probe: bool = False,
     registry_url: str | None = None,
     session_file: Path | None = None,
 ) -> None:
     """Execute full analysis for one package version."""
+    import shutil
     failures: list[str] = []
     start_time = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
     mode_label = 'UPDATE' if diff_mode else 'NEW/CURRENT'
+
+    # Determine install-probe backend once, up front, so it appears in the header.
+    if install_probe:
+        if shutil.which('package-analysis') and shutil.which('docker'):
+            probe_backend = 'package-analysis'
+        elif shutil.which('bwrap') and shutil.which('strace'):
+            probe_backend = 'bwrap+strace'
+        elif shutil.which('strace'):
+            probe_backend = 'strace-only'
+        else:
+            probe_backend = 'none'
+    else:
+        probe_backend = 'n/a'
 
     print('============================================================')
     print(f' dep_review.py [{hooks.ECOSYSTEM}]')
@@ -806,6 +821,7 @@ def run_analysis(  # noqa: C901
     else:
         print(f' Version : {new_ver}')
     print(f' Deeper  : {"YES" if deeper else "NO"}')
+    print(f' Probe   : {"YES — backend: " + probe_backend if install_probe else "NO"}')
     print(f' Started : {start_time}')
     print(f' Output  : {work}')
     print('============================================================')
@@ -1044,6 +1060,26 @@ def run_analysis(  # noqa: C901
             'old_ok': old_result.get('ok', False),
         }
 
+    # Install-probe: sandboxed behavioral analysis with honeytokens
+    if install_probe:
+        print()
+        print('--- Install-probe ---')
+        if probe_backend == 'none':
+            print('  SKIPPED: no suitable backend found.')
+            print('  Install bwrap+strace or ossf/package-analysis, then re-run with --install-probe.')
+            print('  Run: dep_session.py env-check  for installation guidance.')
+            failures.append('install-probe-no-backend')
+        else:
+            print(f'  Backend: {probe_backend}')
+            print('  NOTE: --install-probe execution is not yet implemented.')
+            print('  This stub confirms flag parsing and backend detection work correctly.')
+            # TODO: implement per-backend probe execution
+            #   package-analysis: invoke via docker with structured JSON output
+            #   bwrap+strace:     bwrap --unshare-net ... gem install ... with strace -f
+            #   strace-only:      strace -f -e trace=network,openat,connect gem install ...
+            # In all cases: plant fake AWS_ACCESS_KEY_ID / GITHUB_TOKEN in env,
+            # monitor strace output for credential access and outbound connections.
+
     # Write verdict
     print()
     print('--- Writing verdict ---')
@@ -1146,6 +1182,13 @@ Mode flags (at least one required):
   --basic             Full security analysis: download, scan, diff, badge check.
   --deeper            Reproducible-build verification. Runs --basic first if
                       basic artifacts are not already present in the work dir.
+  --install-probe     Behavioral analysis: run the package installer inside a
+                      sandbox with honeytoken credentials and monitor for
+                      suspicious activity (network calls, unexpected writes,
+                      credential access). Runs --basic first if needed.
+                      Backend is chosen automatically: ossf/package-analysis
+                      (best) → bwrap+strace → strace-only.
+                      Run "dep_session.py env-check" to see what is available.
 
 Options:
   --old OLD_VERSION   Previous installed version; enables diff (UPDATE mode).
@@ -1206,6 +1249,7 @@ def main() -> None:  # noqa: C901 (complexity acceptable for CLI validation)
     do_alternatives = False
     do_basic = False
     do_deeper = False
+    do_install_probe = False
     positional: list[str] = []
     errors: list[str] = []
 
@@ -1251,6 +1295,8 @@ def main() -> None:  # noqa: C901 (complexity acceptable for CLI validation)
             do_basic = True
         elif tok == '--deeper':
             do_deeper = True
+        elif tok == '--install-probe':
+            do_install_probe = True
         elif tok.startswith('--'):
             errors.append(f'Unknown flag: {tok}')
         else:
@@ -1335,17 +1381,19 @@ def main() -> None:  # noqa: C901 (complexity acceptable for CLI validation)
             )
 
     # --- Validate: at least one mode ---
-    if not (do_alternatives or do_basic or do_deeper):
+    if not (do_alternatives or do_basic or do_deeper or do_install_probe):
         errors.append(
             'No analysis mode specified. Choose at least one:\n'
-            '  --alternatives   typosquat / stdlib-overlap check\n'
-            '  --basic          full security analysis\n'
-            '  --deeper         reproducible-build verification\n'
+            '  --alternatives    typosquat / stdlib-overlap check\n'
+            '  --basic           full security analysis\n'
+            '  --deeper          reproducible-build verification\n'
+            '  --install-probe   sandboxed behavioral analysis with honeytokens\n'
             '\n'
             '  Common invocations:\n'
             '    Review an update:       --basic --old OLD_VERSION\n'
             '    New dependency:         --alternatives --basic\n'
-            '    Post-basic deep dive:   --deeper'
+            '    Post-basic deep dive:   --deeper\n'
+            '    Full analysis:          --basic --deeper --install-probe'
         )
 
     # --- Validate: --old only useful with --basic or --deeper ---
@@ -1467,8 +1515,20 @@ def main() -> None:  # noqa: C901 (complexity acceptable for CLI validation)
             else:
                 print('\nALTERNATIVES_RESULT: CLEAR — no concerns found')
 
-    if do_basic or do_deeper:
+    # --install-probe requires --basic artifacts; auto-enable if missing
+    if do_install_probe and not do_basic:
+        basic_sentinel = root / 'temp' / 'dep-review' / f'{pkgname}-{new_ver}' / 'verdict.txt'
+        if not basic_sentinel.exists():
+            print(
+                f'NOTE: --install-probe requested but no prior --basic run found for {pkgname} {new_ver}.\n'
+                '  Running --basic first automatically.',
+                file=sys.stderr,
+            )
+            do_basic = True
+
+    if do_basic or do_deeper or do_install_probe:
         run_analysis(hooks, pkgname, old_ver or 'none', new_ver, root, work, diff_mode, do_deeper,
+                     install_probe=do_install_probe,
                      registry_url=registry_url, session_file=session_file)
 
 
