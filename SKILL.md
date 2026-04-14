@@ -253,6 +253,25 @@ To resume an interrupted session or check state at any time:
 python3 $SCRIPTS/dep_session.py status $SESSION
 ```
 
+### Analysis depth: reading user intent
+
+Before spawning the first sub-agent, decide the analysis depth for this
+session by reading what the user asked for:
+
+| If the user said (or implied)... | Set these fields in every sub-agent brief |
+|---|---|
+| Default (nothing special) | Deeper analysis mode: NO, Install probe mode: NO |
+| "thorough", "deep", "careful", "full analysis" | Deeper analysis mode: YES, Install probe mode: NO |
+| "install probe", "sandbox", "behavioral analysis", "honeytokens" | Deeper analysis mode: YES, Install probe mode: YES |
+
+Set these flags once at session start and use the same values in every
+sub-agent brief for the session. Do not re-ask the user mid-session.
+
+If the user's intent is ambiguous, ask one clarifying question before
+initializing the session: "Would you like standard analysis, deeper
+analysis (adds reproducible-build verification), or full analysis
+(also runs a sandboxed install probe with honeytokens)?"
+
 ### Sub-Agent Brief Template
 
 ---
@@ -265,7 +284,8 @@ when you finish (intentional isolation). Do not ask follow-up questions.
 **Session file**: SESSION_FILE
 **Project root**: PROJECT_ROOT
 **Scripts dir**: PROJECT_ROOT/temp/dep-review/scripts/
-**Thorough mode**: YES | NO
+**Deeper analysis mode**: YES | NO
+**Install probe mode**: YES | NO
 
 **Your job has three steps, follow them in order.**
 
@@ -282,10 +302,21 @@ Introduced by: ...
 Run          : python3 .../dep_review.py --from REGISTRY ... --session SESSION_FILE ...
 ```
 
-Run that command exactly, capturing output:
+Run that command exactly, **appending depth-reminder flags** if set in your brief,
+then capture output:
 ```bash
+# Deeper analysis mode: NO, Install probe mode: NO
 COMMAND_FROM_NEXT_ACTION 2>&1 | tee PROJECT_ROOT/temp/dep-review/PKGNAME-VERSION/run-log.txt
+
+# Deeper analysis mode: YES, Install probe mode: NO
+COMMAND_FROM_NEXT_ACTION --deeper-mode 2>&1 | tee PROJECT_ROOT/temp/dep-review/PKGNAME-VERSION/run-log.txt
+
+# Deeper analysis mode: YES, Install probe mode: YES
+COMMAND_FROM_NEXT_ACTION --deeper-mode --install-probe-mode 2>&1 | tee PROJECT_ROOT/temp/dep-review/PKGNAME-VERSION/run-log.txt
 ```
+
+These flags embed a `NEXT_STEPS_REQUIRED` checklist in `auto-findings.txt`
+so you will see exactly which steps are still outstanding when you read it.
 
 `dep_review.py` automatically writes `session-update.json` alongside its other
 output files. You do not need to extract or relay transitive dep information,
@@ -345,7 +376,7 @@ whether a change is a mechanical refactor, a bug fix, or a code injection.
 Similarly, if `binary_files` or `extra_files` are flagged, read the listed
 file paths and use your judgment about whether they are benign or suspicious.
 
-If you decide deeper analysis is warranted (or if Thorough mode is YES), run:
+If you decide deeper analysis is warranted (or if Deeper analysis mode is YES), run:
 
 ```bash
 python3 PROJECT_ROOT/temp/dep-review/scripts/dep_review.py \
@@ -356,6 +387,20 @@ python3 PROJECT_ROOT/temp/dep-review/scripts/dep_review.py \
 
 (`--deeper` reuses the existing work dir; it does not re-download.)
 Then read: `sandbox-detection.txt`, `reproducible-build.txt`, `source-deep-diff.txt`.
+
+If Install probe mode is YES (or if `--deeper` results raise serious concerns),
+run the install probe:
+
+```bash
+python3 PROJECT_ROOT/temp/dep-review/scripts/dep_review.py \
+  --from REGISTRY --install-probe --session SESSION_FILE \
+  --root PROJECT_ROOT PKGNAME NEW_VERSION \
+  | tee -a PROJECT_ROOT/temp/dep-review/PKGNAME-NEW_VERSION/run-log.txt
+```
+
+This runs the package installer inside a sandbox with honeytoken credentials
+and monitors for suspicious activity (network calls, credential access,
+unexpected writes). Then read: `install-probe.txt`.
 
 **Step 6: write report to `PROJECT_ROOT/temp/dep-review/PKGNAME-NEW_VERSION/analysis-report.txt`:**
 

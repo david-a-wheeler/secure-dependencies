@@ -70,7 +70,7 @@ basic analysis, deeper analysis, and install probe.
 new dependency (including when you update a component and that updated
 version brings in a new dependency).
 It attempts to detect cases where the wrong dependency is used.
-If a high-confidence attack signal is found, the skill
+If a high-confidence attack signal is found, it
 stops and does not proceed to basic analysis.
 It screens the proposed package name for:
 
@@ -114,7 +114,7 @@ package it:
 - Produces a machine-readable concern summary and a risk assessment
 
 **Deeper analysis** (`--deeper`) is run on top of basic when the concern
-level warrants it or the human demands it. It adds:
+level warrants it, or when the human requests it upfront. It adds:
 
 - Reproducible-build verification: rebuilds the package from source and
   compares the result to the published artifact byte-by-byte.
@@ -128,8 +128,22 @@ level warrants it or the human demands it. It adds:
 package installer inside a sandbox with honeytoken credentials, monitoring
 for suspicious activity: unexpected network calls, credential access, and
 writes outside expected locations. This is the most invasive level and is
-used only when the other levels raise serious concerns or when the human
-demands it.
+used when the other levels raise serious concerns or when the human
+requests it upfront.
+
+### Requesting a deeper level upfront
+
+You can tell the AI which level to use before it starts. The AI sets this
+once at the beginning of the session and applies it to every package:
+
+| What to say | What happens |
+|---|---|
+| (nothing special) | Standard: alternatives check + basic analysis |
+| "thorough analysis", "deep analysis", "careful review" | Always runs `--deeper` on every package |
+| "install probe", "sandbox analysis", "full analysis" | Runs `--deeper` and `--install-probe` on every package |
+
+If the AI cannot tell which level you want, it will ask one question before
+starting.
 
 The AI runs the script that does these analyses, reads the
 output of these scripts, and applies judgment.
