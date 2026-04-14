@@ -211,6 +211,129 @@ def write_auto_findings(  # noqa: C901
     risk_flags = ' '.join(risk_parts) or 'NONE'
     positive_flags = ' '.join(positive_parts) or 'NONE'
 
+    # ---- Pre-compute adversarial gate and concern summary ----
+    adversarial_labels_set = {label for label, _ in shared.ADVERSARIAL_PATTERNS}
+    adversarial_gate_matches = sum(
+        count for label, count in scan_details if label in adversarial_labels_set
+    )
+    dangerous_matches_count = total_matches - adversarial_gate_matches
+
+    # Build concern list: (label, "value  [annotation]")
+    # Each entry represents one distinct concern area; count drives CONCERN_LEVEL.
+    _concerns: list[tuple[str, str]] = []
+
+    if adversarial_gate_matches > 0:
+        _concerns.append((
+            'adversarial_scans',
+            f'{adversarial_gate_matches} matches  '
+            '[ABORT — content designed to deceive reviewers; do not read further files]',
+        ))
+    if dangerous_matches_count > 0:
+        _concerns.append((
+            'dangerous_patterns',
+            f'{dangerous_matches_count} matches  [review summary-scan-*.txt for affected file paths]',
+        ))
+    if diff_scan_matches > 0:
+        _concerns.append((
+            'diff_scan_matches',
+            f'{diff_scan_matches} matches  [review summary-scan-*.txt diff section for affected paths]',
+        ))
+    if license_status == 'CRITICAL':
+        _concerns.append((
+            'license',
+            'MISSING  [no legal basis for security audits; strong predictor of abandonment and unpatched vulnerabilities]',
+        ))
+    elif license_status == 'CONCERN':
+        _concerns.append((
+            'license',
+            f'{license_spdx}  [non-OSI; external researchers cannot legally audit, fix, or fork]',
+        ))
+    if license_changed:
+        _concerns.append((
+            'license_changed',
+            'YES  [may indicate maintainer dispute or hostile fork]',
+        ))
+    _last_rel = registry.get('last_release_days')
+    if _last_rel is not None and _last_rel > 548:  # 18 months
+        _concerns.append((
+            'last_release',
+            f'{_last_rel} days ago  [exceeds 18-month threshold; likely unmaintained; vulnerabilities unlikely to be patched]',
+        ))
+    _age_yr = registry.get('age_years_float')
+    if _age_yr is not None and _age_yr < 0.5:
+        _age_days = int(_age_yr * 365)
+        _concerns.append((
+            'package_age',
+            f'{_age_days} days  [< 6 months; limited community review; higher abandonment and name-squatting risk]',
+        ))
+    _owner_count = registry.get('owner_count_int')
+    if _owner_count == 1:
+        _concerns.append((
+            'owner_count',
+            '1  [single owner; high-value target for account takeover or social engineering]',
+        ))
+    _stability = registry.get('version_stability', '')
+    if _stability == 'pre-release':
+        _concerns.append((
+            'version_stability',
+            'pre-release  [0.x/alpha/beta — security guarantees rarely made for pre-release versions]',
+        ))
+    if scorecard != 'not found':
+        try:
+            _sc_val = float(scorecard.split('/')[0])
+            if _sc_val < 4.0:
+                _concerns.append((
+                    'scorecard',
+                    f'{scorecard}  [below 4.0 threshold; typical range 3–7; indicates multiple security practice failures]',
+                ))
+        except (ValueError, IndexError):
+            pass
+    if binary_files > 0:
+        _concerns.append((
+            'binary_files',
+            f'{binary_files}  [present; unusual for a {ecosystem} package; inspect before approving]',
+        ))
+    if extra_files > 5:
+        _concerns.append((
+            'extra_files',
+            f'{extra_files}  [unusually high; threshold is 5; review extra-in-package.txt]',
+        ))
+    if manifest.get('extensions') == 'YES':
+        _concerns.append((
+            'native_extensions',
+            'YES  [compiled code runs at install time; review extconf.rb/setup.py for malicious build steps]',
+        ))
+    if manifest.get('executables') == 'YES':
+        _concerns.append((
+            'executables',
+            'YES  [new executables added to PATH; risk of persistence or path hijacking]',
+        ))
+    if diff_mode and diff_lines > 500:
+        _concerns.append((
+            'diff_lines',
+            f'{diff_lines}  [large update diff; threshold is 500; read diff-filenames.txt and key changed files for semantic meaning]',
+        ))
+    _not_in_lockfile = transitive.get('not_in_lockfile', [])
+    if _not_in_lockfile:
+        _lf_note = '  [unusually large transitive footprint; review each new dep]' if len(_not_in_lockfile) > 10 \
+            else '  [not in lockfile; each is a new unreviewed code surface]'
+        _concerns.append(('new_transitive_deps', f'{len(_not_in_lockfile)}{_lf_note}'))
+    if failures:
+        _concerns.append((
+            'step_failures',
+            f'{len(failures)} step(s) failed  [analysis may be incomplete; results less reliable]',
+        ))
+
+    _concern_count = len(_concerns)
+    if _concern_count == 0:
+        _concern_level = 'NONE'
+    elif _concern_count <= 1:
+        _concern_level = 'LOW'
+    elif _concern_count <= 3:
+        _concern_level = 'MEDIUM'
+    else:
+        _concern_level = 'HIGH'
+
     lines: list[str] = []
 
     # ---- Header ----
@@ -225,6 +348,18 @@ def write_auto_findings(  # noqa: C901
     lines.append('')
     lines.append(f'RISK_FLAGS    : {risk_flags}')
     lines.append(f'POSITIVE_FLAGS: {positive_flags}')
+    _gate_str = 'ABORT' if adversarial_gate_matches > 0 else 'CLEAR'
+    lines.append(f'ADVERSARIAL_GATE: {_gate_str}')
+    lines.append('')
+    lines.append('CONCERN_SUMMARY:')
+    if _concerns:
+        _label_w = max(len(lbl) for lbl, _ in _concerns) + 2
+        for _lbl, _ann in _concerns:
+            lines.append(f'  {_lbl:<{_label_w}}: {_ann}')
+    else:
+        lines.append('  (none)')
+    lines.append(f'CONCERN_COUNT: {_concern_count}')
+    lines.append(f'CONCERN_LEVEL: {_concern_level}  (LOW=1, MEDIUM=2-3, HIGH=4+)')
 
     # ---- LICENSE ----
     lines.append(sec('LICENSE'))

@@ -18,6 +18,11 @@
 #   deeper-done       Mark a MEDIUM-risk package as having completed --deeper analysis.
 #   generate-manifest Regenerate the install manifest from current session state.
 #   env-check         Check for optional install-probe tools; suggest any missing ones.
+#   report            Generate Phase 3 summary cards from all analyzed packages.
+#   wrap-up           Generate the session progress file.
+#   vuln-audit        Run the ecosystem's vulnerability auditor; format two-group output.
+#   follow-on         Bucket remaining outdated packages into A/B/C/D.
+#   health-scan       Fetch health metadata for all installed packages; print triage table.
 #
 # Workflow:
 #   dep_session.py init --from REGISTRY --root DIR [--update N O N] [--new N V]
@@ -42,6 +47,7 @@ if sys.version_info < (3, 10):
 import argparse
 import json
 import re
+import subprocess
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -786,6 +792,723 @@ def cmd_env_check(_args: argparse.Namespace) -> None:  # noqa: C901
 
 
 # ---------------------------------------------------------------------------
+# Utility subcommands: report, wrap-up, vuln-audit, follow-on, health-scan
+# ---------------------------------------------------------------------------
+
+# Lockfile indicator files per ecosystem — shared by multiple subcommands.
+ECOSYSTEM_INDICATOR_FILES: dict[str, list[str]] = {
+    'rubygems': ['Gemfile.lock'],
+    'pypi':     ['requirements.txt', 'pyproject.toml', 'poetry.lock', 'uv.lock', 'Pipfile.lock'],
+    'npm':      ['package-lock.json', 'yarn.lock', 'pnpm-lock.yaml'],
+}
+
+
+def _detect_ecosystems(root: Path) -> list[str]:
+    """Return list of ecosystem names whose lockfile indicators exist under root."""
+    return [eco for eco, files in ECOSYSTEM_INDICATOR_FILES.items()
+            if any((root / f).is_file() for f in files)]
+
+
+def _run_cmd(cmd: list[str], cwd: Path) -> tuple[int, str, str]:
+    """Run cmd in cwd; return (returncode, stdout, stderr). Never raises."""
+    try:
+        result = subprocess.run(  # noqa: S603
+            cmd, cwd=str(cwd), capture_output=True, text=True, timeout=120,
+        )
+        return result.returncode, result.stdout, result.stderr
+    except FileNotFoundError:
+        return -1, '', f'Command not found: {cmd[0]}'
+    except subprocess.TimeoutExpired:
+        return -2, '', f'Command timed out: {" ".join(cmd)}'
+    except OSError as e:
+        return -3, '', str(e)
+
+
+def _parse_auto_findings(path: Path) -> dict[str, str]:
+    """Extract key fields from a machine-written auto-findings.txt.
+
+    Returns a dict of field_name → string.  Missing fields are absent.
+    Tolerant of old-format files that pre-date ADVERSARIAL_GATE / CONCERN_SUMMARY.
+    """
+    if not path.is_file():
+        return {}
+
+    fields: dict[str, str] = {}
+    current_section = ''
+    section_lines: dict[str, list[str]] = {}
+
+    for raw in path.read_text(encoding='utf-8', errors='replace').splitlines():
+        line = raw.rstrip()
+
+        if line.startswith('=== ') and line.endswith(' ==='):
+            current_section = line[4:-4].strip()
+            section_lines.setdefault(current_section, [])
+            continue
+
+        section_lines.setdefault(current_section, []).append(line)
+
+        # Top-level key: value lines in the preamble
+        for prefix, key in (
+            ('SHA256    : ',       'sha256'),
+            ('RISK_FLAGS    : ',   'risk_flags'),
+            ('POSITIVE_FLAGS: ',   'positive_flags'),
+            ('ADVERSARIAL_GATE: ', 'adversarial_gate'),
+            ('CONCERN_COUNT: ',    'concern_count'),
+        ):
+            if line.startswith(prefix):
+                fields[key] = line[len(prefix):].strip()
+                break
+
+        if line.startswith('CONCERN_LEVEL: '):
+            fields['concern_level'] = line[len('CONCERN_LEVEL: '):].split()[0]
+        elif line.startswith('Ecosystem : '):
+            m = re.search(r'Mode:\s*(\S+)', line)
+            if m:
+                fields['mode'] = m.group(1).upper()
+        elif line.startswith('From      : '):
+            fields['old_version'] = line[len('From      : '):].strip()
+
+    # LICENSE section: "SPDX: X  |  OSI-approved: Y  |  Status: Z"
+    for ln in section_lines.get('LICENSE', []):
+        if ln.startswith('SPDX:'):
+            fields['license_line'] = ln
+            break
+
+    # PROJECT HEALTH section: "Age: X yr  |  Last release: Y days ago  |  ..."
+    for ln in section_lines.get('PROJECT HEALTH', []):
+        if ln.startswith('Age:'):
+            fields['health_line'] = ln
+            break
+
+    # SOURCE REPOSITORY section
+    for ln in section_lines.get('SOURCE REPOSITORY', []):
+        if ln.startswith('URL  :'):
+            fields['clone_url'] = ln[len('URL  :'):].strip()
+        elif ln.startswith('Clone:'):
+            fields['clone_status'] = ln[len('Clone:'):].strip()
+
+    # MANIFEST / INSTALL HOOKS section
+    for ln in section_lines.get('MANIFEST / INSTALL HOOKS', []):
+        if ln.startswith('Native extensions'):
+            fields['extensions'] = 'YES' if 'YES' in ln else 'NO'
+        elif ln.startswith('Executables added to PATH'):
+            fields['executables'] = 'YES' if 'YES' in ln else 'NO'
+
+    # new_transitive_deps from CONCERN_SUMMARY (lives in the preamble, section key '')
+    in_concern = False
+    for ln in section_lines.get('', []):
+        stripped = ln.strip()
+        if stripped == 'CONCERN_SUMMARY:':
+            in_concern = True
+            continue
+        if in_concern:
+            if stripped.startswith('new_transitive_deps'):
+                val = stripped.split(':', 1)[1].strip() if ':' in stripped else ''
+                fields['new_transitive_deps'] = val.split()[0] if val else ''
+            if stripped.startswith('CONCERN_') or (stripped and not ln.startswith(' ')):
+                in_concern = False
+
+    return fields
+
+
+def _parse_report_summary(path: Path) -> str:
+    """Extract the SUMMARY: paragraph from an AI-written analysis-report.txt."""
+    if not path.is_file():
+        return '(analysis-report.txt not found)'
+    summary_lines: list[str] = []
+    in_summary = False
+    for line in path.read_text(encoding='utf-8', errors='replace').splitlines():
+        if line.startswith('SUMMARY:'):
+            in_summary = True
+            rest = line[len('SUMMARY:'):].strip()
+            if rest:
+                summary_lines.append(rest)
+            continue
+        if in_summary:
+            if re.match(r'^[A-Z_]+:', line) and not line.startswith(' '):
+                break
+            summary_lines.append(line.strip())
+    text = ' '.join(p for p in summary_lines if p)
+    return text or '(no SUMMARY in analysis-report.txt)'
+
+
+def cmd_report(args: argparse.Namespace) -> None:
+    """Generate Phase 3 summary cards from analyzed packages in this session."""
+    session_path = Path(args.session).resolve()
+    session = load_session(session_path)
+    root = Path(session['project_root'])
+    analyzed: dict = session.get('analyzed', {})
+
+    if not analyzed:
+        print('No packages have been analyzed yet in this session.')
+        return
+
+    registry = session['registry']
+    print('=== DEPENDENCY REVIEW REPORT ===')
+    print(f'Ecosystem: {registry}  |  Packages analyzed: {len(analyzed)}')
+    print()
+
+    for _key, v in analyzed.items():
+        name = v['name']
+        version = v['version']
+        rec = v.get('recommendation', 'UNKNOWN')
+        risk = v.get('risk', 'UNKNOWN')
+        work_dir = root / 'temp' / 'dep-review' / f'{name}-{version}'
+        af = _parse_auto_findings(work_dir / 'auto-findings.txt')
+        summary = _parse_report_summary(work_dir / 'analysis-report.txt')
+
+        pkg_mode = af.get('mode', 'UNKNOWN')
+        old_ver = af.get('old_version', '')
+        sha = af.get('sha256', '(not found)').split()[0]
+        gate = af.get('adversarial_gate', 'UNKNOWN')
+        concern_count = af.get('concern_count', '?')
+        concern_level = af.get('concern_level', '?')
+        mfa = 'YES' if 'MFA_ENFORCED' in af.get('positive_flags', '') else 'NO'
+        extensions = af.get('extensions', '?')
+        executables = af.get('executables', '?')
+        license_line = af.get('license_line', '(see license.txt)')
+        health_line = af.get('health_line', '(see project-health.txt)')
+        clone_status = af.get('clone_status', 'UNKNOWN')
+        clone_url = af.get('clone_url', '')
+        clone_display = (f'OK ({clone_url})' if clone_status.upper().startswith('OK') and clone_url
+                         else clone_status)
+        new_trans = af.get('new_transitive_deps', 'N/A' if pkg_mode == 'UPDATE' else '?')
+        report_path = f'temp/dep-review/{name}-{version}/analysis-report.txt'
+
+        version_str = f'{old_ver} → {version}' if old_ver else version
+        print(f'## {name} {version_str}: {rec} / {risk} risk')
+        print()
+        print(f'Summary: {summary}')
+        print()
+        print(f'SHA256: {sha}')
+        print(f'MFA: {mfa}   Extensions: {extensions}   Executables: {executables}')
+        print(f'License: {license_line}')
+        print(f'Project health: {health_line}')
+        if pkg_mode not in ('UPDATE',):
+            print(f'New transitive deps: {new_trans}')
+        print(f'Adversarial gate: {gate}  |  Concern level: {concern_level} ({concern_count} areas)')
+        print(f'Source clone: {clone_display}')
+        print()
+        print(f'Full report: {report_path}')
+        print()
+        print('---')
+        print()
+
+    approved = [v for v in analyzed.values()
+                if v.get('recommendation') in ('APPROVE', 'APPROVE_WITH_CAUTION')
+                and (not v.get('deeper_needed') or v.get('deeper_done'))]
+    flagged = [v for v in analyzed.values()
+               if v.get('recommendation') in ('REVIEW_MANUALLY', 'DO_NOT_INSTALL')]
+
+    if approved:
+        names = ', '.join(v['name'] for v in approved)
+        print(f'SUGGESTED_NEXT: Shall I install the approved packages ({names})?')
+        print(f'  Run: dep_session.py generate-manifest {session_path}')
+    if flagged:
+        fnames = ', '.join(v['name'] for v in flagged)
+        print(f'SUGGESTED_NEXT: {len(flagged)} package(s) flagged ({fnames}) — '
+              'review analysis reports before proceeding.')
+
+
+def cmd_wrap_up(args: argparse.Namespace) -> None:
+    """Generate (or append to) the session progress file."""
+    session_path = Path(args.session).resolve()
+    session = load_session(session_path)
+    root = Path(session['project_root'])
+    registry = session['registry']
+    analyzed: dict = session.get('analyzed', {})
+
+    today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+    hour = datetime.now(timezone.utc).strftime('%H')
+    base_path = root / 'temp' / 'dep-review' / f'progress-{today}.md'
+    out_path = (root / 'temp' / 'dep-review' / f'progress-{today}T{hour}.md'
+                if base_path.is_file() else base_path)
+
+    col_w = 24
+    lines: list[str] = [
+        f'# Dependency Session: {today}',
+        f'Ecosystem: {registry}',
+        f'Session: {session_path}',
+        '',
+        '## Vulnerability audit',
+        '(run `dep_session.py vuln-audit --root .` and paste summary here)',
+        '',
+        '## Packages analyzed',
+        '',
+        '| Package | Mode | From → To | SHA256 (first 12) | License | Status | Report |',
+        '|---------|------|-----------|-------------------|---------|--------|--------|',
+    ]
+
+    for _key, v in analyzed.items():
+        name = v['name']
+        version = v['version']
+        rec = v.get('recommendation', 'pending')
+        risk = v.get('risk', '')
+        work_dir = root / 'temp' / 'dep-review' / f'{name}-{version}'
+        af = _parse_auto_findings(work_dir / 'auto-findings.txt')
+        pkg_mode = af.get('mode', '?')
+        old_ver = af.get('old_version', '')
+        sha = af.get('sha256', '?').split()[0][:12]
+        lic_raw = af.get('license_line', '?')
+        spdx = lic_raw.split('|')[0].replace('SPDX:', '').strip() if '|' in lic_raw else lic_raw
+        ver_str = f'{old_ver} → {version}' if old_ver else version
+        status = f'{rec} / {risk}' if risk else rec
+        rep_rel = f'temp/dep-review/{name}-{version}/analysis-report.txt'
+        lines.append(
+            f'| {name} | {pkg_mode} | {ver_str} | {sha} | {spdx} | {status} | '
+            f'[report]({rep_rel}) |'
+        )
+
+    lines += ['', f'*Generated by `dep_session.py wrap-up` at {_now()}*']
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+    print(f'Progress file written: {out_path}')
+
+    gitignore = root / '.gitignore'
+    if gitignore.is_file():
+        gi = gitignore.read_text(encoding='utf-8', errors='replace')
+        if 'temp/' not in gi and 'temp/*' not in gi:
+            print('REMINDER: Add "temp/" to .gitignore to avoid committing analysis artifacts.')
+    else:
+        print('REMINDER: Create .gitignore with "temp/" to avoid committing analysis artifacts.')
+
+
+# ---------------------------------------------------------------------------
+# Vulnerability audit subcommand
+# ---------------------------------------------------------------------------
+
+# Primary auditor commands per ecosystem
+_VULN_CMDS: dict[str, list[str]] = {
+    'rubygems': ['bundle', 'audit', 'check', '--update'],
+    'pypi':     ['pip-audit'],
+    'npm':      ['npm', 'audit', '--json'],
+}
+# Fallback if primary not available
+_VULN_FALLBACK: dict[str, list[str] | None] = {
+    'rubygems': None,
+    'pypi':     ['safety', 'check'],
+    'npm':      None,
+}
+# Outdated-package check commands per ecosystem
+_OUTDATED_CMDS: dict[str, list[str]] = {
+    'rubygems': ['bundle', 'outdated', '--strict'],
+    'pypi':     ['pip', 'list', '--outdated', '--format=columns'],
+    'npm':      ['npm', 'outdated'],
+}
+
+
+def _format_bundler_audit(output: str) -> None:
+    vuln_entries: list[str] = []
+    cur: dict[str, str] = {}
+    for line in output.splitlines():
+        s = line.strip()
+        if s.startswith('Name:'):
+            cur = {'name': s[5:].strip()}
+        elif s.startswith('Version:') and cur:
+            cur['version'] = s[8:].strip()
+        elif s.startswith('Advisory:') and cur:
+            cur['advisory'] = s[9:].strip()
+        elif s.startswith('Criticality:') and cur:
+            cur['severity'] = s[12:].strip()
+        elif s.startswith('Title:') and cur:
+            cur['title'] = s[6:].strip()
+        elif s.startswith('Solution:') and cur:
+            cur['solution'] = s[9:].strip()
+            vuln_entries.append(
+                f'  {cur.get("name","?")} {cur.get("version","?")}  '
+                f'[{cur.get("advisory","?")}]  Severity: {cur.get("severity","?")}  '
+                f'Fix: {cur.get("solution","?")}  — {cur.get("title","")}'
+            )
+            cur = {}
+    if vuln_entries:
+        print('Group 1: KNOWN VULNERABILITIES (act first)')
+        for ln in vuln_entries:
+            print(ln)
+    else:
+        print('Group 1: No known vulnerabilities found.')
+
+
+def _format_pip_audit(stdout: str, rc: int, tool: str) -> None:
+    if tool == 'pip-audit':
+        vuln_lines: list[str] = []
+        for line in stdout.splitlines():
+            parts = line.split()
+            if len(parts) >= 3 and parts[2].startswith(('CVE-', 'GHSA-', 'PYSEC-')):
+                vuln_lines.append(f'  {parts[0]} {parts[1]}  [{parts[2]}]')
+        if vuln_lines:
+            print('Group 1: KNOWN VULNERABILITIES (act first)')
+            for ln in vuln_lines:
+                print(ln)
+        else:
+            print('Group 1: No known vulnerabilities found.')
+    else:
+        if rc != 0 and stdout.strip():
+            print('Group 1: KNOWN VULNERABILITIES (act first)')
+            print(stdout.rstrip())
+        else:
+            print('Group 1: No known vulnerabilities found.')
+
+
+def _format_npm_audit(stdout: str, rc: int) -> None:
+    vuln_lines: list[str] = []
+    try:
+        data = json.loads(stdout)
+        for pkg_name, info in data.get('vulnerabilities', {}).items():
+            sev = info.get('severity', '?')
+            via = info.get('via', [])
+            advisories = [v.get('url', '') for v in via if isinstance(v, dict) and v.get('url')]
+            fix = 'fix available' if info.get('fixAvailable') else 'no fix yet'
+            adv = f'  {advisories[0]}' if advisories else ''
+            vuln_lines.append(f'  {pkg_name}  Severity: {sev}  {fix}{adv}')
+    except (json.JSONDecodeError, AttributeError):
+        if rc != 0 and stdout.strip():
+            print('Group 1: KNOWN VULNERABILITIES (raw output — JSON parse failed):')
+            print(stdout[:2000])
+            return
+    if vuln_lines:
+        print('Group 1: KNOWN VULNERABILITIES (act first)')
+        for ln in vuln_lines:
+            print(ln)
+    else:
+        print('Group 1: No known vulnerabilities found.')
+
+
+def cmd_vuln_audit(args: argparse.Namespace) -> None:  # noqa: C901
+    """Detect ecosystem, run vulnerability auditor, format output in two groups."""
+    import shutil as _shutil
+    root = Path(args.root).resolve()
+    ecosystems = args.ecosystems if getattr(args, 'ecosystems', None) else _detect_ecosystems(root)
+    if not ecosystems:
+        print('No recognized lockfile found in project root.')
+        print('Looked for: Gemfile.lock, requirements.txt, pyproject.toml, package-lock.json …')
+        sys.exit(1)
+
+    for eco in ecosystems:
+        cmd_list = _VULN_CMDS.get(eco, [])
+        if not cmd_list:
+            continue
+
+        tool_name = cmd_list[0]
+        if not _shutil.which(cmd_list[0]):
+            fallback = _VULN_FALLBACK.get(eco)
+            if fallback and _shutil.which(fallback[0]):
+                cmd_list = fallback
+                tool_name = cmd_list[0]
+            else:
+                print(f'[{eco}] Auditor not installed: {cmd_list[0]}')
+                if eco == 'rubygems':
+                    print('  Install: gem install bundler-audit')
+                elif eco == 'pypi':
+                    print('  Install: pip install pip-audit   (or: pip install safety)')
+                elif eco == 'npm':
+                    print('  npm audit is bundled with npm — check your npm installation.')
+                print('  Proceeding without vulnerability audit for this ecosystem.')
+                continue
+
+        print(f'=== VULNERABILITY AUDIT: {eco.upper()} (via {tool_name}) ===')
+        print()
+        rc, stdout, stderr = _run_cmd(cmd_list, root)
+
+        if rc == -1:
+            print(f'ERROR: {tool_name} not found on PATH.')
+            continue
+
+        if eco == 'rubygems':
+            _format_bundler_audit(stdout + stderr)
+        elif eco == 'pypi':
+            _format_pip_audit(stdout, rc, tool_name)
+        elif eco == 'npm':
+            _format_npm_audit(stdout, rc)
+
+        print()
+        outdated_cmd = _OUTDATED_CMDS.get(eco, [])
+        if outdated_cmd and _shutil.which(outdated_cmd[0]):
+            print('Group 2: OTHER OUTDATED PACKAGES')
+            rc2, out2, _ = _run_cmd(outdated_cmd, root)
+            if out2.strip():
+                print(out2.rstrip())
+            else:
+                print('  All packages are up to date.')
+        print()
+
+
+# ---------------------------------------------------------------------------
+# Follow-on subcommand
+# ---------------------------------------------------------------------------
+
+def cmd_follow_on(args: argparse.Namespace) -> None:  # noqa: C901
+    """Bucket remaining outdated packages into A/B/C/D after a session."""
+    import shutil as _shutil
+    root = Path(args.root).resolve()
+    ecosystems = ([args.registry] if getattr(args, 'registry', None)
+                  else _detect_ecosystems(root))
+
+    session_flagged: set[str] = set()
+    if getattr(args, 'session', None):
+        try:
+            s = load_session(Path(args.session).resolve())
+            for v in s.get('analyzed', {}).values():
+                if v.get('recommendation') in ('REVIEW_MANUALLY', 'DO_NOT_INSTALL'):
+                    session_flagged.add(v['name'].lower())
+        except SystemExit:
+            pass
+
+    if not ecosystems:
+        print('No recognized lockfile found. Specify --from or run from the project root.')
+        sys.exit(1)
+
+    for eco in ecosystems:
+        outdated_cmd = _OUTDATED_CMDS.get(eco, [])
+        if not outdated_cmd or not _shutil.which(outdated_cmd[0]):
+            tool = outdated_cmd[0] if outdated_cmd else '(none)'
+            print(f'[{eco}] Cannot run outdated check — {tool} not found.')
+            continue
+
+        print(f'=== FOLLOW-ON UPDATE PLAN: {eco.upper()} ===')
+        print()
+        rc, stdout, _ = _run_cmd(outdated_cmd, root)
+        if not stdout.strip():
+            print('All packages are up to date.')
+            print()
+            continue
+
+        bucket_a: list[str] = []   # available within constraints
+        bucket_b: list[str] = []   # likely blocked by constraint
+        bucket_c: list[str] = []   # flagged this session
+
+        for line in stdout.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.lower().startswith(('package', '---', 'gem ', 'npm ')):
+                continue
+            name_guess = stripped.split()[0].lower().rstrip('@').strip('*')
+            if name_guess in session_flagged:
+                bucket_c.append(f'  {stripped}  [flagged this session]')
+            elif '~>' in stripped or '>=' in stripped or 'Gemfile requirement' in stripped:
+                # Heuristic: line contains a constraint indicator
+                bucket_b.append(f'  {stripped}  [constraint may block update]')
+            else:
+                bucket_a.append(f'  {stripped}')
+
+        def _print_bucket(label: str, items: list[str]) -> None:
+            print(label)
+            if items:
+                for ln in items:
+                    print(ln)
+            else:
+                print('  (none)')
+            print()
+
+        _print_bucket('Bucket A — available within current constraints:', bucket_a)
+        _print_bucket('Bucket B — may be blocked by version constraints:', bucket_b)
+        _print_bucket('Bucket C — deferred/flagged this session:', bucket_c)
+        print('Bucket D — all other installed packages: already at latest version.')
+        print()
+        print('NOTE: Run `dep_session.py vuln-audit --root .` to identify [VULNERABILITY]')
+        print('      packages in Bucket B before relaxing any constraints.')
+        print()
+
+
+# ---------------------------------------------------------------------------
+# Health-scan subcommand
+# ---------------------------------------------------------------------------
+
+# Minimal set of common OSI-approved SPDX identifiers (upper-case for comparison).
+_OSI_LICENSES: frozenset[str] = frozenset({
+    'MIT', 'APACHE-2.0', 'BSD-2-CLAUSE', 'BSD-3-CLAUSE',
+    'GPL-2.0', 'GPL-2.0-ONLY', 'GPL-2.0-OR-LATER',
+    'GPL-3.0', 'GPL-3.0-ONLY', 'GPL-3.0-OR-LATER',
+    'LGPL-2.0', 'LGPL-2.1', 'LGPL-2.1-ONLY', 'LGPL-2.1-OR-LATER',
+    'LGPL-3.0', 'LGPL-3.0-ONLY', 'LGPL-3.0-OR-LATER',
+    'MPL-2.0', 'ISC', 'EUPL-1.2', 'AGPL-3.0', 'AGPL-3.0-ONLY', 'AGPL-3.0-OR-LATER',
+    'EPL-2.0', 'CC0-1.0', 'UNLICENSE', 'ARTISTIC-2.0', 'RUBY',
+    'PSF-2.0', 'PYTHON-2.0',
+})
+_STALE_THRESHOLD_DAYS = 548   # ~18 months
+_SCORECARD_THRESHOLD  = 4.0
+
+
+def _query_pkg_metadata(name: str, registry: str,
+                         registry_url: str | None) -> dict:
+    """Fetch license and last-release-days from the registry. Returns {} on failure."""
+    result: dict = {'license': None, 'last_release_days': None}
+    try:
+        if registry == 'rubygems':
+            base = (registry_url or 'https://rubygems.org').rstrip('/')
+            url = f'{base}/api/v1/gems/{name}.json'
+            req = urllib.request.Request(
+                url, headers={'User-Agent': 'dep_session/1 (security-review)'},
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:  # noqa: S310
+                data = json.loads(resp.read().decode('utf-8', errors='replace'))
+            lic = data.get('licenses') or data.get('license_links', '')
+            result['license'] = ', '.join(lic) if isinstance(lic, list) else (lic or None)
+            ts_str = data.get('version_created_at') or data.get('created_at')
+            if ts_str:
+                ts = ts_str.rstrip('Z').split('.')[0]
+                dt = datetime.strptime(ts, '%Y-%m-%dT%H:%M:%S').replace(tzinfo=timezone.utc)
+                result['last_release_days'] = (datetime.now(timezone.utc) - dt).days
+
+        elif registry == 'pypi':
+            base = (registry_url or 'https://pypi.org').rstrip('/')
+            url = f'{base}/pypi/{name}/json'
+            req = urllib.request.Request(
+                url, headers={'User-Agent': 'dep_session/1 (security-review)'},
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:  # noqa: S310
+                data = json.loads(resp.read().decode('utf-8', errors='replace'))
+            result['license'] = data.get('info', {}).get('license') or None
+            latest = data.get('info', {}).get('version', '')
+            files = data.get('releases', {}).get(latest, [])
+            if files:
+                ts_str = files[-1].get('upload_time_iso_8601') or files[-1].get('upload_time', '')
+                if ts_str:
+                    ts = ts_str.rstrip('Z').split('.')[0]
+                    dt = datetime.strptime(ts, '%Y-%m-%dT%H:%M:%S').replace(tzinfo=timezone.utc)
+                    result['last_release_days'] = (datetime.now(timezone.utc) - dt).days
+
+        elif registry == 'npm':
+            base = (registry_url or 'https://registry.npmjs.org').rstrip('/')
+            url = f'{base}/{name}'
+            req = urllib.request.Request(
+                url,
+                headers={'User-Agent': 'dep_session/1 (security-review)',
+                         'Accept': 'application/json'},
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:  # noqa: S310
+                data = json.loads(resp.read().decode('utf-8', errors='replace'))
+            latest = data.get('dist-tags', {}).get('latest', '')
+            lic = (data.get('versions', {}).get(latest, {}).get('license')
+                   or data.get('license'))
+            result['license'] = str(lic) if lic else None
+            ts_str = data.get('time', {}).get(latest, '')
+            if ts_str:
+                ts = ts_str.rstrip('Z').split('.')[0]
+                dt = datetime.strptime(ts, '%Y-%m-%dT%H:%M:%S').replace(tzinfo=timezone.utc)
+                result['last_release_days'] = (datetime.now(timezone.utc) - dt).days
+
+    except Exception:  # noqa: BLE001
+        pass
+    return result
+
+
+def _list_installed_names(root: Path, registry: str) -> list[str]:
+    """Return a list of installed package names for the ecosystem."""
+    if registry == 'rubygems':
+        lf = root / 'Gemfile.lock'
+        if not lf.is_file():
+            return []
+        names: list[str] = []
+        in_specs = False
+        for line in lf.read_text(encoding='utf-8', errors='replace').splitlines():
+            if line.strip() == 'specs:':
+                in_specs = True
+                continue
+            if in_specs:
+                m = re.match(r'^    ([A-Za-z0-9_\-\.]+)\s', line)
+                if m:
+                    names.append(m.group(1))
+                elif line and not line[0].isspace():
+                    in_specs = False
+        return names
+    elif registry == 'pypi':
+        import shutil as _shutil
+        if _shutil.which('pip'):
+            rc, out, _ = _run_cmd(['pip', 'list', '--format=columns'], root)
+            names = []
+            for line in out.splitlines():
+                parts = line.split()
+                if (parts and not parts[0].lower().startswith('package')
+                        and not parts[0].startswith('-')):
+                    names.append(parts[0])
+            return names
+    elif registry == 'npm':
+        import shutil as _shutil
+        if _shutil.which('npm'):
+            rc, out, _ = _run_cmd(['npm', 'list', '--depth=0', '--json'], root)
+            try:
+                return list(json.loads(out).get('dependencies', {}).keys())
+            except (json.JSONDecodeError, AttributeError):
+                pass
+    return []
+
+
+def cmd_health_scan(args: argparse.Namespace) -> None:
+    """Fetch health metadata for all installed packages and print an annotated triage table."""
+    root = Path(args.root).resolve()
+    registry = args.registry
+    registry_url = getattr(args, 'registry_url', None)
+
+    packages = _list_installed_names(root, registry)
+    if not packages:
+        print(f'No installed packages found for {registry} in {root}')
+        sys.exit(1)
+
+    print(f'=== HEALTH SCAN RESULTS: {registry.upper()} ({len(packages)} packages) ===')
+    print()
+    print('Fetching metadata from registry... (may take a moment for large projects)')
+    print()
+
+    W_PKG, W_LIC, W_REL, W_SC, W_CONC = 24, 20, 20, 10, 38
+
+    def _hr() -> str:
+        return (f'+{"-"*(W_PKG+2)}+{"-"*(W_LIC+2)}+{"-"*(W_REL+2)}'
+                f'+{"-"*(W_SC+2)}+{"-"*(W_CONC+2)}+')
+
+    def _row(p: str, li: str, rel: str, sc: str, co: str) -> str:
+        return (f'| {p:<{W_PKG}} | {li:<{W_LIC}} | {rel:<{W_REL}}'
+                f' | {sc:<{W_SC}} | {co:<{W_CONC}} |')
+
+    print(_hr())
+    print(_row('Package', 'License', 'Last Release', 'Scorecard', 'Concerns'))
+    print(_hr())
+
+    flagged: list[tuple[str, list[str]]] = []
+    for pkg_name in packages:
+        meta = _query_pkg_metadata(pkg_name, registry, registry_url)
+        lic = (meta.get('license') or 'MISSING')
+        days = meta.get('last_release_days')
+        rel_str = (f'{days} days ago*' if days is not None and days > _STALE_THRESHOLD_DAYS
+                   else f'{days} days ago' if days is not None else 'unknown')
+        sc_str = 'N/A'  # scorecard not fetched in basic scan; requires deps.dev call
+
+        concerns: list[str] = []
+        lic_upper = lic.upper()
+        if lic_upper in ('MISSING', 'NONE', 'UNKNOWN', ''):
+            concerns.append('LICENSE_MISSING')
+            lic_display = 'MISSING*'
+        elif lic_upper not in _OSI_LICENSES:
+            concerns.append(f'LICENSE_NON_OSI')
+            lic_display = f'{lic[:W_LIC-1]}*'
+        else:
+            lic_display = lic[:W_LIC]
+        if days is not None and days > _STALE_THRESHOLD_DAYS:
+            concerns.append(f'STALE ({days}d > {_STALE_THRESHOLD_DAYS}d threshold)')
+
+        conc_str = (', '.join(concerns) if concerns else 'none')
+
+        print(_row(pkg_name[:W_PKG], lic_display[:W_LIC], rel_str[:W_REL],
+                   sc_str[:W_SC], conc_str[:W_CONC]))
+        if concerns:
+            flagged.append((pkg_name, concerns))
+
+    print(_hr())
+    print('* exceeds threshold or concern')
+    print()
+
+    if flagged:
+        print(f'FLAGGED_PACKAGES: {len(flagged)} of {len(packages)}')
+        for name, concerns in flagged:
+            for c in concerns:
+                print(f'  {name}: {c}')
+        print()
+        print('SUGGESTED_NEXT: Which flagged packages would you like to deep-dive?')
+        print(f'  Run: dep_session.py init --from {registry} --root . --new NAME VERSION')
+    else:
+        print('No health concerns detected.')
+
+
+# ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
 
@@ -872,17 +1595,70 @@ def main() -> None:
              'Run once at the start of each session.',
     )
 
+    # report
+    p_report = sub.add_parser(
+        'report',
+        help='Generate Phase 3 summary cards from analyzed packages in the session.',
+    )
+    p_report.add_argument('session', metavar='SESSION_FILE')
+
+    # wrap-up
+    p_wrapup = sub.add_parser(
+        'wrap-up',
+        help='Generate (or append to) the session progress file.',
+    )
+    p_wrapup.add_argument('session', metavar='SESSION_FILE')
+
+    # vuln-audit
+    p_vuln = sub.add_parser(
+        'vuln-audit',
+        help='Detect ecosystem, run vulnerability auditor, format results in two groups.',
+    )
+    p_vuln.add_argument('--root', required=True, metavar='DIR',
+                        help='Project root directory')
+    p_vuln.add_argument('--ecosystems', nargs='+', metavar='ECO',
+                        help='Override auto-detected ecosystem(s): rubygems | pypi | npm')
+
+    # follow-on
+    p_followon = sub.add_parser(
+        'follow-on',
+        help='Bucket remaining outdated packages into A/B/C/D after a session.',
+    )
+    p_followon.add_argument('--root', required=True, metavar='DIR',
+                            help='Project root directory')
+    p_followon.add_argument('--from', dest='registry', metavar='REGISTRY',
+                            help='rubygems | pypi | npm (auto-detected if omitted)')
+    p_followon.add_argument('--session', metavar='SESSION_FILE',
+                            help='Session file to identify packages flagged this session')
+
+    # health-scan
+    p_health = sub.add_parser(
+        'health-scan',
+        help='Fetch health metadata for all installed packages and print a triage table.',
+    )
+    p_health.add_argument('--root', required=True, metavar='DIR',
+                          help='Project root directory')
+    p_health.add_argument('--from', dest='registry', required=True,
+                          metavar='REGISTRY', help='rubygems | pypi | npm')
+    p_health.add_argument('--registry-url', metavar='URL',
+                          help='Override registry base URL (https:// required)')
+
     args = parser.parse_args()
     dispatch = {
-        'init': cmd_init,
-        'complete': cmd_complete,
-        'resolve': cmd_resolve,
-        'confirm-depth': cmd_confirm_depth,
-        'abort': cmd_abort,
-        'status': cmd_status,
-        'deeper-done': cmd_deeper_done,
+        'init':              cmd_init,
+        'complete':          cmd_complete,
+        'resolve':           cmd_resolve,
+        'confirm-depth':     cmd_confirm_depth,
+        'abort':             cmd_abort,
+        'status':            cmd_status,
+        'deeper-done':       cmd_deeper_done,
         'generate-manifest': cmd_generate_manifest,
-        'env-check': cmd_env_check,
+        'env-check':         cmd_env_check,
+        'report':            cmd_report,
+        'wrap-up':           cmd_wrap_up,
+        'vuln-audit':        cmd_vuln_audit,
+        'follow-on':         cmd_follow_on,
+        'health-scan':       cmd_health_scan,
     }
     dispatch[args.command](args)
 
