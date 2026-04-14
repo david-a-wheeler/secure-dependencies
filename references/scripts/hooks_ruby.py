@@ -29,6 +29,16 @@ import analysis_shared as shared
 ECOSYSTEM = 'ruby'
 LOCKFILE_NAME = 'Gemfile.lock'
 
+# Name of the primary manifest file (copied to work dir during analysis).
+MANIFEST_FILE = 'gemspec.txt'
+
+# Human-readable summary of what DANGEROUS_PATTERNS scans for.
+DANGEROUS_WHAT = (
+    'eval/exec variants, shell execution, obfuscated execution, Marshal.load, '
+    'network at load scope, credential env-var access, home-dir writes, '
+    'dynamic dispatch on external input, at_exit hooks'
+)
+
 DANGEROUS_PATTERNS: list[tuple[str, str]] = [
     ('eval-variants',
      r'\b(?:eval|instance_eval|class_eval|module_eval|binding\.eval)\s*[\(\{]'),
@@ -300,6 +310,20 @@ def read_manifest(
         (work / 'manifest-analysis.txt').write_text('ERROR: gemspec not found\n', encoding='utf-8')
 
     has_install_scripts = (work / 'install-scripts.txt').is_file()
+
+    # Build ecosystem-specific context for the driver's MANIFEST / INSTALL HOOKS section
+    install_hook_context: list[str] = []
+    if extensions == 'YES':
+        install_hook_context.extend([
+            'Context: Compiled code runs during gem install. The build process can execute',
+            '  arbitrary code. Verify extconf.rb and Makefile in the source are benign.',
+        ])
+    if has_rakefile_tasks == 'YES':
+        install_hook_context.extend([
+            'Context: Rakefile install tasks were found. These execute during gem install.',
+            '  Review install-scripts.txt for malicious or unexpected behavior.',
+        ])
+
     return {
         'source_url': source_url,
         'extensions': extensions,
@@ -311,6 +335,11 @@ def read_manifest(
         'runtime_dep_lines': runtime_dep_lines,
         'gemspec_license_raw': gemspec_license_raw,
         'gemspec_text': gemspec_text,
+        # Standardized aliases used by the driver across ecosystems
+        'has_build_hooks': has_rakefile_tasks,
+        'manifest_license_raw': gemspec_license_raw,
+        'manifest_extra_file': 'gemspec.txt',
+        'install_hook_context': install_hook_context,
     }
 
 
@@ -394,6 +423,31 @@ def get_old_license(
         return None
     old_gs_text = old_gs_path.read_text(encoding='utf-8', errors='replace')
     return _extract_gemspec_license(old_gs_text) or None
+
+
+def get_old_dep_lines(
+    pkgname: str,
+    old_ver: str,
+    old_result: dict,
+) -> list[str]:
+    """Extract runtime dependency lines from the old version's gemspec.
+
+    Returns list of raw lines containing add_runtime_dependency or add_dependency.
+    """
+    if not old_result.get('ok'):
+        return []
+    old_unpacked_dir = old_result.get('unpacked_dir')
+    if not old_unpacked_dir or not Path(old_unpacked_dir).is_dir():
+        return []
+    old_gs_path = Path(old_unpacked_dir) / f'{pkgname}.gemspec'
+    if not old_gs_path.is_file():
+        return []
+    old_gs_text = old_gs_path.read_text(encoding='utf-8', errors='replace')
+    return [
+        l for l in old_gs_text.splitlines()
+        if 'add_runtime_dependency' in l or
+           ('add_dependency' in l and 'development' not in l)
+    ]
 
 
 def fetch_all_registry_data(

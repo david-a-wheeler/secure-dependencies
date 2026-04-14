@@ -98,21 +98,10 @@ def run_diff_scans(hooks, work: Path, diff_lines: int) -> int:
 # ---------------------------------------------------------------------------
 
 def _get_old_dep_lines(hooks, pkgname: str, old_ver: str, old_result: dict) -> list[str]:
-    """Extract runtime dep lines from old gemspec, if available."""
-    if not old_result.get('ok'):
-        return []
-    old_unpacked_dir = old_result.get('unpacked_dir')
-    if not old_unpacked_dir or not old_unpacked_dir.is_dir():
-        return []
-    old_gs_path = old_unpacked_dir / f'{pkgname}.gemspec'
-    if not old_gs_path.is_file():
-        return []
-    old_gs_text = old_gs_path.read_text(encoding='utf-8', errors='replace')
-    return [
-        l for l in old_gs_text.splitlines()
-        if 'add_runtime_dependency' in l or
-           ('add_dependency' in l and 'development' not in l)
-    ]
+    """Extract runtime dep lines from old package manifest, via ecosystem hooks."""
+    if hasattr(hooks, 'get_old_dep_lines'):
+        return hooks.get_old_dep_lines(pkgname, old_ver, old_result)
+    return []
 
 
 # ---------------------------------------------------------------------------
@@ -448,10 +437,13 @@ def write_auto_findings(  # noqa: C901
 
     # ---- DANGEROUS CODE PATTERNS ----
     lines.append(sec('DANGEROUS CODE PATTERNS'))
-    dangerous_what = (
-        'eval/exec variants, shell execution, obfuscated execution, Marshal.load, '
-        'network at load scope, credential env-var access, home-dir writes, '
-        'dynamic dispatch on external input, at_exit hooks'
+    # Use ecosystem-specific description if the hooks module provides one,
+    # otherwise fall back to a generic summary.
+    dangerous_what = manifest.get(
+        '_dangerous_what',
+        'eval/exec variants, shell execution, obfuscated execution, unsafe deserialization, '
+        'network calls at import/load scope, credential env-var access, home-dir writes, '
+        'dynamic dispatch on external input, install-time hooks',
     )
     lines.append(f'Scanned for: {dangerous_what}')
     dangerous_matches = 0
@@ -580,20 +572,27 @@ def write_auto_findings(  # noqa: C901
     ext = manifest.get('extensions', 'NO')
     lines.append(f'Native extensions (compile at install): {ext}')
     if ext == 'YES':
-        lines.append('Context: Compiled code runs during gem install. The build process can execute')
-        lines.append('  arbitrary code. Verify extconf.rb and Makefile in the source are benign.')
+        lines.append('Context: Compiled code runs during package installation. The build')
+        lines.append('  process can execute arbitrary code. Verify build scripts in the source.')
     exe = manifest.get('executables', 'NO')
     lines.append(f'Executables added to PATH: {exe}')
     if exe == 'YES':
         lines.append(f'  Files: {manifest.get("executables_list", "(see manifest-analysis.txt)")}')
     lines.append(f'Post-install message: {manifest.get("post_install_msg", "NO")}')
-    lines.append(f'Rakefile install tasks: {manifest.get("has_rakefile_tasks", "NO")}')
+    # has_build_hooks is the generic key; has_rakefile_tasks is the Ruby alias
+    _build_hooks = manifest.get('has_build_hooks', manifest.get('has_rakefile_tasks', 'NO'))
+    lines.append(f'Build hooks / install-time code: {_build_hooks}')
     if manifest.get('has_install_scripts') == 'YES':
         lines.append('Install-time scripts extracted: YES  [READ install-scripts.txt]')
-        lines.append('  Context: extconf.rb, Makefile.in, and/or Rakefile install tasks were')
-        lines.append('  found. These files execute during gem install. Review install-scripts.txt')
-        lines.append('  for malicious or unexpected behavior before approving this package.')
-    lines.append('Details: manifest-analysis.txt')
+        # Use ecosystem-specific context if provided; fall back to a generic message
+        for ctx_line in manifest.get('install_hook_context', [
+            '  Context: code was found that executes during package installation.',
+            '  Review install-scripts.txt for malicious or unexpected behavior.',
+        ]):
+            lines.append(ctx_line)
+    _manifest_detail = manifest.get('manifest_extra_file', '')
+    _detail_suffix = f', {_manifest_detail}' if _manifest_detail else ''
+    lines.append(f'Details: manifest-analysis.txt{_detail_suffix}')
 
     # ---- DEPENDENCIES ----
     lines.append(sec('DEPENDENCIES'))
@@ -753,7 +752,9 @@ def write_auto_findings(  # noqa: C901
     # ---- FILES FOR FURTHER REVIEW ----
     lines.append(sec('FILES FOR FURTHER REVIEW'))
     lines.append('Always useful:')
-    lines.append('  manifest-analysis.txt, gemspec.txt')
+    _extra_manifest = manifest.get('manifest_extra_file', '')
+    _manifest_files = f'manifest-analysis.txt, {_extra_manifest}' if _extra_manifest else 'manifest-analysis.txt'
+    lines.append(f'  {_manifest_files}')
     lines.append('  license.txt, project-health.txt')
     lines.append('  clone-status.txt, source-url.txt')
     lines.append('  badge-status.txt, provenance.txt')
@@ -1015,12 +1016,16 @@ def run_analysis(  # noqa: C901
     print()
     print('--- Manifest analysis ---')
     manifest = hooks.read_manifest(pkgname, new_ver, unpacked_dir, work, failures)
+    # Inject ecosystem-level metadata into manifest for write_auto_findings
+    if hasattr(hooks, 'DANGEROUS_WHAT') and '_dangerous_what' not in manifest:
+        manifest['_dangerous_what'] = hooks.DANGEROUS_WHAT
     source_url = manifest.get('source_url', '')
     print(f'  Extensions: {manifest.get("extensions", "?")}')
     print(f'  Executables: {manifest.get("executables", "?")}')
     print(f'  Post-install message: {manifest.get("post_install_msg", "?")}')
-    print(f'  Rakefile install tasks: {manifest.get("has_rakefile_tasks", "?")}')
-    print(f'  License (gemspec): {shared.sanitize(manifest.get("gemspec_license_raw", "")) or "(not declared)"}')
+    print(f'  Build hooks / install-time code: {manifest.get("has_build_hooks", manifest.get("has_rakefile_tasks", "?"))}')
+    _mlic = manifest.get('manifest_license_raw', manifest.get('gemspec_license_raw', ''))
+    print(f'  License (manifest): {shared.sanitize(str(_mlic)) or "(not declared)"}')
 
     # 3. Scans
     print()
@@ -1197,7 +1202,12 @@ def run_analysis(  # noqa: C901
     print()
     print('--- Transitive dependency footprint ---')
     run_transitive = not diff_mode or bool(not_in_lf)
-    lockfile_path = root / hooks.LOCKFILE_NAME
+    if hasattr(hooks, 'get_lockfile_path'):
+        lockfile_path = hooks.get_lockfile_path(root)
+    elif getattr(hooks, 'LOCKFILE_NAME', None):
+        lockfile_path = root / hooks.LOCKFILE_NAME
+    else:
+        lockfile_path = root / '__no_lockfile__'
     if run_transitive:
         transitive = hooks.get_transitive_deps(pkgname, new_ver, lockfile_path, work)
         print(f'  Total transitive deps: {transitive.get("total", 0)}')
@@ -1632,7 +1642,16 @@ def main() -> None:  # noqa: C901 (complexity acceptable for CLI validation)
 
     # --- Warn: no lockfile found ---
     lockfile_name = getattr(hooks, 'LOCKFILE_NAME', None)
-    if lockfile_name and not (root / lockfile_name).exists():
+    lockfile_names = getattr(hooks, 'LOCKFILE_NAMES', None)
+    if lockfile_names:
+        if not any((root / lf).exists() for lf in lockfile_names):
+            print(
+                f'WARNING: no lockfile found under {root}\n'
+                f'  Checked: {", ".join(lockfile_names)}\n'
+                '  Dependency analysis will be limited (no lockfile to cross-reference).',
+                file=sys.stderr,
+            )
+    elif lockfile_name and not (root / lockfile_name).exists():
         print(
             f'WARNING: lockfile {lockfile_name!r} not found under {root}\n'
             '  Dependency analysis will be limited (no lockfile to cross-reference).',
@@ -1671,9 +1690,10 @@ def main() -> None:  # noqa: C901 (complexity acceptable for CLI validation)
             )
             concerns = result.get('concerns', [])
             notes = result.get('notes', [])
-            gem_count = result.get('gem_count', 0)
+            # Support both 'gem_count' (Ruby) and 'pkg_count' (other ecosystems)
+            pkg_count = result.get('pkg_count', result.get('gem_count', 0))
             lockfile_count = result.get('lockfile_count', 0)
-            print(f'Alternatives check: {gem_count} installed/stdlib gems checked, '
+            print(f'Alternatives check: {pkg_count} installed/stdlib packages checked, '
                   f'{lockfile_count} lockfile deps checked')
             if concerns:
                 print(f'CONCERNS ({len(concerns)}):')
