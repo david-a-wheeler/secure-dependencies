@@ -62,8 +62,8 @@ AI never has to manage that bookkeeping manually.
 
 ## Levels of analysis
 
-This skill implements three kinds of analysis: alternatives check,
-basic analysis, and deeper analysis.
+This skill implements several kinds of analysis: alternatives check,
+basic analysis, deeper analysis, and install probe.
 
 **Alternatives check** (supported by the
 `--alternatives` script option) is used when adding a
@@ -85,13 +85,29 @@ package it:
 - Downloads the published package and computes a SHA256 hash
 - Scans for suspicious content: Unicode bidi controls, zero-width characters,
   homoglyph attacks, and prompt-injection text aimed at AI reviewers.
-  If it detects attacks on AI reviewers it stops immediately.
-- Compares the published package against the source repository (extra files,
-  missing files, precompiled binaries)
+  If it detects likely attacks on AI reviewers it stops immediately.
+- Runs language-specific dangerous-pattern detection against the full
+  package source: patterns include `eval` variants, shell execution calls,
+  obfuscated exec (Base64-decode-then-eval style), `Marshal.load`,
+  network calls at load time, credential environment variable access,
+  writes to home directories or shell config files, and `at_exit` hooks.
 - Checks the manifest for native extensions, post-install hooks, and
   new executable files
+- Clones the source repository and compares it to the published package:
+  files present in the tarball but absent from the repo, precompiled
+  binaries, and overall source match (exact, close, divergent, or unknown)
+- Checks whether the published version corresponds to a tagged commit,
+  or flags when the commit had to be inferred from history (lower confidence)
+- For updates: scans the diff for newly introduced dangerous patterns
+  (SQL injection, command injection, hardcoded secrets, eval)
 - Queries the registry for license, last-release date, maintainer count,
-  and OpenSSF Scorecard score
+  MFA enforcement status, and OpenSSF Scorecard score
+- Checks the OpenSSF Best Practices badge site
+  (bestpractices.coreinfrastructure.org):
+  projects have self-attested to meeting various security practices,
+  especially those that meet at least the `passing` or `baseline-1` criteria.
+- Flags new transitive dependencies by download count and age, since very
+  new or low-download packages carry higher supply-chain risk
 - Produces a machine-readable concern summary and a risk assessment
 
 **Deeper analysis** (`--deeper`) is run on top of basic when the concern
@@ -100,17 +116,23 @@ level warrants it or the human demands it. It adds:
 - Reproducible-build verification: rebuilds the package from source and
   compares the result to the published artifact byte-by-byte.
   Ideally they are the same (a "reproducible build"), but in some cases
-  the differences may explainable and cause no functional difference
+  the differences may be explainable and cause no functional difference
   (a "functionally equivalent build").
 - A full file-level source diff to help understand what changed between
   the source repository and the distributed package
-- Sandbox detection checks
+
+**Install probe** (`--install-probe`) goes further still and runs the
+package installer inside a sandbox with honeytoken credentials, monitoring
+for suspicious activity: unexpected network calls, credential access, and
+writes outside expected locations. This is the most invasive level and is
+used only when the other levels raise serious concerns or when the human
+demands it.
 
 The AI runs the script that does these analyses, reads the
 output of these scripts, and applies judgment.
 For example, a large code difference may be a routine refactor
 or evidence of a massive code injection.
-The AI anlaysis distinguishes these where automated tools cannot.
+The AI analysis distinguishes these where automated tools cannot.
 
 None of these options perform
 a full security review of every line of code. They are
