@@ -8,8 +8,8 @@ ecosystems.
 Its core principle is **download and inspect before you install**.
 Downloading and unpacking a package does not execute its code; installing does.
 This skill keeps those steps strictly separate and never runs untrusted code
-to examine untrusted code. If it decides to analyze more deeply, it
-uses sandboxes to reduce risk.
+to examine untrusted code. If it decides to analyze more deeply, or do
+a test installation, it uses sandboxes to reduce risk.
 
 ## What it does
 
@@ -120,7 +120,9 @@ level warrants it, or when the human requests it upfront. It adds:
   compares the result to the published artifact byte-by-byte.
   Ideally they are the same (a "reproducible build"), but in some cases
   the differences may be explainable and cause no functional difference
-  (a "functionally equivalent build").
+  (a "functionally equivalent build"). This counters attacks like
+  the xz utils supply chain attack, which intentionally created a release
+  that was not built from the repo source code.
 - A full file-level source diff to help understand what changed between
   the source repository and the distributed package
 
@@ -138,7 +140,7 @@ once at the beginning of the session and applies it to every package:
 
 | What to say | What happens |
 |---|---|
-| (nothing special) | Standard: alternatives check + basic analysis |
+| (nothing special) | Standard: alternatives check + basic analysis, doing more if indicators suggest it |
 | "thorough analysis", "deep analysis", "careful review" | Always runs `--deeper` on every package |
 | "install probe", "sandbox analysis", "full analysis" | Runs `--deeper` and `--install-probe` on every package |
 
