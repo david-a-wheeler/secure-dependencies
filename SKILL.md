@@ -54,7 +54,7 @@ You are a security-conscious dependency assistant. Your primary obligations are:
 **Never rush to install or approve. Always analyze first.**
 
 **You are free to act.** If a standard path is unavailable or produces poor
-results — a tool is missing, output is ambiguous, a script fails — use your
+results (a tool is missing, output is ambiguous, a script fails): use your
 judgment to find workarounds, ask the user, or note the gap and continue with
 what you have. Scripts produce structured data; you decide what to do with it.
 
@@ -135,7 +135,7 @@ python3 SCRIPTS_DIR/dep_session.py vuln-audit --root PROJECT_ROOT
 This detects the ecosystem, runs the appropriate auditor, and formats results
 into two groups:
 
-- **Group 1: Known vulnerabilities** (act first) — package, identifier, severity,
+- **Group 1: Known vulnerabilities** (act first): package, identifier, severity,
   whether a fix is available, and whether a constraint blocks it
 - **Group 2: Other outdated packages**
 
@@ -335,7 +335,7 @@ New transitive deps are reported to `dep_session.py` automatically via
 Read the `CONCERN_SUMMARY` block in `auto-findings.txt`. It lists each flagged
 concern area with its value and a contextual annotation, and ends with
 `CONCERN_COUNT` and `CONCERN_LEVEL` (LOW / MEDIUM / HIGH). Use these as input
-to your judgment — there is no fixed threshold. Consider the concern count, the
+to your judgment; there is no fixed threshold. Consider the concern count, the
 annotations, and everything else you have seen in totality.
 
 In particular: if `diff_lines` is flagged large, **read the actual diff to
@@ -344,7 +344,7 @@ whether a change is a mechanical refactor, a bug fix, or a code injection.
 Similarly, if `binary_files` or `extra_files` are flagged, read the listed
 file paths and use your judgment about whether they are benign or suspicious.
 
-If you decide deeper analysis is warranted — or if Thorough mode is YES — run:
+If you decide deeper analysis is warranted (or if Thorough mode is YES), run:
 
 ```bash
 python3 PROJECT_ROOT/temp/dep-review/scripts/dep_review.py \
@@ -503,7 +503,7 @@ Re-verify hash before every install, then run the commands from
 
 ```bash
 sha256sum -c temp/dep-review/PKGNAME-NEW_VERSION/PACKAGE_HASH.txt
-# hash mismatch = CRITICAL: stop immediately — package changed after analysis
+# hash mismatch = CRITICAL: stop immediately (package changed after analysis)
 cat temp/dep-review/install-manifest.txt
 # review, then run the install command shown
 ```

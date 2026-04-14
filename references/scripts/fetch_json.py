@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# fetch_json.py — Download a URL, extract specific JSON fields, and print sanitized values.
+# fetch_json.py: Download a URL, extract specific JSON fields, and print sanitized values.
 #
 # Usage: python3 fetch_json.py URL KEY [KEY ...]
 #   URL  : HTTPS URL to fetch (must start with https://)

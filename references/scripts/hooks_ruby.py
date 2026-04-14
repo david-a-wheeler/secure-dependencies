@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# hooks_ruby.py — Ruby language operations for the dependency analysis driver.
+# hooks_ruby.py: Ruby language operations for the dependency analysis driver.
 #
 # Handles the Ruby gem format (download, unpack, gemspec, Rakefile) and the
 # rubygems.org registry API. Used for --from rubygems; can be reused for other
@@ -10,7 +10,7 @@
 # Each function accepts a `failures: list[str]` param and calls
 # failures.append(...) on errors rather than raising exceptions.
 #
-# Python stdlib only — no third-party packages required.
+# Python stdlib only; no third-party packages required.
 # Requires Python 3.10+ (enforced by dep_review.py).
 
 import json
@@ -84,7 +84,7 @@ def _extract_gemspec_license(gemspec_text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Public API — called by dep_review.py
+# Public API: called by dep_review.py
 # ---------------------------------------------------------------------------
 
 def download_new(
@@ -379,7 +379,7 @@ def fetch_all_registry_data(
         ['GEM_INFO:', shared.sanitize(gi_out[:2000]) if rc_gi == 0 else '(unavailable)', '']
     )
 
-    # Gems endpoint — MFA
+    # Gems endpoint: MFA
     # RubyGems stores MFA status in metadata.rubygems_mfa_required (a string "true"/"false")
     # rather than a top-level boolean field.
     api_gem_data = shared.http_get(f'{api_base}/api/v1/gems/{pkgname}.json')
@@ -402,7 +402,7 @@ def fetch_all_registry_data(
             pass
     prov_lines.extend([f'MFA_REQUIRED: {shared.sanitize(mfa_status)}', ''])
 
-    # Versions endpoint — age, stability, license
+    # Versions endpoint: age, stability, license
     ver_api_data_bytes = shared.http_get(f'{api_base}/api/v1/versions/{pkgname}.json')
     if ver_api_data_bytes:
         try:
@@ -623,12 +623,12 @@ def check_alternatives(
     """Check for typosquat, slopsquat, and stdlib overlap signals.
 
     Three checks:
-    A — Query 'gem list' for all installed/stdlib gems; flag exact matches and
+    A: Query 'gem list' for all installed/stdlib gems; flag exact matches and
         near-matches (edit distance <= 2). Because 'gem list' includes default
         and bundled gems, this covers the stdlib without a hardcoded list.
-    C — Read Gemfile.lock for the project's direct deps; flag near-matches.
+    C: Read Gemfile.lock for the project's direct deps; flag near-matches.
         Catches attacks targeting this project's specific dependency set.
-    D — Structural heuristics: hyphen/underscore normalization, and stripping
+    D: Structural heuristics: hyphen/underscore normalization, and stripping
         common Ruby-specific name prefixes/suffixes (ruby-, -rb, etc.) to see
         if what remains matches an installed gem.
 
@@ -938,7 +938,7 @@ def reproducible_build(
         build_ok = (rc_b == 0)
 
     else:
-        # No sandbox — run directly (lower assurance)
+        # No sandbox; run directly (lower assurance)
         rc_b, b_out, b_err = shared.run_cmd(
             ['gem', 'build', source_gemspec, '--output', f'{built_gem_dir}/'],
             cwd=clone_dir,
@@ -977,7 +977,7 @@ def reproducible_build(
     if built_sha and built_sha == dist_sha:
         return finish('EXACTLY REPRODUCIBLE (sha256 match)')
 
-    # Hashes differ — unpack and compare contents
+    # Hashes differ; unpack and compare contents
     built_unpacked_parent = work / 'raw-built-unpacked'
     built_unpacked_parent.mkdir(exist_ok=True)
     shared.run_cmd(
@@ -1022,7 +1022,7 @@ def reproducible_build(
     lines.append(f'METADATA_FILE_DIFFS: {metadata_diffs}')
 
     if code_diffs > 0:
-        extra = ['WARNING: code files differ — possible injected code; human review required']
+        extra = ['WARNING: code files differ (possible injected code; human review required)']
         result = 'UNEXPECTED DIFFERENCES'
     else:
         extra = []

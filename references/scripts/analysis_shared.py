@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# analysis_shared.py — Cross-ecosystem helpers for dependency security analysis.
+# analysis_shared.py: Cross-ecosystem helpers for dependency security analysis.
 #
 # Import this from ecosystem-specific scripts:
 #   import sys
@@ -20,9 +20,7 @@
 #   - Lockfile parsing (Gemfile.lock, requirements.txt, package-lock.json)
 #   - Reproducible build (ecosystem-specific build commands)
 #
-# Python stdlib only — no third-party packages required.
-
-from __future__ import annotations
+# Python stdlib only; no third-party packages required.
 
 import hashlib
 import json
@@ -53,7 +51,7 @@ OSI_APPROVED: frozenset[str] = frozenset({
     'UPL-1.0', 'W3C', 'Zlib',
 })
 
-# Common license strings that aren't canonical SPDX — map to canonical form
+# Common license strings that aren't canonical SPDX; map to canonical form
 _LICENSE_ALIASES: dict[str, str] = {
     'apache 2.0': 'Apache-2.0',
     'apache2': 'Apache-2.0',
@@ -233,7 +231,7 @@ def blind_scan(label: str, pattern: str, target: Path, work: Path) -> int:
     rc, stdout, stderr = run_cmd(['grep', '-rnP', pattern, str(target)], timeout=60)
 
     if rc > 1:
-        # grep error (rc==2+): pattern failure or other error — not a match result
+        # grep error (rc==2+): pattern failure or other error (not a match result)
         err_msg = sanitize(stderr.strip())
         raw_file.write_text(f'GREP_ERROR: {stderr}', encoding='utf-8', errors='replace')
         summary_file.write_text(
@@ -241,7 +239,7 @@ def blind_scan(label: str, pattern: str, target: Path, work: Path) -> int:
         )
         return 0
 
-    # rc==0 means matches found; rc==1 means no matches — both are normal grep exits
+    # rc==0 means matches found; rc==1 means no matches; both are normal grep exits
     raw_file.write_text(stdout, encoding='utf-8', errors='replace')
     count = len([line for line in stdout.splitlines() if line])
     summary_lines = [f'label={label}', f'match_count={count}']
@@ -285,7 +283,7 @@ def cmd_available(name: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Adversarial scan patterns — language-agnostic; apply to every ecosystem.
+# Adversarial scan patterns: language-agnostic; apply to every ecosystem.
 # DANGEROUS_PATTERNS (language-specific eval/exec/etc.) live in each
 # ecosystem script because the idioms differ across languages.
 # ---------------------------------------------------------------------------
@@ -307,7 +305,7 @@ ADVERSARIAL_PATTERNS: list[tuple[str, str]] = [
     ('whitespace-hiding', r'[ \t]{1000,}[^ \t\r\n]'),
 ]
 
-# Structural anomaly patterns — lower severity than ADVERSARIAL_PATTERNS.
+# Structural anomaly patterns: lower severity than ADVERSARIAL_PATTERNS.
 # Kept as a separate list for future patterns that are suspicious but commonly
 # benign (e.g. very long lines in generated docs). Currently empty.
 STRUCTURAL_PATTERNS: list[tuple[str, str]] = []
@@ -328,7 +326,7 @@ def clone_source_repo(
     Writes: source-url.txt, clone-status.txt, raw-git-clone-output.txt.
     Returns: (clone_ok, version_tag, commit_guessed).
     commit_guessed is True when no version tag existed and the commit was
-    inferred from commit-message content — less reliable than a signed tag.
+    inferred from commit-message content; less reliable than a signed tag.
     """
     (work / 'source-url.txt').write_text(sanitize(source_url) + '\n', encoding='utf-8')
 
@@ -455,7 +453,7 @@ def clone_source_repo(
         ])
         source_dir = work / 'source'
         if source_dir.exists() and any(source_dir.iterdir()):
-            # Already cloned in a previous run — reuse existing checkout
+            # Already cloned in a previous run; reuse existing checkout
             (work / 'raw-git-clone-output.txt').write_text(
                 'Reused existing clone from previous run.\n', encoding='utf-8'
             )
@@ -681,7 +679,7 @@ _EXEC_EXTENSIONS: dict[str, str] = {
 def detect_binary_files(unpacked_dir: Path, work: Path) -> int:
     """Find precompiled executable files in the unpacked package.
 
-    Detection is by magic-byte prefix only — no file-command invocation,
+    Detection is by magic-byte prefix only; no file-command invocation,
     no extension guessing. Detects ELF, PE (Windows), Mach-O, WebAssembly,
     and Java .class files. PNG, JPEG, zip, gzip, and other non-executable
     binaries are intentionally NOT flagged.
@@ -747,7 +745,7 @@ def compute_diff(
 
     Writes: raw-diff-full.txt, diff-filenames.txt.
     Returns: (total_diff_lines, sanitized_changed_files_text).
-    The raw diff is intentionally not returned — callers must not read it.
+    The raw diff is intentionally not returned; callers must not read it.
     """
     if not old_dir.is_dir() or not new_dir.is_dir():
         (work / 'raw-diff-full.txt').write_text('', encoding='utf-8')
@@ -838,7 +836,7 @@ def compute_health_concerns(
 
     if last_release_days is not None and last_release_days > 548:  # ~18 months
         concerns.append(
-            f'no release in {last_release_days} days (>18 months — likely unmaintained)'
+            f'no release in {last_release_days} days (>18 months; likely unmaintained)'
         )
 
     if age_years is not None and age_years < 0.5:
@@ -892,7 +890,7 @@ def detect_sandbox(work: Path) -> str:
                 selected = 'bwrap'
         else:
             lines.append(
-                f'UNAVAILABLE: bwrap ({ver}) — probe failed'
+                f'UNAVAILABLE: bwrap ({ver}): probe failed'
                 ' (unprivileged userns likely disabled)'
             )
 
@@ -921,7 +919,7 @@ def detect_sandbox(work: Path) -> str:
             selected = 'podman'
 
     if selected == 'none':
-        lines.append('AVAILABLE: none (build will run unsandboxed — lower assurance)')
+        lines.append('AVAILABLE: none (build will run unsandboxed; lower assurance)')
 
     lines.extend(['', f'SELECTED_SANDBOX: {selected}'])
     (work / 'sandbox-detection.txt').write_text('\n'.join(lines) + '\n', encoding='utf-8')
