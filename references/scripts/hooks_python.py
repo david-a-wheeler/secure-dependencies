@@ -854,11 +854,6 @@ def fetch_all_registry_data(
     }
 
 
-def get_license_candidates(manifest: dict, registry_data: dict) -> list[str]:
-    """Delegate to the shared implementation in analysis_shared."""
-    return shared.get_license_candidates(manifest, registry_data)
-
-
 def check_lockfile(
     runtime_dep_lines: list[str],
     old_dep_lines: list[str],
@@ -951,12 +946,14 @@ def _dep_in_lockfile(dep_name: str, norm_dep: str, lf_text: str, fmt: str) -> bo
     ))
 
 
-def check_dep_registry(dep_name: str) -> dict:
+def check_dep_registry(dep_name: str, registry_url: str | None = None) -> dict:
     """PyPI JSON API lookup for a dep not in lockfile.
 
+    registry_url overrides the default pypi.org base URL for private indices.
     Returns dict with keys: downloads, first_seen, homepage.
     """
-    api_data = shared.http_get(f'https://pypi.org/pypi/{dep_name}/json')
+    api_base = registry_url.rstrip('/') if registry_url else 'https://pypi.org'
+    api_data = shared.http_get(f'{api_base}/pypi/{dep_name}/json')
     if api_data:
         try:
             info = json.loads(api_data.decode('utf-8', errors='replace'))

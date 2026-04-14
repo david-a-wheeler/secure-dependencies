@@ -1069,10 +1069,7 @@ def run_analysis(  # noqa: C901
     source_dir = work / 'source'
     if clone_ok and unpacked_dir:
         # Allow ecosystem hooks to redirect to a package subdirectory (e.g. in monorepos)
-        if hasattr(hooks, 'find_source_root'):
-            source_dir = hooks.find_source_root(source_dir)
-        elif hasattr(hooks, 'find_source_gem_root'):  # backwards compat alias
-            source_dir = hooks.find_source_gem_root(source_dir)
+        source_dir = hooks.find_source_root(source_dir)
         pkg_ex, src_ex = hooks.get_pkg_src_excludes()
         extra_files = shared.compare_pkg_vs_source(unpacked_dir, source_dir, work, pkg_ex, src_ex)
         print(f'  Extra files (package vs source): {extra_files}')
@@ -1172,7 +1169,7 @@ def run_analysis(  # noqa: C901
     # 12. License
     print()
     print('--- License evaluation ---')
-    license_candidates = hooks.get_license_candidates(manifest, registry)
+    license_candidates = shared.get_license_candidates(manifest, registry)
     old_license = (
         hooks.get_old_license(pkgname, old_ver, old_result.get('unpacked_dir'))
         if diff_mode and old_result.get('ok') else None
@@ -1193,7 +1190,7 @@ def run_analysis(  # noqa: C901
     print('--- Dependency analysis ---')
     old_dep_lines = _get_old_dep_lines(hooks, pkgname, old_ver, old_result) if diff_mode else []
     dep_result = hooks.check_lockfile(manifest.get('runtime_dep_lines', []), old_dep_lines, root)
-    dep_registry = {d: hooks.check_dep_registry(d) for d in dep_result.get('not_in_lockfile', [])}
+    dep_registry = {d: hooks.check_dep_registry(d, registry_url=registry_url) for d in dep_result.get('not_in_lockfile', [])}
     write_dep_files(work, pkgname, old_ver, new_ver, diff_mode, dep_result, dep_registry)
     not_in_lf = dep_result.get('not_in_lockfile', [])
     print(f'  Not in lockfile: {", ".join(not_in_lf) if not_in_lf else "none"}')
@@ -1202,12 +1199,7 @@ def run_analysis(  # noqa: C901
     print()
     print('--- Transitive dependency footprint ---')
     run_transitive = not diff_mode or bool(not_in_lf)
-    if hasattr(hooks, 'get_lockfile_path'):
-        lockfile_path = hooks.get_lockfile_path(root)
-    elif getattr(hooks, 'LOCKFILE_NAME', None):
-        lockfile_path = root / hooks.LOCKFILE_NAME
-    else:
-        lockfile_path = root / '__no_lockfile__'
+    lockfile_path = hooks.get_lockfile_path(root)
     if run_transitive:
         transitive = hooks.get_transitive_deps(pkgname, new_ver, lockfile_path, work)
         print(f'  Total transitive deps: {transitive.get("total", 0)}')

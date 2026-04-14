@@ -19,6 +19,11 @@ import shutil
 import sys
 from pathlib import Path
 
+# Pre-compiled patterns for reproducible-build diff classification.
+# Used in reproducible_build(); compiled once here to avoid repeated calls.
+_RE_REPRO_CODE = re.compile(r'^diff.*\.(rb|c|h|cpp|rs|js|sh)\b')
+_RE_REPRO_META = re.compile(r'^diff.*(\.gemspec|metadata|RECORD|METADATA|Gemfile)')
+
 sys.path.insert(0, str(Path(__file__).parent))
 import analysis_shared as shared
 
@@ -28,6 +33,11 @@ import analysis_shared as shared
 
 ECOSYSTEM = 'ruby'
 LOCKFILE_NAME = 'Gemfile.lock'
+
+
+def get_lockfile_path(project_root: Path) -> Path:
+    """Return the path to the Ruby lockfile (Gemfile.lock)."""
+    return project_root / LOCKFILE_NAME
 
 # Name of the primary manifest file (copied to work dir during analysis).
 MANIFEST_FILE = 'gemspec.txt'
@@ -123,7 +133,7 @@ def download_new(
     """gem fetch + gem unpack into work/unpacked/.
 
     Falls back to `gem specification` for gemspec if not present in unpacked dir.
-    Returns dict with keys: unpacked_dir (Path), sha256 (str), gem_file (Path).
+    Returns dict with keys: unpacked_dir (Path), sha256 (str), pkg_file (Path).
     """
     unpacked_dir_base = work / 'unpacked'
     unpacked_dir_base.mkdir(parents=True, exist_ok=True)
@@ -164,7 +174,7 @@ def download_new(
     return {
         'unpacked_dir': unpacked_dir,
         'sha256': sha256,
-        'gem_file': gem_file,
+        'pkg_file': gem_file,
     }
 
 
@@ -178,8 +188,9 @@ def read_manifest(
     """Parse gemspec; write manifest-analysis.txt and gemspec.txt.
 
     Returns dict with keys: source_url, extensions, executables,
-    executables_list, post_install_msg, has_rakefile_tasks,
-    runtime_dep_lines, gemspec_license_raw, gemspec_text.
+    executables_list, post_install_msg, runtime_dep_lines,
+    manifest_license_raw, manifest_text, manifest_extra_file,
+    has_build_hooks, has_install_scripts, install_hook_context.
     """
     extensions = 'NO'
     executables = 'NO'
@@ -330,14 +341,11 @@ def read_manifest(
         'executables': executables,
         'executables_list': executables_list,
         'post_install_msg': post_install_msg,
-        'has_rakefile_tasks': has_rakefile_tasks,
+        'has_build_hooks': has_rakefile_tasks,
         'has_install_scripts': 'YES' if has_install_scripts else 'NO',
         'runtime_dep_lines': runtime_dep_lines,
-        'gemspec_license_raw': gemspec_license_raw,
-        'gemspec_text': gemspec_text,
-        # Standardized aliases used by the driver across ecosystems
-        'has_build_hooks': has_rakefile_tasks,
         'manifest_license_raw': gemspec_license_raw,
+        'manifest_text': gemspec_text,
         'manifest_extra_file': 'gemspec.txt',
         'install_hook_context': install_hook_context,
     }
@@ -574,11 +582,6 @@ def fetch_all_registry_data(
     }
 
 
-def get_license_candidates(manifest: dict, registry_data: dict) -> list[str]:
-    """Delegate to the shared implementation in analysis_shared."""
-    return shared.get_license_candidates(manifest, registry_data)
-
-
 def check_lockfile(
     runtime_dep_lines: list[str],
     old_dep_lines: list[str],
@@ -628,12 +631,14 @@ def check_lockfile(
     }
 
 
-def check_dep_registry(dep_name: str) -> dict:
+def check_dep_registry(dep_name: str, registry_url: str | None = None) -> dict:
     """RubyGems API lookup for a dep not in lockfile.
 
+    registry_url overrides the default rubygems.org base URL for private registries.
     Returns dict with keys: downloads, first_seen, homepage.
     """
-    api_data = shared.http_get(f'https://rubygems.org/api/v1/gems/{dep_name}.json')
+    api_base = registry_url.rstrip('/') if registry_url else 'https://rubygems.org'
+    api_data = shared.http_get(f'{api_base}/api/v1/gems/{dep_name}.json')
     if api_data:
         try:
             info = json.loads(api_data.decode('utf-8', errors='replace'))
@@ -911,10 +916,6 @@ def find_source_root(source_dir: Path) -> Path:
     return source_dir
 
 
-# Backwards-compatible alias kept for any external callers
-find_source_gem_root = find_source_root
-
-
 def get_deep_source_config() -> dict:
     """Returns deep source comparison config for Ruby."""
     return {'primary_label': 'Ruby', 'primary_pattern': r'\.(rb)$'}
@@ -937,8 +938,6 @@ def reproducible_build(
       FUNCTIONALLY EQUIVALENT (metadata-only diffs)
       UNEXPECTED DIFFERENCES
     """
-    import hashlib
-
     clone_dir = work / 'source'
     built_gem_dir = work / 'raw-built-gem'
     built_gem_dir.mkdir(exist_ok=True)
@@ -1048,14 +1047,7 @@ def reproducible_build(
         return finish('INCONCLUSIVE (no .gem produced)')
     built_gem = built_gems[0]
 
-    def sha256_file(p: Path) -> str:
-        h = hashlib.sha256()
-        with open(p, 'rb') as fh:
-            for chunk in iter(lambda: fh.read(65536), b''):
-                h.update(chunk)
-        return h.hexdigest()
-
-    built_sha = sha256_file(built_gem)
+    built_sha = shared.sha256_file(built_gem)
     pkg_hash_file = work / 'package-hash.txt'
     dist_sha = ''
     if pkg_hash_file.is_file():
@@ -1102,9 +1094,9 @@ def reproducible_build(
     for line in diff_out.splitlines():
         if line.startswith('Only in') or line.startswith('diff '):
             differing.append(shared.sanitize(line))
-        if re.search(r'^diff.*\.(rb|c|h|java|py|js|sh)\b', line):
+        if _RE_REPRO_CODE.search(line):
             code_diffs += 1
-        if re.search(r'^diff.*(\.gemspec|metadata|RECORD|METADATA|Gemfile)', line):
+        if _RE_REPRO_META.search(line):
             metadata_diffs += 1
 
     lines.append('DIFFERING_FILES (sanitized):')
