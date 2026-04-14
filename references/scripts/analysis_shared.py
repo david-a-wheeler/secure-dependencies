@@ -179,6 +179,64 @@ def evaluate_license(
 
 
 # ---------------------------------------------------------------------------
+# Cross-ecosystem manifest helpers
+# ---------------------------------------------------------------------------
+
+def get_license_candidates(manifest: dict, registry_data: dict) -> list[str]:
+    """Return deduplicated license candidates: manifest_license_raw first, then registry.
+
+    Reads 'manifest_license_raw' from the manifest dict (the canonical key set by
+    all ecosystem hooks) and appends any 'license_from_registry' entries from the
+    registry data dict. Deduplicates while preserving order.
+
+    >>> get_license_candidates({'manifest_license_raw': 'MIT'}, {'license_from_registry': ['Apache-2.0']})
+    ['MIT', 'Apache-2.0']
+    >>> get_license_candidates({'manifest_license_raw': 'MIT'}, {'license_from_registry': ['MIT']})
+    ['MIT']
+    >>> get_license_candidates({}, {'license_from_registry': ['MIT']})
+    ['MIT']
+    >>> get_license_candidates({'manifest_license_raw': ''}, {})
+    []
+    """
+    candidates: list[str] = []
+    raw = manifest.get('manifest_license_raw', '')
+    if raw:
+        candidates.append(str(raw))
+    candidates.extend(str(lc) for lc in registry_data.get('license_from_registry', []) if lc)
+    seen: set[str] = set()
+    unique: list[str] = []
+    for lc in candidates:
+        if lc and lc not in seen:
+            seen.add(lc)
+            unique.append(lc)
+    return unique
+
+
+def compute_dep_diff(
+    runtime_dep_lines: list[str],
+    old_dep_lines: list[str],
+) -> tuple[list[str], list[str], list[str], list[str]]:
+    """Compute sorted dep lists and added/removed sets from new and old dep lines.
+
+    Returns (dep_lines_new, dep_lines_old, added_deps, removed_deps).
+    All returned lists are sorted. Sanitizes each line with sanitize().
+
+    >>> new, old, added, removed = compute_dep_diff(['b', 'a'], ['a', 'c'])
+    >>> new
+    ['a', 'b']
+    >>> added
+    ['b']
+    >>> removed
+    ['c']
+    """
+    dep_lines_new = sorted(sanitize(l) for l in runtime_dep_lines)
+    dep_lines_old = sorted(sanitize(l) for l in old_dep_lines)
+    added_deps = sorted(set(dep_lines_new) - set(dep_lines_old))
+    removed_deps = sorted(set(dep_lines_old) - set(dep_lines_new))
+    return dep_lines_new, dep_lines_old, added_deps, removed_deps
+
+
+# ---------------------------------------------------------------------------
 # Generic helpers
 # ---------------------------------------------------------------------------
 

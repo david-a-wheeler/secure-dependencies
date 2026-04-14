@@ -575,31 +575,8 @@ def fetch_all_registry_data(
 
 
 def get_license_candidates(manifest: dict, registry_data: dict) -> list[str]:
-    """Return deduplicated list of license candidates: gemspec first, then registry.
-
-    Returns list of raw license strings.
-
-    >>> get_license_candidates({'gemspec_license_raw': 'MIT'}, {'license_from_registry': ['Apache-2.0']})
-    ['MIT', 'Apache-2.0']
-    >>> get_license_candidates({'gemspec_license_raw': 'MIT'}, {'license_from_registry': ['MIT']})
-    ['MIT']
-    >>> get_license_candidates({}, {'license_from_registry': ['MIT']})
-    ['MIT']
-    >>> get_license_candidates({'gemspec_license_raw': ''}, {})
-    []
-    """
-    candidates: list[str] = []
-    if manifest.get('gemspec_license_raw'):
-        candidates.append(manifest['gemspec_license_raw'])
-    candidates.extend(registry_data.get('license_from_registry', []))
-    # Deduplicate, preserve order
-    seen: set[str] = set()
-    unique: list[str] = []
-    for lc in candidates:
-        if lc and lc not in seen:
-            seen.add(lc)
-            unique.append(lc)
-    return unique
+    """Delegate to the shared implementation in analysis_shared."""
+    return shared.get_license_candidates(manifest, registry_data)
 
 
 def check_lockfile(
@@ -614,11 +591,9 @@ def check_lockfile(
     by write_dep_files() in the driver to write new-deps.txt and
     dep-lockfile-check.txt. Does not write any files itself.
     """
-    dep_lines_new = sorted(shared.sanitize(l) for l in runtime_dep_lines)
-    dep_lines_old = sorted(shared.sanitize(l) for l in old_dep_lines)
-
-    added_deps = sorted(set(dep_lines_new) - set(dep_lines_old))
-    removed_deps = sorted(set(dep_lines_old) - set(dep_lines_new))
+    dep_lines_new, dep_lines_old, added_deps, removed_deps = shared.compute_dep_diff(
+        runtime_dep_lines, old_dep_lines
+    )
     not_in_lockfile: list[str] = []
 
     lockfile = project_root / LOCKFILE_NAME
@@ -892,7 +867,7 @@ def check_alternatives(
     return {
         'concerns': concerns,
         'notes': notes,
-        'gem_count': len(gem_names),
+        'pkg_count': len(gem_names),
         'lockfile_count': len(lockfile_names),
     }
 
@@ -922,7 +897,7 @@ def get_pkg_src_excludes() -> tuple[re.Pattern, re.Pattern]:
     return pkg_ex, src_ex
 
 
-def find_source_gem_root(source_dir: Path) -> Path:
+def find_source_root(source_dir: Path) -> Path:
     """Return the subdirectory of source_dir that contains the gem content.
 
     Some gem repos keep the gem in a ``gem/`` subdirectory (pagy, rails, etc.)
@@ -934,6 +909,10 @@ def find_source_gem_root(source_dir: Path) -> Path:
         if candidate.is_dir() and any(candidate.glob('*.gemspec')):
             return candidate
     return source_dir
+
+
+# Backwards-compatible alias kept for any external callers
+find_source_gem_root = find_source_root
 
 
 def get_deep_source_config() -> dict:

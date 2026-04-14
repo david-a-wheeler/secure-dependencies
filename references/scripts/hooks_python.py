@@ -23,6 +23,12 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent))
 import analysis_shared as shared
 
+# Pre-compiled pattern for PEP 427 name normalization (hyphens, underscores, dots).
+# Used in multiple places; compiled once here to avoid repeated re.compile calls.
+_NORM_RE = re.compile(r'[-_.]+')
+_RE_REPRO_CODE = re.compile(r'^diff.*\.(py|pyx|pxd|c|h|cpp|rs|js)\b')
+_RE_REPRO_META = re.compile(r'^diff.*(METADATA|RECORD|PKG-INFO|\.dist-info|setup\.py|pyproject\.toml)')
+
 # ---------------------------------------------------------------------------
 # Module-level constants read by the driver
 # ---------------------------------------------------------------------------
@@ -105,17 +111,16 @@ def _find_dist_info(unpacked_dir: Path, pkgname: str) -> Path | None:
     """
     if not unpacked_dir.is_dir():
         return None
-    norm = re.sub(r'[-_.]+', '_', pkgname).lower()
+    norm = _NORM_RE.sub('_', pkgname).lower()
+    first_dist_info: Path | None = None
     for candidate in unpacked_dir.iterdir():
         if candidate.is_dir() and candidate.name.endswith('.dist-info'):
-            cname = re.sub(r'[-_.]+', '_', candidate.name.split('-')[0]).lower()
+            if first_dist_info is None:
+                first_dist_info = candidate
+            cname = _NORM_RE.sub('_', candidate.name.split('-')[0]).lower()
             if cname == norm:
                 return candidate
-    # Fallback: any .dist-info directory
-    for candidate in unpacked_dir.iterdir():
-        if candidate.is_dir() and candidate.name.endswith('.dist-info'):
-            return candidate
-    return None
+    return first_dist_info
 
 
 def _parse_metadata(metadata_text: str) -> dict:
@@ -262,8 +267,8 @@ def _unpack_pkg(
 def _get_pkg_file(directory: Path, pkgname: str, version: str) -> Path | None:
     """Find the downloaded package file (wheel preferred, then sdist)."""
     # Wheels use normalized names (hyphens to underscores, case-insensitive)
-    norm = re.sub(r'[-_.]+', '_', pkgname)
-    ver_norm = re.sub(r'[-_.]+', '_', version)
+    norm = _NORM_RE.sub('_',pkgname)
+    ver_norm = _NORM_RE.sub('_',version)
     # Search in order of preference: wheels first, then source dists
     for pattern in ('*.whl', '*.tar.gz', '*.tar.bz2', '*.tar.xz', '*.zip'):
         candidates = list(directory.glob(pattern))
@@ -271,7 +276,7 @@ def _get_pkg_file(directory: Path, pkgname: str, version: str) -> Path | None:
             return candidates[0]
         # Multiple candidates: pick one matching name+version
         for c in candidates:
-            cname = re.sub(r'[-_.]+', '_', c.stem.split('-')[0]).lower()
+            cname = _NORM_RE.sub('_',c.stem.split('-')[0]).lower()
             if cname == norm.lower():
                 return c
         if candidates:
@@ -405,6 +410,13 @@ def read_manifest(
 
     manifest_lines: list[str] = [f'=== Manifest analysis: {pkgname} {version} ===', '']
 
+    # Read pyproject.toml once; reused for extensions, executables, and build-hook checks.
+    ppt_text = ''
+    if unpacked_dir.is_dir():
+        ppt_path = unpacked_dir / 'pyproject.toml'
+        if ppt_path.is_file():
+            ppt_text = ppt_path.read_text(encoding='utf-8', errors='replace')
+
     # Check for C/Cython extensions: presence of .so/.pyd in unpacked wheel,
     # or ext_modules/cffi/Cython in pyproject.toml / setup.py / setup.cfg.
     if unpacked_dir.is_dir():
@@ -412,13 +424,16 @@ def read_manifest(
         if native_exts:
             extensions = 'YES'
     if extensions == 'NO' and unpacked_dir.is_dir():
-        for fname in ('setup.py', 'setup.cfg', 'pyproject.toml', 'meson.build'):
-            fpath = unpacked_dir / fname
-            if fpath.is_file():
-                txt = fpath.read_text(encoding='utf-8', errors='replace')
-                if re.search(r'(?i)ext_modules|cffi|Cython|cython|distutils\.extension', txt):
-                    extensions = 'YES'
-                    break
+        if ppt_text and re.search(r'(?i)ext_modules|cffi|Cython|cython|distutils\.extension', ppt_text):
+            extensions = 'YES'
+        if extensions == 'NO':
+            for fname in ('setup.py', 'setup.cfg', 'meson.build'):
+                fpath = unpacked_dir / fname
+                if fpath.is_file():
+                    txt = fpath.read_text(encoding='utf-8', errors='replace')
+                    if re.search(r'(?i)ext_modules|cffi|Cython|cython|distutils\.extension', txt):
+                        extensions = 'YES'
+                        break
     manifest_lines.append(f'HAS_EXTENSIONS: {extensions}')
 
     # Check for entry points (executables installed to PATH)
@@ -437,14 +452,11 @@ def read_manifest(
             scripts = re.findall(r'^\s*(\S+)\s*=', ep_text, re.MULTILINE)
             executables_list = shared.sanitize(', '.join(scripts[:10]))
     # Also check pyproject.toml project.scripts
-    if executables == 'NO' and unpacked_dir.is_dir():
-        ppt = unpacked_dir / 'pyproject.toml'
-        if ppt.is_file():
-            ppt_text = ppt.read_text(encoding='utf-8', errors='replace')
-            if re.search(r'\[project\.scripts\]|\[project\.gui-scripts\]', ppt_text):
-                executables = 'YES'
-                scripts = re.findall(r'^\s*(\S+)\s*=', ppt_text, re.MULTILINE)
-                executables_list = shared.sanitize(', '.join(scripts[:10]))
+    if executables == 'NO' and ppt_text:
+        if re.search(r'\[project\.scripts\]|\[project\.gui-scripts\]', ppt_text):
+            executables = 'YES'
+            scripts = re.findall(r'^\s*(\S+)\s*=', ppt_text, re.MULTILINE)
+            executables_list = shared.sanitize(', '.join(scripts[:10]))
     manifest_lines.append(f'HAS_EXECUTABLES: {executables}')
     if executables == 'YES':
         manifest_lines.append(f'EXECUTABLES: {executables_list}')
@@ -471,12 +483,9 @@ def read_manifest(
             elif has_setup_py:
                 has_build_hooks = 'MAYBE'
         # pyproject.toml build-hooks (hatchling, meson-python, etc.)
-        ppt2 = unpacked_dir / 'pyproject.toml'
-        if ppt2.is_file():
-            ppt2_text = ppt2.read_text(encoding='utf-8', errors='replace')
-            if re.search(r'\[tool\.hatch\.build\.hooks\]|build-backend\s*=', ppt2_text):
-                if has_build_hooks == 'NO':
-                    has_build_hooks = 'MAYBE'
+        if ppt_text and re.search(r'\[tool\.hatch\.build\.hooks\]|build-backend\s*=', ppt_text):
+            if has_build_hooks == 'NO':
+                has_build_hooks = 'MAYBE'
 
     manifest_lines.append(f'HAS_BUILD_HOOKS: {has_build_hooks}')
     if has_setup_py:
@@ -546,7 +555,7 @@ def read_manifest(
             '\n'.join(script_lines), encoding='utf-8'
         )
 
-    has_install_scripts = (work / 'install-scripts.txt').is_file()
+    has_install_scripts = bool(install_script_files)
 
     # Ecosystem-specific context for the driver's MANIFEST / INSTALL HOOKS section
     install_hook_context: list[str] = []
@@ -581,9 +590,6 @@ def read_manifest(
         'manifest_text': manifest_text,
         'manifest_extra_file': 'pyproject-metadata.txt',
         'install_hook_context': install_hook_context,
-        # Aliases for driver compatibility
-        'has_rakefile_tasks': has_build_hooks,
-        'gemspec_license_raw': manifest_license_raw,
     }
 
 
@@ -624,11 +630,11 @@ def download_old(
 
     pkg_file_cached: Path | None = None
     if cache_dir and cache_dir.is_dir():
-        norm = re.sub(r'[-_.]+', '_', pkgname).lower()
+        norm = _NORM_RE.sub('_',pkgname).lower()
         for whl in cache_dir.rglob('*.whl'):
             stem_parts = whl.stem.split('-')
             if (len(stem_parts) >= 2
-                    and re.sub(r'[-_.]+', '_', stem_parts[0]).lower() == norm
+                    and _NORM_RE.sub('_',stem_parts[0]).lower() == norm
                     and stem_parts[1] == old_ver):
                 pkg_file_cached = whl
                 break
@@ -849,29 +855,8 @@ def fetch_all_registry_data(
 
 
 def get_license_candidates(manifest: dict, registry_data: dict) -> list[str]:
-    """Return deduplicated list of license candidates: manifest first, then registry.
-
-    >>> get_license_candidates({'manifest_license_raw': 'MIT'}, {'license_from_registry': ['Apache-2.0']})
-    ['MIT', 'Apache-2.0']
-    >>> get_license_candidates({'manifest_license_raw': 'MIT'}, {'license_from_registry': ['MIT']})
-    ['MIT']
-    >>> get_license_candidates({}, {'license_from_registry': ['MIT']})
-    ['MIT']
-    >>> get_license_candidates({'manifest_license_raw': ''}, {})
-    []
-    """
-    candidates: list[str] = []
-    raw = manifest.get('manifest_license_raw', '') or manifest.get('gemspec_license_raw', '')
-    if raw:
-        candidates.append(str(raw))
-    candidates.extend(str(lc) for lc in registry_data.get('license_from_registry', []) if lc)
-    seen: set[str] = set()
-    unique: list[str] = []
-    for lc in candidates:
-        if lc and lc not in seen:
-            seen.add(lc)
-            unique.append(lc)
-    return unique
+    """Delegate to the shared implementation in analysis_shared."""
+    return shared.get_license_candidates(manifest, registry_data)
 
 
 def check_lockfile(
@@ -885,11 +870,9 @@ def check_lockfile(
     Returns dict with keys: added_deps, removed_deps, not_in_lockfile,
     and private keys _lockfile_lines, _dep_lines_new, _dep_lines_old.
     """
-    dep_lines_new = sorted(shared.sanitize(l) for l in runtime_dep_lines)
-    dep_lines_old = sorted(shared.sanitize(l) for l in old_dep_lines)
-
-    added_deps = sorted(set(dep_lines_new) - set(dep_lines_old))
-    removed_deps = sorted(set(dep_lines_old) - set(dep_lines_new))
+    dep_lines_new, dep_lines_old, added_deps, removed_deps = shared.compute_dep_diff(
+        runtime_dep_lines, old_dep_lines
+    )
     not_in_lockfile: list[str] = []
 
     # Find the lockfile (try all known formats)
@@ -908,7 +891,7 @@ def check_lockfile(
                 continue
             dep_name = m_dep.group(1)
             safe_dep = shared.sanitize(dep_name)
-            norm_dep = re.sub(r'[-_.]+', '_', dep_name).lower()
+            norm_dep = _NORM_RE.sub('_',dep_name).lower()
 
             found = _dep_in_lockfile(dep_name, norm_dep, lf_text, lockfile_format)
             if found:
@@ -1052,7 +1035,7 @@ def get_transitive_deps(
 
     transitive_new: list[str] = []
     for dep_name in all_deps:
-        norm_dep = re.sub(r'[-_.]+', '_', dep_name).lower()
+        norm_dep = _NORM_RE.sub('_',dep_name).lower()
         if not _dep_in_lockfile(dep_name, norm_dep, lf_text, lf_format):
             transitive_new.append(dep_name)
 
@@ -1093,14 +1076,14 @@ def check_alternatives(
     concerns: list[str] = []
     notes: list[str] = []
     pkg_lower = pkgname.lower()
-    norm_pkg = re.sub(r'[-_.]+', '_', pkg_lower)
+    norm_pkg = _NORM_RE.sub('_',pkg_lower)
 
     # --- A: Python stdlib module names ---
     stdlib_names = _get_stdlib_names()
 
     for mod in stdlib_names:
         mod_lower = mod.lower()
-        if mod_lower == pkg_lower or re.sub(r'[-_.]+', '_', mod_lower) == norm_pkg:
+        if mod_lower == pkg_lower or _NORM_RE.sub('_',mod_lower) == norm_pkg:
             concerns.append(
                 f'EXACT_STDLIB_MATCH: "{pkgname}" matches Python stdlib module "{mod}". '
                 'This is a strong dependency-confusion signal: the stdlib will shadow '
@@ -1132,7 +1115,7 @@ def check_alternatives(
         pkg_inst_lower = pkg.lower()
         if pkg_inst_lower in stdlib_lower:
             continue  # already checked in A
-        if pkg_inst_lower == pkg_lower or re.sub(r'[-_.]+', '_', pkg_inst_lower) == norm_pkg:
+        if pkg_inst_lower == pkg_lower or _NORM_RE.sub('_',pkg_inst_lower) == norm_pkg:
             concerns.append(
                 f'EXACT_INSTALLED_MATCH: "{pkgname}" matches already-installed package "{pkg}". '
                 'Installing an external package with the same name as an existing installation '
@@ -1173,7 +1156,7 @@ def check_alternatives(
         dep_lower = dep.lower()
         if dep_lower in installed_and_stdlib_lower:
             continue  # already checked
-        if dep_lower == pkg_lower or re.sub(r'[-_.]+', '_', dep_lower) == norm_pkg:
+        if dep_lower == pkg_lower or _NORM_RE.sub('_',dep_lower) == norm_pkg:
             concerns.append(
                 f'EXACT_LOCKFILE_MATCH: "{pkgname}" matches existing lockfile dep "{dep}". '
                 'This name is already in use in this project.'
@@ -1377,8 +1360,6 @@ def reproducible_build(
       FUNCTIONALLY EQUIVALENT (metadata-only diffs)
       UNEXPECTED DIFFERENCES
     """
-    import hashlib
-
     clone_dir = work / 'source'
     built_whl_dir = work / 'raw-built-whl'
     built_whl_dir.mkdir(exist_ok=True)
@@ -1490,14 +1471,7 @@ def reproducible_build(
         return finish('INCONCLUSIVE (no .whl produced)')
     built_whl = built_whls[0]
 
-    def sha256_file(p: Path) -> str:
-        h = hashlib.sha256()
-        with open(p, 'rb') as fh:
-            for chunk in iter(lambda: fh.read(65536), b''):
-                h.update(chunk)
-        return h.hexdigest()
-
-    built_sha = sha256_file(built_whl)
+    built_sha = shared.sha256_file(built_whl)
     pkg_hash_file = work / 'package-hash.txt'
     dist_sha = ''
     if pkg_hash_file.is_file():
@@ -1538,9 +1512,9 @@ def reproducible_build(
     for line in diff_out.splitlines():
         if line.startswith('Only in') or line.startswith('diff '):
             differing.append(shared.sanitize(line))
-        if re.search(r'^diff.*\.(py|pyx|pxd|c|h|cpp|rs|js)\b', line):
+        if _RE_REPRO_CODE.search(line):
             code_diffs += 1
-        if re.search(r'^diff.*(METADATA|RECORD|PKG-INFO|\.dist-info|setup\.py|pyproject\.toml)', line):
+        if _RE_REPRO_META.search(line):
             metadata_diffs += 1
 
     lines.append('DIFFERING_FILES (sanitized):')

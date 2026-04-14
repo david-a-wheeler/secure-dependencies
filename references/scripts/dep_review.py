@@ -298,7 +298,7 @@ def write_auto_findings(  # noqa: C901
     if manifest.get('extensions') == 'YES':
         _concerns.append((
             'native_extensions',
-            'YES  [compiled code runs at install time; review extconf.rb/setup.py for malicious build steps]',
+            'YES  [compiled code runs at install time; review build scripts in source for malicious steps]',
         ))
     if manifest.get('executables') == 'YES':
         _concerns.append((
@@ -500,8 +500,8 @@ def write_auto_findings(  # noqa: C901
             lines.append(item)
         if len(listed) > 10:
             lines.append(f'  ... ({len(listed) - 10} more in extra-in-package.txt)')
-        lines.append('Context: Some extra files are expected (packaging metadata: METADATA, gemspec,')
-        lines.append('  dist-info). Source-language files or binaries with no counterpart are a red flag \u2014')
+        lines.append('Context: Some extra files are expected (packaging metadata: METADATA, dist-info,')
+        lines.append('  gemspec, PKG-INFO). Source-language files or binaries with no counterpart are a red flag \u2014')
         lines.append('  this is the pattern used in the xz-utils supply chain attack.')
     else:
         lines.append('None (or clone not available).')
@@ -579,8 +579,7 @@ def write_auto_findings(  # noqa: C901
     if exe == 'YES':
         lines.append(f'  Files: {manifest.get("executables_list", "(see manifest-analysis.txt)")}')
     lines.append(f'Post-install message: {manifest.get("post_install_msg", "NO")}')
-    # has_build_hooks is the generic key; has_rakefile_tasks is the Ruby alias
-    _build_hooks = manifest.get('has_build_hooks', manifest.get('has_rakefile_tasks', 'NO'))
+    _build_hooks = manifest.get('has_build_hooks', 'NO')
     lines.append(f'Build hooks / install-time code: {_build_hooks}')
     if manifest.get('has_install_scripts') == 'YES':
         lines.append('Install-time scripts extracted: YES  [READ install-scripts.txt]')
@@ -1009,8 +1008,8 @@ def run_analysis(  # noqa: C901
     unpacked_dir = dl.get('unpacked_dir')
     if sha256:
         print(f'  SHA256: {sha256}')
-    if 'gem-fetch-new' in failures:
-        print(f'  ERROR: gem fetch failed for {pkgname}-{new_ver}')
+    if failures:
+        print(f'  WARNING: download step reported failures: {failures}')
 
     # 2. Manifest
     print()
@@ -1023,9 +1022,8 @@ def run_analysis(  # noqa: C901
     print(f'  Extensions: {manifest.get("extensions", "?")}')
     print(f'  Executables: {manifest.get("executables", "?")}')
     print(f'  Post-install message: {manifest.get("post_install_msg", "?")}')
-    print(f'  Build hooks / install-time code: {manifest.get("has_build_hooks", manifest.get("has_rakefile_tasks", "?"))}')
-    _mlic = manifest.get('manifest_license_raw', manifest.get('gemspec_license_raw', ''))
-    print(f'  License (manifest): {shared.sanitize(str(_mlic)) or "(not declared)"}')
+    print(f'  Build hooks / install-time code: {manifest.get("has_build_hooks", "?")}')
+    print(f'  License (manifest): {shared.sanitize(str(manifest.get("manifest_license_raw", ""))) or "(not declared)"}')
 
     # 3. Scans
     print()
@@ -1070,8 +1068,10 @@ def run_analysis(  # noqa: C901
     print('--- Package vs source comparison ---')
     source_dir = work / 'source'
     if clone_ok and unpacked_dir:
-        # Allow ecosystem hooks to redirect to a gem subdirectory (e.g. gem/ in monorepos)
-        if hasattr(hooks, 'find_source_gem_root'):
+        # Allow ecosystem hooks to redirect to a package subdirectory (e.g. in monorepos)
+        if hasattr(hooks, 'find_source_root'):
+            source_dir = hooks.find_source_root(source_dir)
+        elif hasattr(hooks, 'find_source_gem_root'):  # backwards compat alias
             source_dir = hooks.find_source_gem_root(source_dir)
         pkg_ex, src_ex = hooks.get_pkg_src_excludes()
         extra_files = shared.compare_pkg_vs_source(unpacked_dir, source_dir, work, pkg_ex, src_ex)
@@ -1325,9 +1325,9 @@ def run_analysis(  # noqa: C901
     if session_file is not None:
         install_time = manifest.get('extensions') == 'YES'
         install_reason = 'native extension' if install_time else ''
-        if not install_time and manifest.get('post_install_message') == 'YES':
+        if not install_time and manifest.get('post_install_msg') == 'YES':
             install_time = True
-            install_reason = 'post_install_message'
+            install_reason = 'post_install_msg'
         _write_session_update(
             work,
             not_in_lockfile=transitive.get('not_in_lockfile', []),
@@ -1706,7 +1706,7 @@ def main() -> None:  # noqa: C901 (complexity acceptable for CLI validation)
                 for n in notes:
                     print(f'  - {n}')
 
-            # Classify concerns. Exact name collisions with stdlib/installed gems
+            # Classify concerns. Exact name collisions with stdlib/installed packages
             # and single-edit-distance matches are high-confidence attack signals
             # (dependency confusion, typosquatting). Everything else is worth
             # flagging but is not definitively an attack.
@@ -1720,7 +1720,7 @@ def main() -> None:  # noqa: C901 (complexity acceptable for CLI validation)
                     f'  {len(critical)} high-confidence attack signal(s) found.\n'
                     '\nAI ASSISTANT: STOP. DO NOT proceed to --basic or install this package.\n'
                     '  This package name is consistent with a typosquat, slopsquat, or\n'
-                    '  dependency confusion attack against stdlib or already-installed gems.\n'
+                    '  dependency confusion attack against stdlib or already-installed packages.\n'
                     '  Present these findings to the user and recommend DO_NOT_INSTALL.\n'
                     '  Only override this directive if the user has reviewed the findings\n'
                     '  and explicitly confirmed they understand the risk.'
