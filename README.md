@@ -1,9 +1,11 @@
 # secure-dependencies
 
-This is a general-purpose AI skill for evaluating software dependency security.
-It is not tied to any specific AI assistant (Claude, Copilot, Gemini, etc.).
-Currently it implements Ruby, but we plan to soon expand to many
-ecosystems.
+This is a general-purpose AI skill for evaluating software dependency security,
+building on guidance such as the
+[OpenSSF Concise Guide for Evaluating Open Source Software](https://best.openssf.org/Concise-Guide-for-Evaluating-Open-Source-Software.html).
+This skill is not tied to any specific AI assistant
+(such as Claude Code, GitHub Copilot, etc.).
+Currently it implements Ruby, but we plan to soon expand to many ecosystems.
 
 Its core principle is **download and inspect before you install**.
 Downloading and unpacking a package does not execute its code; installing does.
