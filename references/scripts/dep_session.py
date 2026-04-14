@@ -77,6 +77,13 @@ def _now() -> str:
 
 
 def _pkg_key(name: str, version: str | None) -> str:
+    """Return a lowercase 'name@version' key for use in session dicts.
+
+    >>> _pkg_key('Foo', '1.0')
+    'foo@1.0'
+    >>> _pkg_key('Bar', None)
+    'bar@?'
+    """
     return f'{name.lower()}@{version or "?"}'
 
 

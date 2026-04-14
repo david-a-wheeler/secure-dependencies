@@ -35,12 +35,32 @@ _SANITIZE_RE = re.compile(
 
 
 def sanitize(text: str) -> str:
-    """Replace adversarial control characters with '?'."""
+    """Replace adversarial control characters with '?'.
+
+    Unlike analysis_shared.sanitize, tab/newline/carriage-return are preserved.
+
+    >>> sanitize('hello')
+    'hello'
+    >>> sanitize('hel\\x00lo')
+    'hel?lo'
+    >>> sanitize('line\\nbreak')
+    'line\\nbreak'
+    """
     return _SANITIZE_RE.sub('?', str(text))
 
 
 def get_nested(data: object, dotpath: str) -> object:
-    """Walk dot-separated keys into a nested dict/list structure."""
+    """Walk dot-separated keys into a nested dict/list structure.
+
+    >>> get_nested({'a': {'b': 1}}, 'a.b')
+    1
+    >>> get_nested({'a': [10, 20]}, 'a.1')
+    20
+    >>> get_nested({'a': 1}, 'a.b') is None
+    True
+    >>> get_nested({}, 'missing') is None
+    True
+    """
     keys = dotpath.split('.')
     current = data
     for key in keys:

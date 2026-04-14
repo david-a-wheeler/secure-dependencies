@@ -60,10 +60,14 @@ _LICENSE_ALIASES: dict[str, str] = {
     'bsd': 'BSD-3-Clause',
     'bsd-2': 'BSD-2-Clause',
     'bsd-3': 'BSD-3-Clause',
-    'gplv2': 'GPL-2.0-or-later',
-    'gplv3': 'GPL-3.0-or-later',
-    'gpl2': 'GPL-2.0-or-later',
-    'gpl3': 'GPL-3.0-or-later',
+    'gplv2': 'GPL-2.0-only',
+    'gplv2+': 'GPL-2.0-or-later',
+    'gplv3': 'GPL-3.0-only',
+    'gplv3+': 'GPL-3.0-or-later',
+    'gpl2': 'GPL-2.0-only',
+    'gpl2+': 'GPL-2.0-or-later',
+    'gpl3': 'GPL-3.0-only',
+    'gpl3+': 'GPL-3.0-or-later',
     'lgplv2': 'LGPL-2.1-or-later',
     'lgpl': 'LGPL-2.1-or-later',
     'mpl2': 'MPL-2.0',
@@ -75,7 +79,19 @@ _LICENSE_ALIASES: dict[str, str] = {
 
 
 def normalize_license(raw: str) -> str:
-    """Return canonical SPDX id; fall back to the stripped original."""
+    """Return canonical SPDX id; fall back to the stripped original.
+
+    >>> normalize_license('MIT')
+    'MIT'
+    >>> normalize_license('MIT.')
+    'MIT'
+    >>> normalize_license('apache 2.0')
+    'Apache-2.0'
+    >>> normalize_license('  gplv3  ')
+    'GPL-3.0-only'
+    >>> normalize_license('gplv3+')
+    'GPL-3.0-or-later'
+    """
     stripped = raw.strip().rstrip('.')
     lower = stripped.lower()
     if lower in _LICENSE_ALIASES:
@@ -84,7 +100,17 @@ def normalize_license(raw: str) -> str:
 
 
 def license_osi_status(identifier: str) -> tuple[str, str]:
-    """Return (normalized_spdx_id, 'YES'|'NO')."""
+    """Return (normalized_spdx_id, 'YES'|'NO').
+
+    >>> license_osi_status('MIT')
+    ('MIT', 'YES')
+    >>> license_osi_status('apache 2.0')
+    ('Apache-2.0', 'YES')
+    >>> license_osi_status('Proprietary')
+    ('Proprietary', 'NO')
+    >>> license_osi_status('')
+    ('MISSING', 'NO')
+    """
     norm = normalize_license(identifier)
     if norm in OSI_APPROVED:
         return norm, 'YES'
@@ -157,7 +183,17 @@ def evaluate_license(
 # ---------------------------------------------------------------------------
 
 def levenshtein(a: str, b: str) -> int:
-    """Return the Levenshtein edit distance between two strings."""
+    """Return the Levenshtein edit distance between two strings.
+
+    >>> levenshtein('', '')
+    0
+    >>> levenshtein('abc', 'abc')
+    0
+    >>> levenshtein('abc', 'ab')
+    1
+    >>> levenshtein('kitten', 'sitting')
+    3
+    """
     if len(a) < len(b):
         a, b = b, a
     if not b:
@@ -176,6 +212,15 @@ def sanitize(text: str) -> str:
 
     Strips bidi controls and zero-width chars used for visual spoofing or
     prompt injection before any text reaches the AI.
+
+    >>> sanitize('hello')
+    'hello'
+    >>> sanitize('hel\\x01lo')
+    'hel?lo'
+    >>> sanitize('tab\\there')
+    'tab?here'
+    >>> sanitize('del\\x7fchar')
+    'del?char'
     """
     result = []
     for ch in text:
@@ -679,10 +724,11 @@ _EXEC_EXTENSIONS: dict[str, str] = {
 def detect_binary_files(unpacked_dir: Path, work: Path) -> int:
     """Find precompiled executable files in the unpacked package.
 
-    Detection is by magic-byte prefix only; no file-command invocation,
-    no extension guessing. Detects ELF, PE (Windows), Mach-O, WebAssembly,
-    and Java .class files. PNG, JPEG, zip, gzip, and other non-executable
-    binaries are intentionally NOT flagged.
+    Detection uses file extension first (for zip-container formats like .jar
+    that cannot be identified by magic bytes), then falls back to magic-byte
+    prefix matching. Detects ELF, PE (Windows), Mach-O, WebAssembly, Java
+    .class files, and Java archives (.jar/.war/.ear/.aar). PNG, JPEG, zip,
+    gzip, and other non-executable binaries are intentionally NOT flagged.
 
     Writes: binary-files.txt, raw-binary-in-package.txt.
     Returns: count of embedded executables found.
@@ -831,6 +877,19 @@ def compute_health_concerns(
       - Single owner → no succession plan
       - Scorecard <4.0/10 → multiple security practice failures
       - Pre-release version → security guarantees rarely made
+
+    >>> compute_health_concerns(None, None, None, 'not found', 'stable')
+    []
+    >>> compute_health_concerns(600, None, None, 'not found', 'stable')
+    ['no release in 600 days (>18 months; likely unmaintained)']
+    >>> compute_health_concerns(None, 0.3, None, 'not found', 'stable')
+    ['package is less than 6 months old']
+    >>> compute_health_concerns(None, None, 1, 'not found', 'stable')
+    ['single owner (no succession plan)']
+    >>> compute_health_concerns(None, None, None, '3.5/10', 'stable')
+    ['OpenSSF Scorecard 3.5/10 (<4.0)']
+    >>> compute_health_concerns(None, None, None, 'not found', 'pre-release')
+    ['version is pre-release (security guarantees rarely made)']
     """
     concerns: list[str] = []
 

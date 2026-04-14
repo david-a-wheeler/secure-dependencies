@@ -70,7 +70,15 @@ DIFF_PATTERNS: list[tuple[str, str]] = [
 # ---------------------------------------------------------------------------
 
 def _extract_source_url(gemspec_text: str) -> str:
-    """Extract source/homepage URL from gemspec text."""
+    """Extract source/homepage URL from gemspec text.
+
+    >>> _extract_source_url('s.source_code_uri = "https://github.com/foo/bar"')
+    'https://github.com/foo/bar'
+    >>> _extract_source_url('s.homepage = "https://example.com"')
+    'https://example.com'
+    >>> _extract_source_url('no url here')
+    ''
+    """
     m = re.search(
         r'(?:source_code_uri|homepage_uri|homepage)\s*=\s*["\']([^"\']+)', gemspec_text
     )
@@ -78,7 +86,15 @@ def _extract_source_url(gemspec_text: str) -> str:
 
 
 def _extract_gemspec_license(gemspec_text: str) -> str:
-    """Extract raw license string from gemspec text, or empty string."""
+    """Extract raw license string from gemspec text, or empty string.
+
+    >>> _extract_gemspec_license('s.license = "MIT"')
+    'MIT'
+    >>> _extract_gemspec_license("s.licenses = ['Apache-2.0']")
+    'Apache-2.0'
+    >>> _extract_gemspec_license('no license here')
+    ''
+    """
     lic_match = re.search(r'\.licenses?\s*=\s*\[?["\']([^"\']+)["\']', gemspec_text)
     return lic_match.group(1).strip() if lic_match else ''
 
@@ -477,6 +493,15 @@ def get_license_candidates(manifest: dict, registry_data: dict) -> list[str]:
     """Return deduplicated list of license candidates: gemspec first, then registry.
 
     Returns list of raw license strings.
+
+    >>> get_license_candidates({'gemspec_license_raw': 'MIT'}, {'license_from_registry': ['Apache-2.0']})
+    ['MIT', 'Apache-2.0']
+    >>> get_license_candidates({'gemspec_license_raw': 'MIT'}, {'license_from_registry': ['MIT']})
+    ['MIT']
+    >>> get_license_candidates({}, {'license_from_registry': ['MIT']})
+    ['MIT']
+    >>> get_license_candidates({'gemspec_license_raw': ''}, {})
+    []
     """
     candidates: list[str] = []
     if manifest.get('gemspec_license_raw'):
@@ -499,8 +524,10 @@ def check_lockfile(
 ) -> dict:
     """Parse Gemfile.lock; compare new vs old runtime deps.
 
-    Writes: new-deps.txt, dep-lockfile-check.txt.
-    Returns dict with keys: added_deps, removed_deps, not_in_lockfile.
+    Returns dict with keys: added_deps, removed_deps, not_in_lockfile,
+    and private keys _lockfile_lines, _dep_lines_new, _dep_lines_old used
+    by write_dep_files() in the driver to write new-deps.txt and
+    dep-lockfile-check.txt. Does not write any files itself.
     """
     dep_lines_new = sorted(shared.sanitize(l) for l in runtime_dep_lines)
     dep_lines_old = sorted(shared.sanitize(l) for l in old_dep_lines)

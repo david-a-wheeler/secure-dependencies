@@ -43,9 +43,14 @@ import analysis_shared as shared
 # ---------------------------------------------------------------------------
 
 def sec(title: str) -> str:
-    """Return a Unicode box-drawing section header line."""
-    pad = 68 - len(title) - 1
-    return f'\n\u2501\u2501\u2501 {title} ' + '\u2501' * max(pad, 0)
+    """Return a plain-text section header line for AI-read output.
+
+    >>> sec('LICENSE')
+    '\\n=== LICENSE ==='
+    >>> sec('X')
+    '\\n=== X ==='
+    """
+    return f'\n=== {title} ==='
 
 
 # ---------------------------------------------------------------------------
@@ -1365,6 +1370,15 @@ def _die(msg: str) -> None:
 
 
 def _version_has_digit(v: str) -> bool:
+    """Return True if the string contains at least one digit.
+
+    >>> _version_has_digit('1.0.0')
+    True
+    >>> _version_has_digit('abc')
+    False
+    >>> _version_has_digit('')
+    False
+    """
     return any(c.isdigit() for c in v)
 
 

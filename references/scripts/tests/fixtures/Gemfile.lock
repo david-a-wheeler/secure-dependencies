@@ -1,0 +1,14 @@
+GEM
+  remote: https://rubygems.org/
+  specs:
+    rack (3.0.0)
+    rails (7.0.0)
+      activesupport (= 7.0.0)
+      railties (= 7.0.0)
+    activesupport (7.0.0)
+
+PLATFORMS
+  ruby
+
+DEPENDENCIES
+  rails (~> 7.0)
