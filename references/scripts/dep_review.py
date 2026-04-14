@@ -585,6 +585,11 @@ def write_auto_findings(  # noqa: C901
         lines.append(f'  Files: {manifest.get("executables_list", "(see manifest-analysis.txt)")}')
     lines.append(f'Post-install message: {manifest.get("post_install_msg", "NO")}')
     lines.append(f'Rakefile install tasks: {manifest.get("has_rakefile_tasks", "NO")}')
+    if manifest.get('has_install_scripts') == 'YES':
+        lines.append('Install-time scripts extracted: YES  [READ install-scripts.txt]')
+        lines.append('  Context: extconf.rb, Makefile.in, and/or Rakefile install tasks were')
+        lines.append('  found. These files execute during gem install. Review install-scripts.txt')
+        lines.append('  for malicious or unexpected behavior before approving this package.')
     lines.append('Details: manifest-analysis.txt')
 
     # ---- DEPENDENCIES ----

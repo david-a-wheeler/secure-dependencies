@@ -92,7 +92,10 @@ package it:
   network calls at load time, credential environment variable access,
   writes to home directories or shell config files, and `at_exit` hooks.
 - Checks the manifest for native extensions, post-install hooks, and
-  new executable files
+  new executable files; when install-time scripts are found
+  (`extconf.rb`, `Makefile.in`, Rakefile install tasks), copies them
+  sanitized to `install-scripts.txt` and directs the AI to read and
+  review them before approving the package
 - Clones the source repository and compares it to the published package:
   files present in the tarball but absent from the repo, precompiled
   binaries, and overall source match (exact, close, divergent, or unknown)

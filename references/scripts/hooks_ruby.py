@@ -266,10 +266,40 @@ def read_manifest(
             '\n'.join(manifest_lines) + '\n', encoding='utf-8'
         )
         source_url = _extract_source_url(gemspec_text)
+
+        # Collect install-time scripts for AI review when any install-time
+        # code is present. These files run (or direct code that runs) during
+        # gem install, so an AI reviewer must read them.
+        install_script_files: list[tuple[str, Path]] = []
+        if extensions == 'YES':
+            for name in ('extconf.rb', 'Makefile.in', 'Makefile'):
+                p = unpacked_dir / name
+                if p.is_file():
+                    install_script_files.append((name, p))
+        if has_rakefile_tasks == 'YES' and rakefile.is_file():
+            install_script_files.append(('Rakefile', rakefile))
+
+        if install_script_files:
+            script_lines: list[str] = [
+                '=== Install-time scripts for AI review ===',
+                '',
+                'These files execute (or direct code that executes) during gem install.',
+                'Review each one for malicious or unexpected behavior.',
+                '',
+            ]
+            for fname, fpath in install_script_files:
+                raw = fpath.read_text(encoding='utf-8', errors='replace')
+                script_lines.append(f'--- {fname} ---')
+                script_lines.append(shared.sanitize(raw))
+                script_lines.append('')
+            (work / 'install-scripts.txt').write_text(
+                '\n'.join(script_lines), encoding='utf-8'
+            )
     else:
         failures.append('gemspec-missing')
         (work / 'manifest-analysis.txt').write_text('ERROR: gemspec not found\n', encoding='utf-8')
 
+    has_install_scripts = (work / 'install-scripts.txt').is_file()
     return {
         'source_url': source_url,
         'extensions': extensions,
@@ -277,6 +307,7 @@ def read_manifest(
         'executables_list': executables_list,
         'post_install_msg': post_install_msg,
         'has_rakefile_tasks': has_rakefile_tasks,
+        'has_install_scripts': 'YES' if has_install_scripts else 'NO',
         'runtime_dep_lines': runtime_dep_lines,
         'gemspec_license_raw': gemspec_license_raw,
         'gemspec_text': gemspec_text,

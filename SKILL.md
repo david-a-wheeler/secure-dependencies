@@ -317,6 +317,7 @@ including the new `CONCERN_SUMMARY` block.
 | `project-health.txt` | Always |
 | `extra-in-package.txt` | If extra file count > 0 |
 | `binary-files.txt` | If binary file count > 0 |
+| `install-scripts.txt` | If "Install-time scripts extracted: YES" in auto-findings |
 | `diff-filenames.txt` | UPDATE: always; NEW/CURRENT: n/a |
 | `new-deps.txt`, `dep-lockfile-check.txt` | If new runtime deps added |
 | `dep-registry.txt` | If any dep is NOT_IN_LOCKFILE |
