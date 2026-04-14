@@ -99,9 +99,7 @@ def run_diff_scans(hooks, work: Path, diff_lines: int) -> int:
 
 def _get_old_dep_lines(hooks, pkgname: str, old_ver: str, old_result: dict) -> list[str]:
     """Extract runtime dep lines from old package manifest, via ecosystem hooks."""
-    if hasattr(hooks, 'get_old_dep_lines'):
-        return hooks.get_old_dep_lines(pkgname, old_ver, old_result)
-    return []
+    return hooks.get_old_dep_lines(pkgname, old_ver, old_result)
 
 
 # ---------------------------------------------------------------------------
@@ -1003,7 +1001,7 @@ def run_analysis(  # noqa: C901
 
     # 1. Download new version
     print(f'--- Download: {pkgname} {new_ver} ---')
-    dl = hooks.download_new(pkgname, new_ver, work, failures, registry_url=registry_url)
+    dl = hooks.download_new(pkgname, new_ver, work, failures)
     sha256 = dl.get('sha256', '')
     unpacked_dir = dl.get('unpacked_dir')
     if sha256:
@@ -1096,7 +1094,7 @@ def run_analysis(  # noqa: C901
     if diff_mode:
         print()
         print('--- Old version download ---')
-        old_result = hooks.download_old(pkgname, old_ver, work, failures, registry_url=registry_url)
+        old_result = hooks.download_old(pkgname, old_ver, work, failures)
         print(f'  Old version: {old_result.get("ok")} ({old_result.get("source") or "unavailable"})')
 
         print()
@@ -1144,7 +1142,7 @@ def run_analysis(  # noqa: C901
     # 9. Registry data
     print()
     print('--- Registry / provenance data ---')
-    registry = hooks.fetch_all_registry_data(pkgname, new_ver, work, registry_url=registry_url)
+    registry = hooks.fetch_all_registry_data(pkgname, new_ver, work)
     print(f'  MFA required: {registry.get("mfa_status", "unknown")}')
 
     # 10. Scorecard
@@ -1190,7 +1188,7 @@ def run_analysis(  # noqa: C901
     print('--- Dependency analysis ---')
     old_dep_lines = _get_old_dep_lines(hooks, pkgname, old_ver, old_result) if diff_mode else []
     dep_result = hooks.check_lockfile(manifest.get('runtime_dep_lines', []), old_dep_lines, root)
-    dep_registry = {d: hooks.check_dep_registry(d, registry_url=registry_url) for d in dep_result.get('not_in_lockfile', [])}
+    dep_registry = {d: hooks.check_dep_registry(d) for d in dep_result.get('not_in_lockfile', [])}
     write_dep_files(work, pkgname, old_ver, new_ver, diff_mode, dep_result, dep_registry)
     not_in_lf = dep_result.get('not_in_lockfile', [])
     print(f'  Not in lockfile: {", ".join(not_in_lf) if not_in_lf else "none"}')
@@ -1625,7 +1623,7 @@ def main() -> None:  # noqa: C901 (complexity acceptable for CLI validation)
     # --- Load ecosystem hooks ---
     hooks_module = REGISTRY_TO_HOOKS[registry]
     try:
-        hooks = importlib.import_module(hooks_module)
+        hooks = importlib.import_module(hooks_module).Hooks(registry_url=registry_url)
     except ImportError as exc:
         _die(
             f'No hooks file for registry {registry!r}: {exc}\n'
@@ -1673,69 +1671,62 @@ def main() -> None:  # noqa: C901 (complexity acceptable for CLI validation)
 
     # --- Execute requested modes in order ---
     if do_alternatives:
-        if not hasattr(hooks, 'check_alternatives'):
-            print(f'[SKIP] --alternatives not implemented for {registry} ecosystem')
+        result = hooks.check_alternatives(pkgname, new_ver, work, root)
+        concerns = result.get('concerns', [])
+        notes = result.get('notes', [])
+        pkg_count = result.get('pkg_count', 0)
+        lockfile_count = result.get('lockfile_count', 0)
+        print(f'Alternatives check: {pkg_count} installed/stdlib packages checked, '
+              f'{lockfile_count} lockfile deps checked')
+        if concerns:
+            print(f'CONCERNS ({len(concerns)}):')
+            for c in concerns:
+                print(f'  - {c}')
         else:
-            result = hooks.check_alternatives(
-                pkgname, new_ver, work, root,
-                registry_url=registry_url,
+            print('No concerns found.')
+        if notes:
+            print(f'Notes ({len(notes)}):')
+            for n in notes:
+                print(f'  - {n}')
+
+        # Classify concerns. Exact name collisions with stdlib/installed packages
+        # and single-edit-distance matches are high-confidence attack signals
+        # (dependency confusion, typosquatting). Everything else is worth
+        # flagging but is not definitively an attack.
+        _critical_prefixes = ('EXACT_STDLIB_MATCH:', 'NEAR_MATCH(dist=1):')
+        critical = [c for c in concerns if c.startswith(_critical_prefixes)]
+
+        if critical:
+            alternatives_critical = True
+            print(
+                '\nALTERNATIVES_RESULT: CRITICAL\n'
+                f'  {len(critical)} high-confidence attack signal(s) found.\n'
+                '\nAI ASSISTANT: STOP. DO NOT proceed to --basic or install this package.\n'
+                '  This package name is consistent with a typosquat, slopsquat, or\n'
+                '  dependency confusion attack against stdlib or already-installed packages.\n'
+                '  Present these findings to the user and recommend DO_NOT_INSTALL.\n'
+                '  Only override this directive if the user has reviewed the findings\n'
+                '  and explicitly confirmed they understand the risk.'
             )
-            concerns = result.get('concerns', [])
-            notes = result.get('notes', [])
-            # Support both 'gem_count' (Ruby) and 'pkg_count' (other ecosystems)
-            pkg_count = result.get('pkg_count', result.get('gem_count', 0))
-            lockfile_count = result.get('lockfile_count', 0)
-            print(f'Alternatives check: {pkg_count} installed/stdlib packages checked, '
-                  f'{lockfile_count} lockfile deps checked')
-            if concerns:
-                print(f'CONCERNS ({len(concerns)}):')
-                for c in concerns:
-                    print(f'  - {c}')
-            else:
-                print('No concerns found.')
-            if notes:
-                print(f'Notes ({len(notes)}):')
-                for n in notes:
-                    print(f'  - {n}')
-
-            # Classify concerns. Exact name collisions with stdlib/installed packages
-            # and single-edit-distance matches are high-confidence attack signals
-            # (dependency confusion, typosquatting). Everything else is worth
-            # flagging but is not definitively an attack.
-            _critical_prefixes = ('EXACT_STDLIB_MATCH:', 'NEAR_MATCH(dist=1):')
-            critical = [c for c in concerns if c.startswith(_critical_prefixes)]
-
-            if critical:
-                alternatives_critical = True
-                print(
-                    '\nALTERNATIVES_RESULT: CRITICAL\n'
-                    f'  {len(critical)} high-confidence attack signal(s) found.\n'
-                    '\nAI ASSISTANT: STOP. DO NOT proceed to --basic or install this package.\n'
-                    '  This package name is consistent with a typosquat, slopsquat, or\n'
-                    '  dependency confusion attack against stdlib or already-installed packages.\n'
-                    '  Present these findings to the user and recommend DO_NOT_INSTALL.\n'
-                    '  Only override this directive if the user has reviewed the findings\n'
-                    '  and explicitly confirmed they understand the risk.'
-                )
-                if do_basic or do_deeper:
-                    print('\n[STOPPED] --basic and --deeper skipped due to CRITICAL alternatives findings.')
-                    do_basic = False
-                    do_deeper = False
-                # Write session-update.json even on critical stop so dep_session.py
-                # complete can trigger CRITICAL propagation in the session.
-                if session_file is not None:
-                    _write_session_update(work, [], alternatives_critical=True,
-                                          install_time_code=False, install_time_code_reason='')
-            elif concerns:
-                print(
-                    '\nALTERNATIVES_RESULT: CONCERNS\n'
-                    f'  {len(concerns)} concern(s) found; none are definitive attack signals.\n'
-                    'AI ASSISTANT NOTE: Proceed to --basic, but weight these concerns in\n'
-                    '  your final recommendation. If --basic finds additional red flags,\n'
-                    '  escalate to HIGH or CRITICAL risk.'
-                )
-            else:
-                print('\nALTERNATIVES_RESULT: CLEAR (no concerns found)')
+            if do_basic or do_deeper:
+                print('\n[STOPPED] --basic and --deeper skipped due to CRITICAL alternatives findings.')
+                do_basic = False
+                do_deeper = False
+            # Write session-update.json even on critical stop so dep_session.py
+            # complete can trigger CRITICAL propagation in the session.
+            if session_file is not None:
+                _write_session_update(work, [], alternatives_critical=True,
+                                      install_time_code=False, install_time_code_reason='')
+        elif concerns:
+            print(
+                '\nALTERNATIVES_RESULT: CONCERNS\n'
+                f'  {len(concerns)} concern(s) found; none are definitive attack signals.\n'
+                'AI ASSISTANT NOTE: Proceed to --basic, but weight these concerns in\n'
+                '  your final recommendation. If --basic finds additional red flags,\n'
+                '  escalate to HIGH or CRITICAL risk.'
+            )
+        else:
+            print('\nALTERNATIVES_RESULT: CLEAR (no concerns found)')
 
     # --install-probe requires --basic artifacts; auto-enable if missing
     if do_install_probe and not do_basic:

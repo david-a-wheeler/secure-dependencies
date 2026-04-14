@@ -29,6 +29,7 @@ import shutil
 import subprocess
 import urllib.parse
 import urllib.request
+from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -1134,3 +1135,104 @@ def deep_source_comparison(
 
     lines.extend(['', 'DEEP_COMPARISON: COMPLETE'])
     (work / 'source-deep-diff.txt').write_text('\n'.join(lines) + '\n', encoding='utf-8')
+
+
+# ---------------------------------------------------------------------------
+# Ecosystem hooks contract
+# ---------------------------------------------------------------------------
+
+class EcosystemHooks(ABC):
+    """Abstract base class for ecosystem-specific analysis hooks.
+
+    Subclass this in each hooks_<ecosystem>.py module. Instantiate with the
+    registry URL (if using a private registry) and call methods directly.
+
+    Required class attributes (set as class-level variables in each subclass):
+        ECOSYSTEM            Short name, e.g. 'ruby', 'python'.
+        LOCKFILE_NAME        Single lockfile filename, or None if the ecosystem
+                             uses multiple formats (see LOCKFILE_NAMES).
+        MANIFEST_FILE        Canonical manifest filename written to the work dir.
+        DANGEROUS_WHAT       Human-readable description of DANGEROUS_PATTERNS.
+        DANGEROUS_PATTERNS   list[tuple[str, str]] of (label, regex) pairs.
+        DIFF_PATTERNS        list[tuple[str, str]] of (label, regex) pairs.
+    """
+
+    ECOSYSTEM: str
+    LOCKFILE_NAME: str | None
+    MANIFEST_FILE: str
+    DANGEROUS_WHAT: str
+    DANGEROUS_PATTERNS: list[tuple[str, str]]
+    DIFF_PATTERNS: list[tuple[str, str]]
+
+    def __init__(self, registry_url: str | None = None) -> None:
+        self.registry_url = registry_url
+
+    @abstractmethod
+    def get_lockfile_path(self, project_root: Path) -> Path: ...
+
+    @abstractmethod
+    def download_new(
+        self, pkgname: str, version: str, work: Path, failures: list[str],
+    ) -> dict: ...
+
+    @abstractmethod
+    def read_manifest(
+        self, pkgname: str, version: str, unpacked_dir: Path,
+        work: Path, failures: list[str],
+    ) -> dict: ...
+
+    @abstractmethod
+    def download_old(
+        self, pkgname: str, old_ver: str, work: Path, failures: list[str],
+    ) -> dict: ...
+
+    @abstractmethod
+    def get_old_license(
+        self, pkgname: str, old_ver: str, old_unpacked_dir: Path,
+    ) -> str | None: ...
+
+    @abstractmethod
+    def get_old_dep_lines(
+        self, pkgname: str, old_ver: str, old_result: dict,
+    ) -> list[str]: ...
+
+    @abstractmethod
+    def fetch_all_registry_data(
+        self, pkgname: str, version: str, work: Path,
+    ) -> dict: ...
+
+    @abstractmethod
+    def check_lockfile(
+        self, runtime_dep_lines: list[str], old_dep_lines: list[str],
+        project_root: Path,
+    ) -> dict: ...
+
+    @abstractmethod
+    def check_dep_registry(self, dep_name: str) -> dict: ...
+
+    @abstractmethod
+    def get_transitive_deps(
+        self, pkgname: str, version: str, lockfile_path: Path, work: Path,
+    ) -> dict: ...
+
+    @abstractmethod
+    def check_alternatives(
+        self, pkgname: str, version: str, work: Path, project_root: Path,
+    ) -> dict: ...
+
+    @abstractmethod
+    def get_diff_excludes(self) -> list[str]: ...
+
+    @abstractmethod
+    def get_pkg_src_excludes(self) -> tuple[re.Pattern, re.Pattern]: ...
+
+    @abstractmethod
+    def find_source_root(self, source_dir: Path) -> Path: ...
+
+    @abstractmethod
+    def get_deep_source_config(self) -> dict: ...
+
+    @abstractmethod
+    def reproducible_build(
+        self, pkgname: str, version: str, work: Path, sandbox: str,
+    ) -> tuple[str, int, int]: ...
