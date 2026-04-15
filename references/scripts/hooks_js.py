@@ -69,7 +69,7 @@ def _extract_source_url(pkg_json: dict) -> str:
         url = ''
     url = re.sub(r'^git\+', '', str(url).strip())
     url = re.sub(r'^git://', 'https://', url)
-    url = url.rstrip('.git').rstrip('/')
+    url = re.sub(r'\.git$', '', url).rstrip('/')
     return url
 
 

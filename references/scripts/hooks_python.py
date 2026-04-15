@@ -254,7 +254,9 @@ class Hooks(shared.EcosystemHooks):
         ('pickle-load',
          r'\bpickle\.(?:load|loads|Unpickler)\b'),
         ('unsafe-yaml',
-         r'\byaml\.load\s*\([^)]{0,200}(?<!\bLoader\s*=\s*yaml\.SafeLoader)(?<!\bLoader\s*=\s*yaml\.FullLoader)\b'),
+         # Match yaml.load(...) calls that do NOT pass a safe Loader argument.
+         # Variable-width lookbehinds are unsupported; use a lookahead to exclude safe forms.
+         r'\byaml\.load\s*\((?![^)]*\bLoader\s*=\s*yaml\.(?:SafeLoader|FullLoader|BaseLoader))'),
         ('marshal-loads',
          r'\bmarshal\.(?:load|loads)\b'),
         ('network-at-load-scope',
@@ -914,29 +916,34 @@ class Hooks(shared.EcosystemHooks):
         return 'unknown'
 
     def _dep_in_lockfile(self, dep_name: str, norm_dep: str, lf_text: str, fmt: str) -> bool:
-        """Return True if dep_name appears in the lockfile text for the given format."""
+        """Return True if dep_name appears in the lockfile text for the given format.
+
+        PEP 503: package names are case-insensitive and treat hyphens, underscores,
+        and dots as equivalent. All format-specific searches apply both the original
+        name and the hyphen-normalized form to avoid false NOT_IN_LOCKFILE results.
+        """
+        # PEP 503 normalized form: hyphens everywhere, lowercase
+        pep503 = _NORM_RE.sub('-', dep_name).lower()
+        # Also try underscore form, since some lockfiles store it that way
+        underscore_form = _NORM_RE.sub('_', dep_name).lower()
+
+        def _any_match(pattern_template: str, flags: int = 0) -> bool:
+            for variant in {dep_name, pep503, underscore_form}:
+                if re.search(pattern_template.format(re.escape(variant)), lf_text, flags):
+                    return True
+            return False
+
         if fmt == 'pip-requirements':
             # Look for "pkgname==" (pinned), "pkgname " or "pkgname[" (optional extras)
-            return bool(re.search(
-                rf'(?i)^{re.escape(dep_name)}\s*(?:==|>=|<=|!=|~=|\[|$)',
-                lf_text, re.MULTILINE,
-            ))
+            return _any_match(r'(?i)^{}\s*(?:==|>=|<=|!=|~=|\[|$)', re.MULTILINE)
         if fmt in ('poetry', 'uv'):
             # TOML: name = "pkgname"
-            return bool(re.search(
-                rf'(?i)name\s*=\s*["\']' + re.escape(dep_name) + r'["\']',
-                lf_text,
-            ))
+            return _any_match(r'(?i)name\s*=\s*["\']{}["\']')
         if fmt == 'pipenv':
             # JSON: "pkgname": { ... }
-            return bool(re.search(
-                rf'(?i)"' + re.escape(dep_name) + r'"\s*:\s*\{{',
-                lf_text,
-            ))
+            return _any_match(r'(?i)"{}"\s*:\s*\{{')
         # Fallback: case-insensitive substring search on normalized name
-        return bool(re.search(
-            rf'(?i)\b{re.escape(norm_dep)}\b', lf_text,
-        ))
+        return bool(re.search(rf'(?i)\b{re.escape(norm_dep)}\b', lf_text))
 
     def check_dep_registry(self, dep_name: str) -> dict:
         """PyPI JSON API lookup for a dep not in lockfile.
@@ -992,7 +999,8 @@ class Hooks(shared.EcosystemHooks):
         Returns dict with keys: total (int), not_in_lockfile (list[str]).
         """
         # Fetch requires_dist from PyPI for the specific version
-        api_data = shared.http_get(f'https://pypi.org/pypi/{pkgname}/{version}/json')
+        api_base = (self.registry_url.rstrip('/') if self.registry_url else 'https://pypi.org')
+        api_data = shared.http_get(f'{api_base}/pypi/{pkgname}/{version}/json')
         requires_dist: list[str] = []
         raw_lines = []
         if api_data:
@@ -1136,8 +1144,18 @@ class Hooks(shared.EcosystemHooks):
                 for m in re.finditer(r'name\s*=\s*["\']([^"\']+)["\']', lf_text):
                     lockfile_names.append(m.group(1))
             elif lf_fmt == 'pipenv':
-                for m in re.finditer(r'"([A-Za-z0-9][A-Za-z0-9._-]*)"\s*:', lf_text):
-                    lockfile_names.append(m.group(1))
+                # Parse Pipfile.lock as JSON; package names are keys of "default" and "develop"
+                # objects. Avoid simple regex which would match any JSON key including metadata
+                # fields like "version", "index", "hashes", "_meta", etc.
+                try:
+                    pipfile_data = json.loads(lf_text)
+                    for section in ('default', 'develop'):
+                        for key in (pipfile_data.get(section) or {}).keys():
+                            if key != '_meta':
+                                lockfile_names.append(key)
+                except (ValueError, TypeError):
+                    # Fall back to conservative regex: only keys directly under default/develop
+                    pass
 
         installed_and_stdlib_lower = {p.lower() for p in installed_names} | stdlib_lower
         for dep in lockfile_names:
@@ -1425,15 +1443,28 @@ class Hooks(shared.EcosystemHooks):
                 m = re.search(r'\((\d+),\s*(\d+)\)', pv2_out)
                 if m:
                     py_img_tag = f'{m.group(1)}.{m.group(2)}'
+            # Two-stage run: first install 'build' with network access, then build with --network none.
+            # The python:X image does not pre-install 'build', so a separate install step is required.
             rc_b, b_out, b_err = shared.run_cmd(
                 [sandbox, 'run', '--rm',
-                 '--network', 'none',
                  '-v', f'{build_root}:/src:ro',
                  '-v', f'{built_whl_dir}:/out',
                  f'python:{py_img_tag}',
                  'sh', '-c',
-                 'pip install build --quiet && python -m build --wheel --no-isolation --outdir /out /src'],
+                 'pip install build --quiet --disable-pip-version-check && '
+                 'python -m build --wheel --no-isolation --outdir /out /src'],
                 timeout=600,
+            )
+            build_log_path.write_text(b_out + b_err, encoding='utf-8', errors='replace')
+            build_ok = rc_b == 0
+
+        elif sandbox == 'firejail':
+            rc_b, b_out, b_err = shared.run_cmd(
+                ['firejail', '--quiet', '--net=none',
+                 f'--read-only={build_root}',
+                 'python3', '-m', 'build', '--wheel', '--no-isolation',
+                 '--outdir', str(built_whl_dir), str(build_root)],
+                timeout=300,
             )
             build_log_path.write_text(b_out + b_err, encoding='utf-8', errors='replace')
             build_ok = rc_b == 0
@@ -1441,7 +1472,7 @@ class Hooks(shared.EcosystemHooks):
         else:
             # No sandbox available: refuse to build unsandboxed
             return finish(
-                'SKIPPED (no sandbox available: install bwrap, docker, or podman)'
+                'SKIPPED (no sandbox available: install bwrap, firejail, docker, or podman)'
             )
 
         lines.append(f'BUILD_STATUS: {"yes" if build_ok else "no"}')
