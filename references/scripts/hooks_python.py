@@ -1406,74 +1406,35 @@ class Hooks(shared.EcosystemHooks):
 
         lines.append(f'BUILD_ROOT: {shared.sanitize(str(build_root))}')
         build_log_path = work / 'raw-build-output.txt'
-        build_ok = False
 
-        build_cmd_base = [
-            'python3', '-m', 'build', '--wheel', '--no-isolation',
-            '--outdir', str(built_whl_dir),
-            str(build_root),
-        ]
+        rc_pv2, pv2_out, _ = shared.run_cmd(
+            ['python3', '-c', 'import sys; print(sys.version_info[:2])'], timeout=5
+        )
+        py_img_tag = '3'
+        if rc_pv2 == 0:
+            m = re.search(r'\((\d+),\s*(\d+)\)', pv2_out)
+            if m:
+                py_img_tag = f'{m.group(1)}.{m.group(2)}'
 
-        if sandbox == 'bwrap':
-            bwrap_args = [
-                'bwrap',
-                '--ro-bind', str(build_root), '/src',
-                '--bind', str(built_whl_dir), '/out',
-                '--ro-bind', '/usr', '/usr',
-                '--ro-bind', '/lib', '/lib',
-                '--ro-bind', '/etc', '/etc',
-                '--tmpfs', '/tmp',
-                '--proc', '/proc',
-                '--dev', '/dev',
-                '--unshare-net',
-                '--die-with-parent',
-                '--chdir', '/src',
-            ]
-            if Path('/lib64').is_dir():
-                bwrap_args += ['--ro-bind', '/lib64', '/lib64']
-            bwrap_args += ['python3', '-m', 'build', '--wheel', '--no-isolation', '--outdir', '/out']
-            rc_b, b_out, b_err = shared.run_cmd(bwrap_args, timeout=300)
-            build_log_path.write_text(b_out + b_err, encoding='utf-8', errors='replace')
-            build_ok = rc_b == 0
-
-        elif sandbox in ('docker', 'podman'):
-            rc_pv2, pv2_out, _ = shared.run_cmd(['python3', '-c', 'import sys; print(sys.version_info[:2])'], timeout=5)
-            py_img_tag = '3'
-            if rc_pv2 == 0:
-                m = re.search(r'\((\d+),\s*(\d+)\)', pv2_out)
-                if m:
-                    py_img_tag = f'{m.group(1)}.{m.group(2)}'
-            # Two-stage run: first install 'build' with network access, then build with --network none.
-            # The python:X image does not pre-install 'build', so a separate install step is required.
-            rc_b, b_out, b_err = shared.run_cmd(
-                [sandbox, 'run', '--rm',
-                 '-v', f'{build_root}:/src:ro',
-                 '-v', f'{built_whl_dir}:/out',
-                 f'python:{py_img_tag}',
-                 'sh', '-c',
-                 'pip install build --quiet --disable-pip-version-check && '
-                 'python -m build --wheel --no-isolation --outdir /out /src'],
-                timeout=600,
-            )
-            build_log_path.write_text(b_out + b_err, encoding='utf-8', errors='replace')
-            build_ok = rc_b == 0
-
-        elif sandbox == 'firejail':
-            rc_b, b_out, b_err = shared.run_cmd(
-                ['firejail', '--quiet', '--net=none',
-                 f'--read-only={build_root}',
-                 'python3', '-m', 'build', '--wheel', '--no-isolation',
-                 '--outdir', str(built_whl_dir), str(build_root)],
-                timeout=300,
-            )
-            build_log_path.write_text(b_out + b_err, encoding='utf-8', errors='replace')
-            build_ok = rc_b == 0
-
-        else:
-            # No sandbox available: refuse to build unsandboxed
+        result = shared.run_sandboxed(
+            sandbox, build_root, built_whl_dir,
+            'python3 -m build --wheel --no-isolation --outdir {out} {src}',
+            f'python:{py_img_tag}',
+            # python:X images don't pre-install 'build', so install it first.
+            # container_allow_network=True is required for that pip install step.
+            container_shell_cmd=(
+                'pip install build --quiet --disable-pip-version-check && '
+                'python -m build --wheel --no-isolation --outdir {out} {src}'
+            ),
+            container_allow_network=True,
+        )
+        if result is None:
             return finish(
                 'SKIPPED (no sandbox available: install bwrap, firejail, docker, or podman)'
             )
+        rc_b, combined = result
+        build_log_path.write_text(combined, encoding='utf-8', errors='replace')
+        build_ok = rc_b == 0
 
         lines.append(f'BUILD_STATUS: {"yes" if build_ok else "no"}')
 

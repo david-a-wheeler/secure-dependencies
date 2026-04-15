@@ -1303,6 +1303,107 @@ def detect_sandbox(work: Path) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Sandboxed build helper
+# ---------------------------------------------------------------------------
+
+def run_sandboxed(
+    sandbox: str,
+    src_dir: Path,
+    out_dir: Path,
+    shell_cmd: str,
+    container_image: str,
+    *,
+    container_shell_cmd: str | None = None,
+    container_allow_network: bool = False,
+    firejail_cwd: Path | None = None,
+    timeout: int = 300,
+    container_timeout: int = 600,
+) -> tuple[int, str] | None:
+    """Run one or more commands inside a sandbox; return (returncode, combined_output).
+
+    Returns None when sandbox == 'none', signalling the caller should emit SKIPPED.
+
+    shell_cmd is a shell command string that may chain multiple commands with &&
+    or ; as needed. Use the literal placeholders {src} and {out} for the
+    source directory (read-only) and output directory respectively.  The
+    function substitutes the correct paths for each sandbox type before
+    execution, so a single shell_cmd works for bwrap, firejail, and containers.
+
+    Example:
+        run_sandboxed(
+            sandbox, src, out,
+            shell_cmd='cd {src} && npm install && npm test && npm pack --pack-destination {out}',
+            container_image='node:20',
+        )
+
+    Parameters:
+        sandbox: 'bwrap', 'firejail', 'docker', 'podman', or 'none'
+        src_dir: read-only source tree on the host
+        out_dir: writable output directory on the host
+        shell_cmd: shell command with {src} and {out} placeholders; used for
+            bwrap and firejail (substituted with /src//out and real paths resp.)
+        container_image: Docker/Podman image (e.g. 'ruby:3.2', 'node:20')
+        container_shell_cmd: override shell_cmd for Docker/Podman only; useful
+            when the container needs extra setup steps (e.g. pip install build)
+            before the main build command; same {src}/{out} substitution applies
+        container_allow_network: allow network in the container (default False)
+        firejail_cwd: working directory for firejail (default: src_dir)
+        timeout: seconds allowed for bwrap/firejail
+        container_timeout: seconds allowed for Docker/Podman
+    """
+    if sandbox == 'bwrap':
+        script = shell_cmd.format(src='/src', out='/out')
+        args = [
+            'bwrap',
+            '--ro-bind', str(src_dir), '/src',
+            '--bind', str(out_dir), '/out',
+            '--ro-bind', '/usr', '/usr',
+            '--ro-bind', '/lib', '/lib',
+            '--ro-bind', '/etc', '/etc',
+            '--symlink', 'usr/bin', '/bin',
+            '--tmpfs', '/tmp',
+            '--proc', '/proc',
+            '--dev', '/dev',
+            '--unshare-net',
+            '--die-with-parent',
+            '--chdir', '/src',
+        ]
+        if Path('/lib64').is_dir():
+            args += ['--ro-bind', '/lib64', '/lib64']
+        args += ['/usr/bin/sh', '-c', script]
+        rc, out, err = run_cmd(args, timeout=timeout)
+        return rc, out + err
+
+    if sandbox == 'firejail':
+        script = shell_cmd.format(src=str(src_dir), out=str(out_dir))
+        cwd = firejail_cwd or src_dir
+        args = [
+            'firejail', '--quiet', '--net=none',
+            f'--read-only={src_dir}',
+            'sh', '-c', script,
+        ]
+        rc, out, err = run_cmd(args, cwd=cwd, timeout=timeout)
+        return rc, out + err
+
+    if sandbox in ('docker', 'podman'):
+        raw = container_shell_cmd if container_shell_cmd is not None else shell_cmd
+        script = raw.format(src='/src', out='/out')
+        args = [sandbox, 'run', '--rm']
+        if not container_allow_network:
+            args += ['--network', 'none']
+        args += [
+            '-v', f'{src_dir}:/src:ro',
+            '-v', f'{out_dir}:/out',
+            container_image,
+            'sh', '-c', script,
+        ]
+        rc, out, err = run_cmd(args, timeout=container_timeout)
+        return rc, out + err
+
+    return None  # sandbox == 'none'
+
+
+# ---------------------------------------------------------------------------
 # Deep source comparison (used by deeper-analysis scripts)
 # ---------------------------------------------------------------------------
 

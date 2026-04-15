@@ -959,68 +959,30 @@ class Hooks(shared.EcosystemHooks):
         source_gemspec = str(gemspec_candidates[0])
         lines.append(f'SOURCE_GEMSPEC: {shared.sanitize(source_gemspec)}')
 
-        build_ok = False
         build_log_path = work / 'raw-build-output.txt'
 
-        if sandbox == 'bwrap':
-            bwrap_args = [
-                'bwrap',
-                '--ro-bind', str(clone_dir), '/src',
-                '--bind', str(built_gem_dir), '/out',
-                '--ro-bind', '/usr', '/usr',
-                '--ro-bind', '/lib', '/lib',
-                '--ro-bind', '/etc', '/etc',
-                '--tmpfs', '/tmp',
-                '--proc', '/proc',
-                '--dev', '/dev',
-                '--unshare-net',
-                '--die-with-parent',
-                '--chdir', '/src',
-            ]
-            if Path('/lib64').is_dir():
-                bwrap_args += ['--ro-bind', '/lib64', '/lib64']
-            bwrap_args += ['gem', 'build', source_gemspec, '--output', '/out/']
-            rc_b, b_out, b_err = shared.run_cmd(bwrap_args, timeout=300)
-            build_log_path.write_text(b_out + b_err, encoding='utf-8', errors='replace')
-            build_ok = (rc_b == 0)
+        rc_rv2, rv2_out, _ = shared.run_cmd(['ruby', '-e', 'puts RUBY_VERSION'], timeout=5)
+        ruby_img_tag = rv2_out.strip() if rc_rv2 == 0 else '3'
+        parts = ruby_img_tag.split('.')
+        ruby_img_tag = '.'.join(parts[:2]) if len(parts) >= 2 else parts[0]
 
-        elif sandbox == 'firejail':
-            rc_b, b_out, b_err = shared.run_cmd(
-                ['firejail', '--quiet', '--net=none',
-                 f'--read-only={clone_dir}',
-                 'gem', 'build', source_gemspec, '--output', f'{built_gem_dir}/'],
-                timeout=300,
-            )
-            build_log_path.write_text(b_out + b_err, encoding='utf-8', errors='replace')
-            build_ok = (rc_b == 0)
-
-        elif sandbox in ('docker', 'podman'):
-            rc_rv2, rv2_out, _ = shared.run_cmd(['ruby', '-e', 'puts RUBY_VERSION'], timeout=5)
-            ruby_img_tag = rv2_out.strip() if rc_rv2 == 0 else '3'
-            parts = ruby_img_tag.split('.')
-            ruby_img_tag = '.'.join(parts[:2]) if len(parts) >= 2 else parts[0]
-
-            rc_b, b_out, b_err = shared.run_cmd(
-                [sandbox, 'run', '--rm',
-                 '--network', 'none',
-                 '-v', f'{clone_dir}:/src:ro',
-                 '-v', f'{built_gem_dir}:/out',
-                 f'ruby:{ruby_img_tag}',
-                 'sh', '-c',
-                 'git config --global --add safe.directory /tmp/src 2>/dev/null; '
-                 'cp -r /src /tmp/src && cd /tmp/src && '
-                 'gem build *.gemspec && '
-                 'cp *.gem /out/'],
-                timeout=600,
-            )
-            build_log_path.write_text(b_out + b_err, encoding='utf-8', errors='replace')
-            build_ok = (rc_b == 0)
-
-        else:
-            # No sandbox available: refuse to build unsandboxed
+        result = shared.run_sandboxed(
+            sandbox, clone_dir, built_gem_dir,
+            'gem build {src}/' + source_gemspec + ' --output {out}/',
+            f'ruby:{ruby_img_tag}',
+            container_shell_cmd=(
+                'git config --global --add safe.directory /tmp/src 2>/dev/null; '
+                'cp -r {src} /tmp/src && cd /tmp/src && '
+                'gem build *.gemspec && cp *.gem {out}/'
+            ),
+        )
+        if result is None:
             return finish(
                 'SKIPPED (no sandbox available: install bwrap, firejail, docker, or podman)'
             )
+        rc_b, combined = result
+        build_log_path.write_text(combined, encoding='utf-8', errors='replace')
+        build_ok = (rc_b == 0)
 
         lines.append(f'BUILD_STATUS: {"yes" if build_ok else "no"}')
 
