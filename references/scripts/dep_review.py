@@ -1932,8 +1932,9 @@ def main() -> None:  # noqa: C901 (complexity acceptable for CLI validation)
         pkg_count = result.get('pkg_count', 0)
         lockfile_count = result.get('lockfile_count', 0)
 
-        # Enrich with ecosyste.ms adoption signals: zero or near-zero
-        # dependent_repos_count is a strong corroborating signal for squatting.
+        # Enrich with ecosyste.ms adoption data. The raw count is always shown
+        # so the AI can judge plausibility in context (e.g. 1000 dependent repos
+        # sounds high until you realise the package claims to be 'rails').
         if registry_key:
             eco_alt = shared.lookup_ecosystems_package(registry_key, pkgname, work=work)
             if eco_alt.get('rate_limited'):
@@ -1945,16 +1946,17 @@ def main() -> None:  # noqa: C901 (complexity acceptable for CLI validation)
                 dep_repos_alt = eco_alt.get('dependent_repos_count')
                 dep_pkgs_alt = eco_alt.get('dependent_packages_count')
                 eco_status_alt = eco_alt.get('status') or ''
+                # Always emit the count so the AI can assess plausibility.
+                if dep_repos_alt is not None:
+                    notes.append(
+                        f'ECOSYSTEMS_ADOPTION: {dep_repos_alt} dependent repo(s), '
+                        f'{dep_pkgs_alt if dep_pkgs_alt is not None else "unknown"} dependent package(s)'
+                    )
+                # Hard-signal concerns on top of the always-present count.
                 if dep_repos_alt == 0:
                     concerns.append(
-                        f'ECOSYSTEMS_NO_KNOWN_USERS: 0 dependent repos '
-                        f'({dep_pkgs_alt or 0} dependent packages) -- '
+                        'ECOSYSTEMS_NO_KNOWN_USERS: 0 dependent repos -- '
                         'no known users in the wild; consistent with a newly-published squatting package'
-                    )
-                elif dep_repos_alt is not None and dep_repos_alt < 10:
-                    notes.append(
-                        f'ECOSYSTEMS_LOW_ADOPTION: only {dep_repos_alt} dependent repo(s) -- '
-                        'very low adoption; verify this is the intended package'
                     )
                 if eco_status_alt in ('deprecated', 'archived'):
                     concerns.append(
