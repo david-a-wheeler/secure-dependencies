@@ -1497,6 +1497,161 @@ def deep_source_comparison(
 
 
 # ---------------------------------------------------------------------------
+# Reproducible-build helpers (used by all ecosystem hooks)
+# ---------------------------------------------------------------------------
+
+def finish_reproducible_build(
+    lines: list,
+    work: Path,
+    result: str,
+    extra: list | None = None,
+) -> tuple:
+    """Append result, write reproducible-build.txt, return (result, 0, 0).
+
+    The trailing zeros are placeholder diff counts for early-exit paths where
+    no diff was performed. Use classify_repro_diffs for paths that do a diff.
+    """
+    lines.append(f'REPRODUCIBLE_BUILD: {result}')
+    if extra:
+        lines.extend(extra)
+    (work / 'reproducible-build.txt').write_text('\n'.join(lines) + '\n', encoding='utf-8')
+    return result, 0, 0
+
+
+def compare_repro_sha256(
+    built_sha: str,
+    work: Path,
+    lines: list,
+) -> tuple | None:
+    """Read package-hash.txt, append SHA256 lines, and check for an exact match.
+
+    Returns a finished result tuple if the built and distributed hashes match,
+    or None if they differ (caller should proceed to content comparison).
+    """
+    pkg_hash_file = work / 'package-hash.txt'
+    dist_sha = ''
+    if pkg_hash_file.is_file():
+        first_line = pkg_hash_file.read_text(encoding='utf-8').splitlines()[0]
+        dist_sha = first_line.split()[0] if first_line.split() else ''
+    lines.append(f'BUILT_SHA256: {sanitize(built_sha)}')
+    lines.append(f'DISTRIBUTED_SHA256: {sanitize(dist_sha or "UNKNOWN")}')
+    if built_sha and built_sha == dist_sha:
+        return finish_reproducible_build(lines, work, 'EXACTLY REPRODUCIBLE (sha256 match)')
+    return None
+
+
+def classify_repro_diffs(
+    diff_out: str,
+    lines: list,
+    work: Path,
+    re_code: 're.Pattern',
+    re_meta: 're.Pattern',
+) -> tuple:
+    """Classify diff output into code vs metadata changes, write report, return result tuple.
+
+    re_code and re_meta are ecosystem-specific compiled patterns passed by the caller.
+    Returns (result_str, code_diffs, metadata_diffs).
+    """
+    differing: list = []
+    code_diffs = 0
+    metadata_diffs = 0
+    for line in diff_out.splitlines():
+        if line.startswith('Only in') or line.startswith('diff '):
+            differing.append(sanitize(line))
+        if re_code.search(line):
+            code_diffs += 1
+        if re_meta.search(line):
+            metadata_diffs += 1
+    lines.append('DIFFERING_FILES (sanitized):')
+    lines.extend(differing[:50])
+    lines.append(f'CODE_FILE_DIFFS: {code_diffs}')
+    lines.append(f'METADATA_FILE_DIFFS: {metadata_diffs}')
+    if code_diffs > 0:
+        result = 'UNEXPECTED DIFFERENCES'
+        extra: list | None = ['WARNING: code files differ (possible injected code; human review required)']
+    else:
+        result = 'FUNCTIONALLY EQUIVALENT (metadata-only diffs)'
+        extra = None
+    return finish_reproducible_build(lines, work, result, extra)
+
+
+def write_transitive_deps(
+    work: Path,
+    pkgname: str,
+    version: str,
+    total: int,
+    new_deps: list,
+    *,
+    total_label: str = 'TOTAL_TRANSITIVE_DEPS',
+    note: str = '',
+) -> dict:
+    """Write transitive-deps.txt and return the standard result dict."""
+    trans_lines = [f'=== Transitive dependency footprint: {pkgname} {version} ===']
+    if note:
+        trans_lines.append(f'NOTE: {note}')
+    trans_lines += [
+        f'{total_label}: {total}',
+        f'NEW_NOT_IN_LOCKFILE: {len(new_deps)}',
+        '',
+        'NEW_PACKAGES (not in current lockfile):',
+    ]
+    if new_deps:
+        trans_lines.extend(f'  {sanitize(d)}' for d in new_deps)
+    else:
+        trans_lines.append('  none')
+    (work / 'transitive-deps.txt').write_text('\n'.join(trans_lines) + '\n', encoding='utf-8')
+    return {'total': total, 'not_in_lockfile': new_deps}
+
+
+def write_alternatives(
+    work: Path,
+    pkgname: str,
+    version: str,
+    section_labels: dict,
+    concerns: list,
+    notes: list,
+) -> dict:
+    """Write alternatives.txt and return the standard result dict.
+
+    section_labels maps a human-readable label to its count, e.g.:
+        {'Installed gems checked': 45, 'Lockfile deps checked': 12}
+    These lines appear verbatim in the report header.
+    pkg_count in the return dict is the sum of all non-lockfile section counts.
+    """
+    lines = [f'=== Alternatives check: {pkgname} {version} ===']
+    for label, count in section_labels.items():
+        lines.append(f'{label}: {count}')
+    lines.append('')
+    if concerns:
+        lines.append(f'CONCERNS ({len(concerns)}):')
+        for c in concerns:
+            lines.append(f'  [!] {c}')
+    else:
+        lines.append('CONCERNS: none')
+    lines.append('')
+    if notes:
+        lines.append(f'NOTES ({len(notes)}):')
+        for n in notes:
+            lines.append(f'  [-] {n}')
+    else:
+        lines.append('NOTES: none')
+    work.mkdir(parents=True, exist_ok=True)
+    (work / 'alternatives.txt').write_text('\n'.join(lines) + '\n', encoding='utf-8')
+    lockfile_count = sum(
+        v for k, v in section_labels.items() if 'lockfile' in k.lower()
+    )
+    pkg_count = sum(
+        v for k, v in section_labels.items() if 'lockfile' not in k.lower()
+    )
+    return {
+        'concerns': concerns,
+        'notes': notes,
+        'pkg_count': pkg_count,
+        'lockfile_count': lockfile_count,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Ecosystem hooks contract
 # ---------------------------------------------------------------------------
 

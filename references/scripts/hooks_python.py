@@ -1036,19 +1036,11 @@ class Hooks(shared.EcosystemHooks):
             if not self._dep_in_lockfile(dep_name, norm_dep, lf_text, lf_format):
                 transitive_new.append(dep_name)
 
-        trans_lines = [
-            f'=== Transitive dependency footprint: {pkgname} {version} ===',
-            f'NOTE: shows direct (level-1) deps from PyPI metadata only.',
-            f'TOTAL_DIRECT_DEPS: {total}',
-            f'NEW_NOT_IN_LOCKFILE: {len(transitive_new)}',
-            '',
-            'NEW_PACKAGES (not in current lockfile):',
-        ]
-        (trans_lines.extend(f'  {shared.sanitize(d)}' for d in transitive_new)
-         if transitive_new else trans_lines.append('  none'))
-        (work / 'transitive-deps.txt').write_text('\n'.join(trans_lines) + '\n', encoding='utf-8')
-
-        return {'total': total, 'not_in_lockfile': transitive_new}
+        return shared.write_transitive_deps(
+            work, pkgname, version, total, transitive_new,
+            total_label='TOTAL_DIRECT_DEPS',
+            note='shows direct (level-1) deps from PyPI metadata only.',
+        )
 
     def check_alternatives(
         self,
@@ -1212,37 +1204,15 @@ class Hooks(shared.EcosystemHooks):
                         'Verify this wrapper is intentional.'
                     )
 
-        # --- Write report ---
-        lines = [
-            f'=== Alternatives check: {pkgname} {version} ===',
-            f'Stdlib modules checked  : {len(stdlib_names)}',
-            f'Installed pkgs checked  : {len(installed_names)}',
-            f'Lockfile deps checked   : {len(lockfile_names)}',
-            '',
-        ]
-        if concerns:
-            lines.append(f'CONCERNS ({len(concerns)}):')
-            for c in concerns:
-                lines.append(f'  [!] {c}')
-        else:
-            lines.append('CONCERNS: none')
-        lines.append('')
-        if notes:
-            lines.append(f'NOTES ({len(notes)}):')
-            for n in notes:
-                lines.append(f'  [-] {n}')
-        else:
-            lines.append('NOTES: none')
-
-        work.mkdir(parents=True, exist_ok=True)
-        (work / 'alternatives.txt').write_text('\n'.join(lines) + '\n', encoding='utf-8')
-
-        return {
-            'concerns': concerns,
-            'notes': notes,
-            'pkg_count': len(stdlib_names) + len(installed_names),
-            'lockfile_count': len(lockfile_names),
-        }
+        return shared.write_alternatives(
+            work, pkgname, version,
+            {
+                'Stdlib modules checked': len(stdlib_names),
+                'Installed pkgs checked': len(installed_names),
+                'Lockfile deps checked': len(lockfile_names),
+            },
+            concerns, notes,
+        )
 
     def _get_stdlib_names(self) -> list[str]:
         """Return a list of Python stdlib module names.
@@ -1371,17 +1341,8 @@ class Hooks(shared.EcosystemHooks):
             '',
         ]
 
-        def finish(result: str, extra: list[str] | None = None) -> tuple[str, int, int]:
-            lines.append(f'REPRODUCIBLE_BUILD: {result}')
-            if extra:
-                lines.extend(extra)
-            (work / 'reproducible-build.txt').write_text(
-                '\n'.join(lines) + '\n', encoding='utf-8'
-            )
-            return result, 0, 0
-
         if not clone_dir.is_dir():
-            return finish('SKIPPED (no source clone)')
+            return shared.finish_reproducible_build(lines, work, 'SKIPPED (no source clone)')
 
         rc_pv, pv_out, _ = shared.run_cmd(['python3', '--version'], timeout=10)
         python_ver = shared.sanitize(pv_out.strip()) if rc_pv == 0 else 'unknown'
@@ -1402,7 +1363,7 @@ class Hooks(shared.EcosystemHooks):
                     break
 
         if not (build_root / 'pyproject.toml').is_file() and not (build_root / 'setup.py').is_file():
-            return finish('SKIPPED (no pyproject.toml or setup.py in source)')
+            return shared.finish_reproducible_build(lines, work, 'SKIPPED (no pyproject.toml or setup.py in source)')
 
         lines.append(f'BUILD_ROOT: {shared.sanitize(str(build_root))}')
         build_log_path = work / 'raw-build-output.txt'
@@ -1429,8 +1390,9 @@ class Hooks(shared.EcosystemHooks):
             container_allow_network=True,
         )
         if result is None:
-            return finish(
-                'SKIPPED (no sandbox available: install bwrap, firejail, docker, or podman)'
+            return shared.finish_reproducible_build(
+                lines, work,
+                'SKIPPED (no sandbox available: install bwrap, firejail, docker, or podman)',
             )
         rc_b, combined = result
         build_log_path.write_text(combined, encoding='utf-8', errors='replace')
@@ -1439,25 +1401,16 @@ class Hooks(shared.EcosystemHooks):
         lines.append(f'BUILD_STATUS: {"yes" if build_ok else "no"}')
 
         if not build_ok:
-            return finish('INCONCLUSIVE (build failed)')
+            return shared.finish_reproducible_build(lines, work, 'INCONCLUSIVE (build failed)')
 
         built_whls = list(built_whl_dir.glob('*.whl'))
         if not built_whls:
-            return finish('INCONCLUSIVE (no .whl produced)')
+            return shared.finish_reproducible_build(lines, work, 'INCONCLUSIVE (no .whl produced)')
         built_whl = built_whls[0]
 
         built_sha = shared.sha256_file(built_whl)
-        pkg_hash_file = work / 'package-hash.txt'
-        dist_sha = ''
-        if pkg_hash_file.is_file():
-            first_line = pkg_hash_file.read_text(encoding='utf-8').splitlines()[0]
-            dist_sha = first_line.split()[0] if first_line.split() else ''
-
-        lines.append(f'BUILT_SHA256: {shared.sanitize(built_sha)}')
-        lines.append(f'DISTRIBUTED_SHA256: {shared.sanitize(dist_sha or "UNKNOWN")}')
-
-        if built_sha and built_sha == dist_sha:
-            return finish('EXACTLY REPRODUCIBLE (sha256 match)')
+        if (repro := shared.compare_repro_sha256(built_sha, work, lines)) is not None:
+            return repro
 
         # Hashes differ: unpack both and compare contents
         built_unpacked = work / 'raw-built-unpacked'
@@ -1466,7 +1419,7 @@ class Hooks(shared.EcosystemHooks):
 
         dist_unpacked = work / 'unpacked'
         if not dist_unpacked.is_dir():
-            return finish('INCONCLUSIVE (hashes differ, no dist unpacked dir)')
+            return shared.finish_reproducible_build(lines, work, 'INCONCLUSIVE (hashes differ, no dist unpacked dir)')
 
         rc_diff, diff_out, _ = shared.run_cmd(
             ['diff', '-r', str(built_unpacked), str(dist_unpacked),
@@ -1479,32 +1432,6 @@ class Hooks(shared.EcosystemHooks):
         lines.append(f'CONTENT_DIFF_LINES: {diff_line_count}')
 
         if diff_line_count == 0:
-            return finish('EXACTLY REPRODUCIBLE (content match)')
+            return shared.finish_reproducible_build(lines, work, 'EXACTLY REPRODUCIBLE (content match)')
 
-        differing: list[str] = []
-        code_diffs = 0
-        metadata_diffs = 0
-        for line in diff_out.splitlines():
-            if line.startswith('Only in') or line.startswith('diff '):
-                differing.append(shared.sanitize(line))
-            if _RE_REPRO_CODE.search(line):
-                code_diffs += 1
-            if _RE_REPRO_META.search(line):
-                metadata_diffs += 1
-
-        lines.append('DIFFERING_FILES (sanitized):')
-        lines.extend(differing[:50])
-        lines.append(f'CODE_FILE_DIFFS: {code_diffs}')
-        lines.append(f'METADATA_FILE_DIFFS: {metadata_diffs}')
-
-        if code_diffs > 0:
-            extra = ['WARNING: code files differ (possible injected code; human review required)']
-            result = 'UNEXPECTED DIFFERENCES'
-        else:
-            extra = []
-            result = 'FUNCTIONALLY EQUIVALENT (metadata-only diffs)'
-
-        lines.append(f'REPRODUCIBLE_BUILD: {result}')
-        lines.extend(extra)
-        (work / 'reproducible-build.txt').write_text('\n'.join(lines) + '\n', encoding='utf-8')
-        return result, code_diffs, metadata_diffs
+        return shared.classify_repro_diffs(diff_out, lines, work, _RE_REPRO_CODE, _RE_REPRO_META)
