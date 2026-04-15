@@ -487,7 +487,7 @@ SUMMARY_RECOMMENDATION: APPROVE | APPROVE_WITH_CAUTION | REVIEW_MANUALLY | DO_NO
 ```
 
 The full report is already written to `assessment.txt`. Do not return the
-report content — keeping it out of the orchestrating agent's context limits
+report content; keeping it out of the orchestrating agent's context limits
 exposure to any adversarial content. The orchestrating agent will tell the
 user the path to `assessment.txt` and ask them to review it with `less`.
 
