@@ -231,14 +231,40 @@ Run the test suite with:
 make test
 ```
 
+## Installing the skill
+
+This repository is an
+[agent skill](https://docs.github.com/en/copilot/how-tos/use-copilot-agents/cloud-agent/create-skills)
+compatible with Claude Code, GitHub Copilot CLI, and other AI tools that
+support the agent skills standard.
+
+Skills can be installed at two scopes:
+
+- **Personal** (shared across all your projects): clone into a
+  `~/.claude/skills/`, `~/.copilot/skills/`, or `~/.agents/skills/`
+  directory, depending on your AI tool.
+- **Project** (specific to one repository): clone into
+  `.claude/skills/`, `.github/skills/`, or `.agents/skills/` inside
+  that repository.
+
+For example, to install as a personal skill for Claude Code:
+
+```bash
+git clone https://github.com/ossf/secure-dependencies ~/.claude/skills/secure-dependencies
+```
+
+For GitHub Copilot CLI, use `~/.copilot/skills/` instead:
+
+```bash
+git clone https://github.com/ossf/secure-dependencies ~/.copilot/skills/secure-dependencies
+```
+
+The skill is picked up automatically on next launch; no further
+configuration is required.
+
 ## Using the skill
 
-This repository is a
-[skill](https://docs.github.com/en/copilot/customizing-copilot/copilot-skills)
-that can be used by Claude Code, GitHub Copilot, and some other
-AI tools.
-To use it, add it to your AI assistant's skill configuration and then ask
-something like:
+Once installed, ask your AI assistant something like:
 
 - "Update my dependencies"
 - "Is it safe to add left-pad?"
