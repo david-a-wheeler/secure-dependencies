@@ -734,20 +734,91 @@ def parse_scorecard_checks(work: Path) -> dict[str, float]:
 # Commit activity
 # ---------------------------------------------------------------------------
 
-def count_recent_commits(source_dir: Path, work: Path) -> int | None:
-    """Count git commits in the last 12 months in the cloned source repo.
+def count_recent_commits(source_dir: Path, work: Path) -> dict | None:
+    """Collect commit-activity statistics for the cloned source repo.
 
-    Returns commit count, or None if source_dir is not a git repo or git fails.
+    Fetches all commit timestamps from the last 12 months in a single git
+    call, then buckets them into twelve 30-day windows and computes a trend
+    signal.
+
+    Returns None if source_dir is not a git repo or git fails.
+    Returns a dict with:
+      total   (int): total commits in the last 12 months
+      buckets (list[int]): 12 ints, most-recent-first; buckets[0] is 0-30
+                           days ago, buckets[1] is 31-60 days ago, etc.
+      trend   (str): one of 'increasing', 'decreasing', 'stable',
+                     'recently_started', 'recently_stopped', 'inactive',
+                     or 'insufficient_data' (fewer than 3 months of data)
+
+    Writes: recent-commits.txt
     """
+    import time as _time
+
     if not (source_dir / '.git').is_dir():
         return None
+
+    # Fetch Unix timestamps of all commits in the last 365 days.
     rc, stdout, _ = run_cmd(
-        ['git', '-C', str(source_dir), 'log', '--oneline', '--since=1.year.ago'],
+        ['git', '-C', str(source_dir), 'log',
+         '--format=%cd', '--date=unix', '--since=365.days.ago'],
         timeout=30,
     )
     if rc != 0:
         return None
-    return len([ln for ln in stdout.splitlines() if ln.strip()])
+
+    now = _time.time()
+    timestamps = []
+    for line in stdout.splitlines():
+        line = line.strip()
+        if line:
+            try:
+                timestamps.append(float(line))
+            except ValueError:
+                pass
+
+    # Bucket into 12 x 30-day windows (buckets[0] = most recent 0-30 days).
+    buckets: list[int] = [0] * 12
+    for ts in timestamps:
+        age_days = (now - ts) / 86400.0
+        idx = int(age_days // 30)
+        if 0 <= idx < 12:
+            buckets[idx] += 1
+
+    total = sum(buckets)
+
+    # Trend: compare recent half (months 1-6) vs older half (months 7-12).
+    recent_half = sum(buckets[0:6])
+    older_half  = sum(buckets[6:12])
+
+    months_with_data = sum(1 for b in buckets if b > 0)
+    if months_with_data < 3:
+        trend = 'insufficient_data'
+    elif total == 0:
+        trend = 'inactive'
+    elif older_half == 0 and recent_half > 0:
+        trend = 'recently_started'
+    elif recent_half == 0 and older_half > 0:
+        trend = 'recently_stopped'
+    elif recent_half > older_half * 1.5:
+        trend = 'increasing'
+    elif older_half > recent_half * 1.5:
+        trend = 'decreasing'
+    else:
+        trend = 'stable'
+
+    # Write human-readable summary.
+    lines = ['=== Commit activity (last 12 months) ===', '']
+    lines.append(f'TOTAL_12MO: {total}')
+    lines.append(f'TREND: {trend}')
+    lines.append('')
+    lines.append('Monthly buckets (most recent first):')
+    for i, count in enumerate(buckets):
+        start_days = i * 30
+        end_days = start_days + 29
+        lines.append(f'  {start_days:3d}-{end_days:3d} days ago: {count:4d} commits')
+    (work / 'recent-commits.txt').write_text('\n'.join(lines) + '\n', encoding='utf-8')
+
+    return {'total': total, 'buckets': buckets, 'trend': trend}
 
 
 # ---------------------------------------------------------------------------

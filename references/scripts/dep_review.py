@@ -145,6 +145,7 @@ def write_auto_findings(  # noqa: C901
     has_security_policy: bool | None = None,
     scorecard_checks: dict | None = None,
     recent_commits: int | None = None,
+    commit_activity: dict | None = None,
 ) -> None:
     """Write the rich self-describing auto-findings.txt report."""
     timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
@@ -395,6 +396,15 @@ def write_auto_findings(  # noqa: C901
     sc_str = scorecard
     lines.append(f'Age: {age_str} yr  |  Last release: {last_rel_str}  |  Owners: {owner_str}  |  Scorecard: {sc_str}')
     lines.append(f'Stability: {registry.get("version_stability", "unknown")}')
+    if recent_commits is not None:
+        _trend = commit_activity['trend'] if commit_activity else 'unknown'
+        lines.append(f'Commits (12 mo): {recent_commits}  trend: {_trend}')
+        if commit_activity:
+            _buckets = commit_activity['buckets']
+            _bucket_str = '  '.join(
+                f'{i*30}-{i*30+29}d:{_buckets[i]}' for i in range(12) if _buckets[i] > 0
+            ) or '(none)'
+            lines.append(f'  Monthly breakdown: {_bucket_str}')
     if scorecard_checks:
         _KEY = ['Branch-Protection', 'CI-Tests', 'Maintained', 'Security-Policy', 'Vulnerabilities', 'Contributors']
         for _cn in _KEY:
@@ -907,6 +917,7 @@ def write_health_file(
     has_security_policy: bool | None = None,
     vuln_count: int = 0,
     scorecard_checks: dict | None = None,
+    commit_activity: dict | None = None,
 ) -> None:
     """Write project-health.txt."""
     age_yr = registry.get('age_years_float')
@@ -922,6 +933,7 @@ def write_health_file(
         f'OWNER_COUNT: {owner_count if owner_count is not None else "unknown"}',
         f'SCORECARD: {scorecard}',
         f'RECENT_COMMITS_12MO: {recent_commits if recent_commits is not None else "unknown"}',
+        f'COMMIT_TREND: {commit_activity["trend"] if commit_activity else "unknown"}',
         f'SECURITY_POLICY: {"YES" if has_security_policy else "NO"}',
         f'KNOWN_VULNERABILITIES: {vuln_count}',
         '',
@@ -932,6 +944,12 @@ def write_health_file(
             health_lines.append(f'  - {c}')
     else:
         health_lines.append('  none')
+    if commit_activity:
+        health_lines.append('')
+        health_lines.append('COMMIT_BUCKETS (most recent first):')
+        buckets = commit_activity['buckets']
+        for i, count in enumerate(buckets):
+            health_lines.append(f'  {i*30:3d}-{i*30+29:3d} days ago: {count}')
     if scorecard_checks:
         health_lines.append('')
         health_lines.append('SCORECARD_CHECKS:')
@@ -1011,6 +1029,7 @@ def run_analysis(  # noqa: C901
     import shutil
     failures: list[str] = []
     recent_commits: int | None = None
+    commit_activity: dict | None = None
     has_security_policy: bool = False
     vuln_result: dict = {'count': 0, 'vulns': []}
     vuln_count: int = 0
@@ -1099,9 +1118,13 @@ def run_analysis(  # noqa: C901
 
     # 4b. Commit activity (only if clone succeeded)
     raw_clone_dir = work / 'source'
-    recent_commits = shared.count_recent_commits(raw_clone_dir, work) if clone_ok else None
-    if recent_commits is not None:
-        print(f'  Commits (last 12 months): {recent_commits}')
+    commit_activity = shared.count_recent_commits(raw_clone_dir, work) if clone_ok else None
+    recent_commits = commit_activity['total'] if commit_activity is not None else None
+    if commit_activity is not None:
+        print(f'  Commits (last 12 months): {recent_commits}  trend={commit_activity["trend"]}')
+        buckets = commit_activity['buckets']
+        for i, count in enumerate(buckets):
+            print(f'    {i*30:3d}-{i*30+29:3d} days ago: {count}')
     else:
         print('  Commits (last 12 months): N/A (no clone)')
 
@@ -1247,6 +1270,7 @@ def run_analysis(  # noqa: C901
         has_security_policy=has_security_policy,
         vuln_count=vuln_count,
         scorecard_checks=scorecard_checks,
+        commit_activity=commit_activity,
     )
 
     # 12. License
@@ -1359,6 +1383,7 @@ def run_analysis(  # noqa: C901
         has_security_policy=has_security_policy,
         scorecard_checks=scorecard_checks,
         recent_commits=recent_commits,
+        commit_activity=commit_activity,
     )
 
     # Final summary
