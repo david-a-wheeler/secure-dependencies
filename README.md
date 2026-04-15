@@ -49,6 +49,15 @@ In all three modes, the skill guards against:
 - Optional tools (detected automatically): `bundler-audit`, `pip-audit`,
   `npm audit`, `scorecard`
 
+Several external services are queried during analysis (all free, no API key
+required): the package registry, [OSV](https://osv.dev),
+[OpenSSF Scorecard](https://securityscorecards.dev),
+[OpenSSF Best Practices](https://bestpractices.dev), and
+[packages.ecosyste.ms](https://packages.ecosyste.ms).
+The ecosyste.ms API has a polite rate-limit pool for users who provide a
+contact email. The first time a 429 is encountered, the script explains how to
+opt in (or out) via `dep_session.py configure-email`.
+
 Analysis output goes to `temp/dep-review/` inside your project root.
 Add `temp/` to your `.gitignore`.
 
@@ -119,6 +128,14 @@ package it:
   (SQL injection, command injection, hardcoded secrets, eval)
 - Queries the registry for license, last-release date, maintainer count,
   MFA enforcement status, and OpenSSF Scorecard score
+- Queries [packages.ecosyste.ms](https://packages.ecosyste.ms) for
+  cross-ecosystem signals: how many packages and repositories depend on
+  this package (reverse-dependency count), whether it is flagged as a
+  widely-critical package, and whether it has been deprecated or archived.
+  These signals are particularly useful for spotting typosquatting and
+  slopsquatting: a package with zero dependent repositories has no known
+  users in the wild, which is a strong red flag for a newly-published
+  name.
 - Surfaces six key OpenSSF Scorecard sub-checks individually (Branch-Protection,
   CI-Tests, Maintained, Security-Policy, Vulnerabilities, Contributors)
   directly from the already-fetched scorecard JSON at no extra network cost
