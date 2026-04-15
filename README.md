@@ -102,6 +102,11 @@ It screens the proposed package name for:
 - dependency confusion (a public package that shadows a private one), and
 - overlap with the standard library.
 
+It also queries [packages.ecosyste.ms](https://packages.ecosyste.ms) for the
+package's reverse-dependency count. Zero dependent repositories is a strong
+corroborating signal for a squatting package: legitimate packages accumulate
+users; squatting packages typically have none.
+
 **Basic analysis** (`--basic`) is the standard starting point. For each
 package it:
 

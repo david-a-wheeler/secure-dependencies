@@ -1931,6 +1931,37 @@ def main() -> None:  # noqa: C901 (complexity acceptable for CLI validation)
         notes = result.get('notes', [])
         pkg_count = result.get('pkg_count', 0)
         lockfile_count = result.get('lockfile_count', 0)
+
+        # Enrich with ecosyste.ms adoption signals: zero or near-zero
+        # dependent_repos_count is a strong corroborating signal for squatting.
+        if registry_key:
+            eco_alt = shared.lookup_ecosystems_package(registry_key, pkgname, work=work)
+            if eco_alt.get('rate_limited'):
+                notes.append(
+                    'ECOSYSTEMS_RATE_LIMITED: dependent-repo count unavailable; '
+                    'run `dep_session.py configure-email` to join the polite pool'
+                )
+            elif eco_alt:
+                dep_repos_alt = eco_alt.get('dependent_repos_count')
+                dep_pkgs_alt = eco_alt.get('dependent_packages_count')
+                eco_status_alt = eco_alt.get('status') or ''
+                if dep_repos_alt == 0:
+                    concerns.append(
+                        f'ECOSYSTEMS_NO_KNOWN_USERS: 0 dependent repos '
+                        f'({dep_pkgs_alt or 0} dependent packages) -- '
+                        'no known users in the wild; consistent with a newly-published squatting package'
+                    )
+                elif dep_repos_alt is not None and dep_repos_alt < 10:
+                    notes.append(
+                        f'ECOSYSTEMS_LOW_ADOPTION: only {dep_repos_alt} dependent repo(s) -- '
+                        'very low adoption; verify this is the intended package'
+                    )
+                if eco_status_alt in ('deprecated', 'archived'):
+                    concerns.append(
+                        f'ECOSYSTEMS_STATUS_{eco_status_alt.upper()}: '
+                        f'package is marked {eco_status_alt} on ecosyste.ms'
+                    )
+
         print(f'Alternatives check: {pkg_count} installed/stdlib packages checked, '
               f'{lockfile_count} lockfile deps checked')
         if concerns:
