@@ -441,6 +441,25 @@ ADVERSARIAL_PATTERNS: list[tuple[str, str]] = [
     ('whitespace-hiding', r'[ \t]{1000,}[^ \t\r\n]'),
 ]
 
+# Labels that trigger ADVERSARIAL_GATE: ABORT.  These represent unambiguous
+# active attacks with no legitimate use in package code:
+#   - bidi controls can visually reverse or hide code to deceive reviewers
+#   - zero-width chars inject invisible content into identifiers
+#   - prompt-injection text directly targets AI reviewers
+#   - whitespace-hiding hides content after 1000+ spaces, invisible in editors
+#
+# non-ascii-in-identifiers is NOT in this set: accented characters and
+# non-Latin scripts are common in documentation, comments, and string literals
+# of internationalised packages.  A hit there is flagged for AI review but
+# does not abort the gate — only homoglyph attacks in actual code identifiers
+# are dangerous, and distinguishing those requires human/AI judgment.
+ADVERSARIAL_ABORT_LABELS: frozenset[str] = frozenset({
+    'bidi-controls',
+    'zero-width-chars',
+    'prompt-injection',
+    'whitespace-hiding',
+})
+
 # TODO/FIXME comment patterns: flag incomplete or rushed code.
 # Matches are NOT counted in SCAN_MATCHES risk flags (they are never
 # adversarial on their own), but count and density are surfaced to the

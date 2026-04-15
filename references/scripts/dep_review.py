@@ -233,10 +233,18 @@ def write_signals(  # noqa: C901
 
     # ---- Pre-compute adversarial gate and concern summary ----
     adversarial_labels_set = {label for label, _ in shared.ADVERSARIAL_PATTERNS}
+    # Gate matches: only patterns that represent unambiguous active attacks.
+    # non-ascii-in-identifiers is excluded — it fires on legitimate i18n content
+    # and requires AI judgment to distinguish homoglyph attacks from normal text.
     adversarial_gate_matches = sum(
+        count for label, count in scan_details if label in shared.ADVERSARIAL_ABORT_LABELS
+    )
+    # All adversarial pattern matches (including non-ascii) count as non-dangerous
+    # scan overhead, not as dangerous-code matches.
+    all_adversarial_matches = sum(
         count for label, count in scan_details if label in adversarial_labels_set
     )
-    dangerous_matches_count = total_matches - adversarial_gate_matches
+    dangerous_matches_count = total_matches - all_adversarial_matches
 
     # Build concern list: (label, "value  [annotation]")
     # Each entry represents one distinct concern area; count drives CONCERN_LEVEL.
@@ -1124,8 +1132,12 @@ def run_analysis(  # noqa: C901
     deeper_mode: bool = False,
     install_probe_mode: bool = False,
     registry_key: str = '',
-) -> None:
-    """Execute full analysis for one package version."""
+) -> bool:
+    """Execute full analysis for one package version.
+
+    Returns True if the adversarial gate triggered and analysis was aborted,
+    False on normal completion.
+    """
     import shutil
     failures: list[str] = []
     recent_commits: int | None = None
@@ -1214,6 +1226,40 @@ def run_analysis(  # noqa: C901
         print('  WARNING: unpacked dir not found; all scans skipped')
         total_matches = 0
         scan_details = []
+
+    # 3b. Adversarial gate fast-fail
+    # If any abort-worthy pattern matched, write a minimal signals.txt and exit.
+    # This prevents the rest of the analysis from running on potentially hostile
+    # content, and ensures the sub-agent sees ABORT before reading anything else.
+    abort_matches = sum(
+        count for label, count in scan_details if label in shared.ADVERSARIAL_ABORT_LABELS
+    )
+    if abort_matches > 0:
+        abort_labels = [
+            label for label, count in scan_details
+            if label in shared.ADVERSARIAL_ABORT_LABELS and count > 0
+        ]
+        print()
+        print(f'  *** ADVERSARIAL GATE: ABORT ({", ".join(abort_labels)}) ***')
+        print('  Halting analysis. Sub-agent must return CRITICAL / DO_NOT_INSTALL.')
+        (work / 'signals.txt').write_text(
+            '\n'.join([
+                f'ADVERSARIAL_GATE: ABORT',
+                f'ABORT_REASON: {", ".join(abort_labels)}',
+                f'ABORT_MATCHES: {abort_matches}',
+                '',
+                'Analysis halted. Content in this package triggered adversarial',
+                'patterns designed to deceive reviewers. Do not install.',
+            ]) + '\n',
+            encoding='utf-8',
+        )
+        (work / 'source-url.txt').write_text('', encoding='utf-8')
+        (work / 'clone-status.txt').write_text(
+            'CLONE_STATUS: SKIPPED (adversarial gate triggered)\n', encoding='utf-8'
+        )
+        print()
+        print('Finished (aborted): adversarial content detected.')
+        return True
 
     # 4. Source clone
     print()
@@ -1604,6 +1650,8 @@ def run_analysis(  # noqa: C901
             install_time_code_reason=install_reason,
         )
         print(f'Session update  : {work}/session-update.json')
+
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -2051,12 +2099,16 @@ def main() -> None:  # noqa: C901 (complexity acceptable for CLI validation)
             do_basic = True
 
     if do_basic or do_deeper or do_install_probe:
-        run_analysis(hooks, pkgname, old_ver or 'none', new_ver, root, work, diff_mode, do_deeper,
-                     install_probe=do_install_probe,
-                     registry_url=registry_url, session_file=session_file,
-                     deeper_mode=do_deeper_mode,
-                     install_probe_mode=do_install_probe_mode,
-                     registry_key=registry)
+        aborted = run_analysis(
+            hooks, pkgname, old_ver or 'none', new_ver, root, work, diff_mode, do_deeper,
+            install_probe=do_install_probe,
+            registry_url=registry_url, session_file=session_file,
+            deeper_mode=do_deeper_mode,
+            install_probe_mode=do_install_probe_mode,
+            registry_key=registry,
+        )
+        if aborted:
+            sys.exit(2)
 
 
 if __name__ == '__main__':
