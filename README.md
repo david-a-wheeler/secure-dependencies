@@ -5,7 +5,8 @@ building on guidance such as the
 [OpenSSF Concise Guide for Evaluating Open Source Software](https://best.openssf.org/Concise-Guide-for-Evaluating-Open-Source-Software.html).
 This skill is not tied to any specific AI assistant
 (such as Claude Code, GitHub Copilot, etc.).
-Currently it implements Ruby, but we plan to soon expand to many ecosystems.
+Currently it supports Ruby and Python, with the architecture designed to
+extend easily to other ecosystems (Rust, Java, JavaScript, etc.).
 
 Its core principle is **download and inspect before you install**.
 Downloading and unpacking a package does not execute its code; installing does.
@@ -107,10 +108,21 @@ package it:
   (SQL injection, command injection, hardcoded secrets, eval)
 - Queries the registry for license, last-release date, maintainer count,
   MFA enforcement status, and OpenSSF Scorecard score
+- Surfaces six key OpenSSF Scorecard sub-checks individually (Branch-Protection,
+  CI-Tests, Maintained, Security-Policy, Vulnerabilities, Contributors)
+  directly from the already-fetched scorecard JSON at no extra network cost
 - Checks the OpenSSF Best Practices badge site
   (bestpractices.coreinfrastructure.org):
   projects have self-attested to meeting various security practices,
   especially those that meet at least the `passing` or `baseline-1` criteria.
+- Queries the OSV vulnerability database for known CVEs affecting the
+  specific version under review; writes `vulnerabilities.txt`
+- Checks commit activity in the last 12 months (separate from release recency:
+  a project may cut no release but still be active, or may have gone silent)
+- Checks for a `SECURITY.md` vulnerability disclosure policy in the repo
+- Scans source code for `#TODO`/`#FIXME`/`#HACK` comment density as an
+  indicator of incomplete or rushed code, alongside the adversarial and
+  language-specific dangerous-pattern scans
 - Flags new transitive dependencies by download count and age, since very
   new or low-download packages carry higher supply-chain risk
 - Produces a machine-readable concern summary and a risk assessment
@@ -171,7 +183,8 @@ Scripts live in `references/scripts/`:
 | `dep_review.py` | Per-package analysis: download, inspect, diff, health |
 | `analysis_shared.py` | Shared utilities used by the above |
 | `fetch_json.py` | Registry JSON fetcher with caching |
-| `hooks_ruby.py` | Ruby-specific dangerous-pattern detection |
+| `hooks_ruby.py` | Ruby-specific ecosystem hooks (RubyGems) |
+| `hooks_python.py` | Python-specific ecosystem hooks (PyPI) |
 
 Run the test suite with:
 
