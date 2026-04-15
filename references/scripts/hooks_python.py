@@ -1439,10 +1439,10 @@ class Hooks(shared.EcosystemHooks):
             build_ok = rc_b == 0
 
         else:
-            # No sandbox or firejail: run directly
-            rc_b, b_out, b_err = shared.run_cmd(build_cmd_base, cwd=build_root, timeout=300)
-            build_log_path.write_text(b_out + b_err, encoding='utf-8', errors='replace')
-            build_ok = rc_b == 0
+            # No sandbox available: refuse to build unsandboxed
+            return finish(
+                'SKIPPED (no sandbox available: install bwrap, docker, or podman)'
+            )
 
         lines.append(f'BUILD_STATUS: {"yes" if build_ok else "no"}')
 

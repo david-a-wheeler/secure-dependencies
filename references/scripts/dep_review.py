@@ -1375,6 +1375,12 @@ def run_analysis(  # noqa: C901
         print('--- Deeper analysis ---')
         sandbox = shared.detect_sandbox(work)
         print(f'  Selected sandbox: {sandbox}')
+        if sandbox == 'none':
+            print(
+                '  WARNING: no sandboxing tool found (bwrap, firejail, docker, podman).\n'
+                '  Reproducible build requires a sandbox and will be skipped.\n'
+                '  Install one of those tools to enable this check.'
+            )
         repro_result, code_diffs, meta_diffs = hooks.reproducible_build(
             pkgname, new_ver, work, sandbox
         )

@@ -1017,14 +1017,10 @@ class Hooks(shared.EcosystemHooks):
             build_ok = (rc_b == 0)
 
         else:
-            # No sandbox; run directly (lower assurance)
-            rc_b, b_out, b_err = shared.run_cmd(
-                ['gem', 'build', source_gemspec, '--output', f'{built_gem_dir}/'],
-                cwd=clone_dir,
-                timeout=300,
+            # No sandbox available: refuse to build unsandboxed
+            return finish(
+                'SKIPPED (no sandbox available: install bwrap, firejail, docker, or podman)'
             )
-            build_log_path.write_text(b_out + b_err, encoding='utf-8', errors='replace')
-            build_ok = (rc_b == 0)
 
         lines.append(f'BUILD_STATUS: {"yes" if build_ok else "no"}')
 

@@ -1292,7 +1292,10 @@ def detect_sandbox(work: Path) -> str:
             selected = 'podman'
 
     if selected == 'none':
-        lines.append('AVAILABLE: none (build will run unsandboxed; lower assurance)')
+        lines.append(
+            'AVAILABLE: none -- reproducible build SKIPPED (no sandbox tool found; '
+            'install bwrap, firejail, docker, or podman to enable)'
+        )
 
     lines.extend(['', f'SELECTED_SANDBOX: {selected}'])
     (work / 'sandbox-detection.txt').write_text('\n'.join(lines) + '\n', encoding='utf-8')
