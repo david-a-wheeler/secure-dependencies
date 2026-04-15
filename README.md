@@ -5,8 +5,13 @@ building on guidance such as the
 [OpenSSF Concise Guide for Evaluating Open Source Software](https://best.openssf.org/Concise-Guide-for-Evaluating-Open-Source-Software.html).
 This skill is not tied to any specific AI assistant
 (such as Claude Code, GitHub Copilot, etc.).
-Currently it supports Ruby and Python, with the architecture designed to
-extend easily to other ecosystems (Rust, Java, JavaScript, etc.).
+
+The architecture is designed to
+extend easily to various ecosystems (Rust, Java, JavaScript, etc.).
+Currently it includes direct support Ruby and Python.
+It can support *any* ecosystem, because if necessary the
+AI agent can automatically implement support for any other ecosystem
+using the code it currently has as a template.
 
 Its core principle is **download and inspect before you install**.
 Downloading and unpacking a package does not execute its code; installing does.
