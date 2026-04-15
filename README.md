@@ -43,15 +43,6 @@ In all three modes, the skill guards against:
   maintainer accounts, malicious package developers
 - **Adversarial content**: package files crafted to manipulate AI reviewers
 
-We use *deterministic scripts* to gather bulk data, derive important
-signals from that data, and track progress.
-We use AI agents to do what deterministic scripts don't do well such as
-analyze the initial signals and investigate further.
-This approach (combining deterministic scripts with AI)
-is efficient (because it reduces AI token use), faster,
-improves consistency (because the AI always see the same initial data),
-and improves the final results.
-
 ## Requirements
 
 - Python 3.10 or later (standard library only, no extra installation needed)
@@ -63,20 +54,19 @@ Add `temp/` to your `.gitignore`.
 
 ## How it works
 
-The skill runs deterministic Python scripts to gather most data, then uses AI
-to analyze the results and investigate further. The scripts handle the
-mechanical work (fetching registry metadata, computing SHA256 hashes,
-diffing source vs. published package, walking the dependency graph); the
-AI handles judgment calls. As a result, it tends to be gentle on
-AI token use, even when you have many dependencies.
+This skill uses *deterministic scripts* to do mechanical work (such as
+gather bulk data and registry metadata,
+derive important signals from that data, and track progress).
+We then use AI agents to do what deterministic scripts can't do well (such as
+analyze the initial signals for patterns and investigate further).
+This approach (combining deterministic scripts with AI) has many advantages:
 
-For each package, the scripts produce:
-
-- SHA256 and file counts from the published package
-- Source comparison (what is in the tarball vs. the repository)
-- License status
-- Project health signals (last release, maintainer count, OpenSSF Scorecard)
-- Transitive dependency footprint
+- It's gentle on AI token use (AI is only used where needed)
+- Faster (bulk data is first gathered and analyzed by faster processes)
+- More consistent (AI agents always begin with the same data and same
+  derived signals, if the situation is the same)
+- Improves final results (AI agents get the same full initial data from the
+  deterministic scripts; without this the AI agents might skip steps).
 
 A session file tracks the BFS queue across the full dependency graph so the
 AI never has to manage that bookkeeping manually.
@@ -103,7 +93,7 @@ It screens the proposed package name for:
 **Basic analysis** (`--basic`) is the standard starting point. For each
 package it:
 
-- Downloads the published package and computes a SHA256 hash
+- Downloads the published package and computes a SHA-256 hash
 - Scans for suspicious content: Unicode bidi controls, zero-width characters,
   homoglyph attacks, and prompt-injection text aimed at AI reviewers.
   If it detects likely attacks on AI reviewers it stops immediately.
@@ -237,7 +227,9 @@ think in this case, because most of the code involves "download data from X"
 or "do trivial analysis of downloaded data and provide the various summaries
 to an AI sub-agent". The point of the deterministic code is to provide
 a rich source of data for the AI sub-agent to review
-and heuristically summarize.
+and heuristically summarize. So for a vibe-coding task this is a
+relatively easy task. That doesn't mean we can just trust the vibe-coded
+code; that's something that needs to be reviewed.
 
 ## License
 

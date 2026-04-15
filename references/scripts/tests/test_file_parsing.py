@@ -10,17 +10,17 @@ import dep_session
 FIXTURES = Path(__file__).parent / 'fixtures'
 
 
-def _findings():
-    """Return parsed fields from the shared auto-findings fixture (cached)."""
-    if not hasattr(_findings, '_cache'):
-        _findings._cache = dep_session._parse_auto_findings(FIXTURES / 'auto-findings.txt')
-    return _findings._cache
+def _signals():
+    """Return parsed fields from the shared signals fixture (cached)."""
+    if not hasattr(_signals, '_cache'):
+        _signals._cache = dep_session._parse_signals(FIXTURES / 'signals.txt')
+    return _signals._cache
 
 
 class TestParseAutoFindings(unittest.TestCase):
 
     def test_top_level_fields(self):
-        f = _findings()
+        f = _signals()
         self.assertEqual(f['sha256'], 'abc123def456')
         self.assertEqual(f['adversarial_gate'], 'PASS')
         self.assertEqual(f['risk_flags'], 'NATIVE_EXTENSION')
@@ -28,30 +28,30 @@ class TestParseAutoFindings(unittest.TestCase):
         self.assertEqual(f['concern_level'], 'MEDIUM')
 
     def test_concern_summary_transitive_deps(self):
-        self.assertEqual(_findings()['new_transitive_deps'], '3')
+        self.assertEqual(_signals()['new_transitive_deps'], '3')
 
     def test_section_license(self):
-        self.assertIn('MIT', _findings()['license_line'])
+        self.assertIn('MIT', _signals()['license_line'])
 
     def test_section_source_repository(self):
-        f = _findings()
+        f = _signals()
         self.assertEqual(f['clone_url'], 'https://github.com/example/pkg')
         self.assertEqual(f['clone_status'], 'OK')
 
     def test_missing_file_returns_empty_dict(self):
-        self.assertEqual(dep_session._parse_auto_findings(Path('/no/such/file.txt')), {})
+        self.assertEqual(dep_session._parse_signals(Path('/no/such/file.txt')), {})
 
 
 class TestParseReportSummary(unittest.TestCase):
 
     def test_extracts_summary_text(self):
-        summary = dep_session._parse_report_summary(FIXTURES / 'analysis-report.txt')
+        summary = dep_session._parse_assessment_summary(FIXTURES / 'assessment.txt')
         self.assertIn('good', summary)
         self.assertIn('well-maintained', summary)
 
     def test_missing_file_returns_fallback(self):
-        result = dep_session._parse_report_summary(Path('/no/such/file.txt'))
-        self.assertEqual(result, '(analysis-report.txt not found)')
+        result = dep_session._parse_assessment_summary(Path('/no/such/file.txt'))
+        self.assertEqual(result, '(assessment.txt not found)')
 
 
 class TestReadLockfileBaseline(unittest.TestCase):

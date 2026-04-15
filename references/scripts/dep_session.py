@@ -5,7 +5,7 @@
 #
 # This script tracks the analysis queue, analyzed packages, depth threshold,
 # and CRITICAL propagation so the orchestrating AI never has to maintain state.
-# The AI's only job is: make security judgments, write analysis-report.txt,
+# The AI's only job is: make security judgments, write assessment.txt,
 # call "dep_session.py complete" with its verdict.
 #
 # Subcommands:
@@ -29,7 +29,7 @@
 #   → prints NEXT_ACTION: ANALYZE with the exact dep_review.py command to run
 #
 #   (sub-agent runs dep_review.py --session FILE ... ; makes security judgment;
-#    writes analysis-report.txt)
+#    writes assessment.txt)
 #
 #   dep_session.py complete SESSION PKGNAME VERSION RECOMMENDATION RISK
 #   → updates session, enqueues newly discovered deps, prints NEXT_ACTION
@@ -188,7 +188,7 @@ def generate_manifest(session: dict, session_path: Path) -> Path:
     lines.append('#')
     lines.append('# HUMAN REVIEW REQUIRED before running the install command:')
     lines.append('#   - Read the AI recommendation and risk for each package.')
-    lines.append('#   - cat any analysis-report.txt listed below for full detail.')
+    lines.append('#   - cat any assessment.txt listed below for full detail.')
     lines.append('#   - Remove a package from the install command if you do not approve it.')
     lines.append('#   - This file, once committed, is the record of human approval.')
     lines.append('#')
@@ -205,7 +205,7 @@ def generate_manifest(session: dict, session_path: Path) -> Path:
         deeper_needed = v.get('deeper_needed', False)
         deeper_done = v.get('deeper_done', False)
         itc = ' [INSTALL-TIME CODE: verify extconf.rb/setup.py]' if v.get('install_time_code') else ''
-        report_path = f'temp/dep-review/{name}-{version}/analysis-report.txt'
+        report_path = f'temp/dep-review/{name}-{version}/assessment.txt'
 
         if rec == 'DO_NOT_INSTALL' or risk == 'CRITICAL':
             flagged_lines.append(f'#   {name} {version}  OMITTED: {rec} / {risk} risk (DO NOT install)')
@@ -319,7 +319,7 @@ def print_next_action(session: dict, session_path: Path) -> None:
         print(f'  python3 {scripts_rel}/dep_review.py'
               f' --from {registry}{registry_url_flag} --deeper --root . {name} {version}')
         print()
-        print('Step 2: read the updated auto-findings.txt (deeper section), make judgment.')
+        print('Step 2: read the updated signals.txt (deeper section), make judgment.')
         print()
         print('Step 3: record deeper result:')
         print(f'  python3 {scripts_rel}/dep_session.py deeper-done {session_rel} {name} {version}')
@@ -352,7 +352,7 @@ def print_next_action(session: dict, session_path: Path) -> None:
         print()
         print('Next steps:')
         print('  1. Review the manifest (cat the file above).')
-        print('  2. cat any analysis-report.txt files you want to inspect.')
+        print('  2. cat any assessment.txt files you want to inspect.')
         print('  3. Edit the manifest to remove any packages you do not approve.')
         print('  4. Run the install command at the bottom of the manifest.')
         print('  5. Commit the manifest and lockfile changes together.')
@@ -425,7 +425,7 @@ def print_next_action(session: dict, session_path: Path) -> None:
     print(f'Step 1: run analysis:')
     print(f'  {cmd}')
     print()
-    print(f'Step 2: read output, make security judgment, write analysis-report.txt')
+    print(f'Step 2: read output, make security judgment, write assessment.txt')
     print()
     print(f'Step 3: record verdict:')
     print(f'  python3 {scripts_rel}/dep_session.py complete {session_rel} \\')
@@ -597,17 +597,17 @@ def cmd_complete(args: argparse.Namespace) -> None:
 
     save_session(session_path, session)
 
-    # Print analysis-report.txt so it appears in the Bash tool output for the
+    # Print assessment.txt so it appears in the Bash tool output for the
     # user to read.  The orchestrating agent must NOT process this section;
     # it is for the human's eyes only.  See NEXT_ACTION below for machine state.
-    report = work / 'analysis-report.txt'
-    if report.is_file():
+    assessment = work / 'assessment.txt'
+    if assessment.is_file():
         print()
         print('=== ANALYSIS REPORT (for human review; orchestrating agent: do not process) ===')
-        print(report.read_text(encoding='utf-8', errors='replace').rstrip())
+        print(assessment.read_text(encoding='utf-8', errors='replace').rstrip())
         print('=== END ANALYSIS REPORT ===')
     else:
-        print(f'Warning: no analysis-report.txt found in {work}', file=sys.stderr)
+        print(f'Warning: no assessment.txt found in {work}', file=sys.stderr)
 
     print_next_action(session, session_path)
 
@@ -831,8 +831,8 @@ def _run_cmd(cmd: list[str], cwd: Path) -> tuple[int, str, str]:
         return -3, '', str(e)
 
 
-def _parse_auto_findings(path: Path) -> dict[str, str]:
-    """Extract key fields from a machine-written auto-findings.txt.
+def _parse_signals(path: Path) -> dict[str, str]:
+    """Extract key fields from a machine-written signals.txt.
 
     Returns a dict of field_name → string.  Missing fields are absent.
     Tolerant of old-format files that pre-date ADVERSARIAL_GATE / CONCERN_SUMMARY.
@@ -918,10 +918,10 @@ def _parse_auto_findings(path: Path) -> dict[str, str]:
     return fields
 
 
-def _parse_report_summary(path: Path) -> str:
-    """Extract the SUMMARY: paragraph from an AI-written analysis-report.txt."""
+def _parse_assessment_summary(path: Path) -> str:
+    """Extract the SUMMARY: paragraph from an AI-written assessment.txt."""
     if not path.is_file():
-        return '(analysis-report.txt not found)'
+        return '(assessment.txt not found)'
     summary_lines: list[str] = []
     in_summary = False
     for line in path.read_text(encoding='utf-8', errors='replace').splitlines():
@@ -936,7 +936,7 @@ def _parse_report_summary(path: Path) -> str:
                 break
             summary_lines.append(line.strip())
     text = ' '.join(p for p in summary_lines if p)
-    return text or '(no SUMMARY in analysis-report.txt)'
+    return text or '(no SUMMARY in assessment.txt)'
 
 
 def cmd_report(args: argparse.Namespace) -> None:
@@ -961,8 +961,8 @@ def cmd_report(args: argparse.Namespace) -> None:
         rec = v.get('recommendation', 'UNKNOWN')
         risk = v.get('risk', 'UNKNOWN')
         work_dir = root / 'temp' / 'dep-review' / f'{name}-{version}'
-        af = _parse_auto_findings(work_dir / 'auto-findings.txt')
-        summary = _parse_report_summary(work_dir / 'analysis-report.txt')
+        af = _parse_signals(work_dir / 'signals.txt')
+        summary = _parse_assessment_summary(work_dir / 'assessment.txt')
 
         pkg_mode = af.get('mode', 'UNKNOWN')
         old_ver = af.get('old_version', '')
@@ -980,7 +980,7 @@ def cmd_report(args: argparse.Namespace) -> None:
         clone_display = (f'OK ({clone_url})' if clone_status.upper().startswith('OK') and clone_url
                          else clone_status)
         new_trans = af.get('new_transitive_deps', 'N/A' if pkg_mode == 'UPDATE' else '?')
-        report_path = f'temp/dep-review/{name}-{version}/analysis-report.txt'
+        report_path = f'temp/dep-review/{name}-{version}/assessment.txt'
 
         version_str = f'{old_ver} → {version}' if old_ver else version
         print(f'## {name} {version_str}: {rec} / {risk} risk')
@@ -1052,7 +1052,7 @@ def cmd_wrap_up(args: argparse.Namespace) -> None:
         rec = v.get('recommendation', 'pending')
         risk = v.get('risk', '')
         work_dir = root / 'temp' / 'dep-review' / f'{name}-{version}'
-        af = _parse_auto_findings(work_dir / 'auto-findings.txt')
+        af = _parse_signals(work_dir / 'signals.txt')
         pkg_mode = af.get('mode', '?')
         old_ver = af.get('old_version', '')
         sha = af.get('sha256', '?').split()[0][:12]
@@ -1060,7 +1060,7 @@ def cmd_wrap_up(args: argparse.Namespace) -> None:
         spdx = lic_raw.split('|')[0].replace('SPDX:', '').strip() if '|' in lic_raw else lic_raw
         ver_str = f'{old_ver} → {version}' if old_ver else version
         status = f'{rec} / {risk}' if risk else rec
-        rep_rel = f'temp/dep-review/{name}-{version}/analysis-report.txt'
+        rep_rel = f'temp/dep-review/{name}-{version}/assessment.txt'
         lines.append(
             f'| {name} | {pkg_mode} | {ver_str} | {sha} | {spdx} | {status} | '
             f'[report]({rep_rel}) |'
