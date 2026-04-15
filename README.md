@@ -22,6 +22,8 @@ Downloading and unpacking a package does not execute its code; installing does.
 This skill keeps those steps strictly separate and never runs untrusted code
 to examine untrusted code. If it decides to analyze more deeply, or do
 a test installation, it uses sandboxes to reduce risk.
+We can't *guarantee* that a malicious package won't slip through, but we
+take steps to reduce the risk.
 
 ## What it does
 
@@ -50,7 +52,7 @@ In all three modes, the skill guards against:
   `npm audit`, `scorecard`
 
 Several external services are queried during analysis (all free, no API key
-required): the package registry, [OSV](https://osv.dev),
+necessarily required): the package registry, [OSV](https://osv.dev),
 [OpenSSF Scorecard](https://securityscorecards.dev),
 [OpenSSF Best Practices](https://bestpractices.dev), and
 [packages.ecosyste.ms](https://packages.ecosyste.ms).
@@ -69,16 +71,17 @@ derive important *signals* from that data, and track progress).
 We then use AI agents to do what deterministic scripts can't do well (such as
 analyze the initial signals for patterns and investigate further) to
 develop a final *assessment*.
-This approach (deterministic scripts to acquire data and signals along
-with AI to analyze them) has many advantages:
+Using deterministic scripts to acquire data and signals, combined
+with AI to analyze them and produce an assessment, has many advantages
+because it's:
 
-- It's gentle on AI token use (AI is only used where needed)
+- Gentle on AI token use (AI is only used where it is needed)
 - Faster (bulk data is first gathered and analyzed by faster processes)
 - More consistent (AI agents always begin with the same data and same
   derived signals, if the situation is the same)
 - Improves final results (AI agents get the same full initial set of
-  information from the
-  deterministic scripts; without this the AI agents might skip steps).
+  information from the deterministic scripts; without this the
+  AI agents might completely skip signal-gathering steps).
 
 A session file tracks the BFS queue across the full dependency graph so the
 AI never has to manage that bookkeeping manually.
@@ -102,10 +105,13 @@ It screens the proposed package name for:
 - dependency confusion (a public package that shadows a private one), and
 - overlap with the standard library.
 
-It also queries [packages.ecosyste.ms](https://packages.ecosyste.ms) for the
+It queries [packages.ecosyste.ms](https://packages.ecosyste.ms) for the
 package's reverse-dependency count. Zero dependent repositories is a strong
-corroborating signal for a squatting package: legitimate packages accumulate
-users; squatting packages typically have none.
+signal for a squatting package: legitimate packages tend to accumulate
+users, while squatting packages often have few.
+Attackers can take steps to increase the number of packages that use something,
+but repository managers would notice a brazen attempt to create a large
+number at once.
 
 **Basic analysis** (`--basic`) is the standard starting point. For each
 package it:
@@ -128,7 +134,8 @@ package it:
   files present in the tarball but absent from the repo, precompiled
   binaries, and overall source match (exact, close, divergent, or unknown)
 - Checks whether the published version corresponds to a tagged commit,
-  or flags when the commit had to be inferred from history (lower confidence)
+  flags when the commit had to be inferred from history (lower confidence),
+  and strongly flags if a package release has no corresponding source change.
 - For updates: scans the diff for newly introduced dangerous patterns
   (SQL injection, command injection, hardcoded secrets, eval)
 - Queries the registry for license, last-release date, maintainer count,
@@ -139,8 +146,7 @@ package it:
   widely-critical package, and whether it has been deprecated or archived.
   These signals are particularly useful for spotting typosquatting and
   slopsquatting: a package with zero dependent repositories has no known
-  users in the wild, which is a strong red flag for a newly-published
-  name.
+  users in the wild, which is a strong red flag for a newly-published name.
 - Surfaces six key OpenSSF Scorecard sub-checks individually (Branch-Protection,
   CI-Tests, Maintained, Security-Policy, Vulnerabilities, Contributors)
   directly from the already-fetched scorecard JSON at no extra network cost
@@ -256,6 +262,6 @@ and heuristically summarize. So for a vibe-coding task this is a
 relatively easy task. That doesn't mean we can just trust the vibe-coded
 code; that's something that needs to be reviewed.
 
-## License
+## License of this skill
 
 MIT. See [LICENSE.md](LICENSE.md).
