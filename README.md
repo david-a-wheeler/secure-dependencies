@@ -3,15 +3,19 @@
 This is a general-purpose AI skill for evaluating software dependency security,
 building on guidance such as the
 [OpenSSF Concise Guide for Evaluating Open Source Software](https://best.openssf.org/Concise-Guide-for-Evaluating-Open-Source-Software.html).
+Its purpose is to provide some reasonable level of due diligence when
+adding dependencies, updating dependencies, or examining current dependencies.
 This skill is not tied to any specific AI assistant
 (such as Claude Code, GitHub Copilot, etc.).
 
-The architecture is designed to
-extend easily to various ecosystems (Rust, Java, JavaScript, etc.).
-Currently it includes direct support Ruby and Python.
-It can support *any* ecosystem, because if necessary the
-AI agent can automatically implement support for any other ecosystem
-using the code it currently has as a template.
+This skill can support *any* ecosystem.
+That's because if the human permits it, the AI agent using this skill can
+generate support for whatever ecosystem you need.
+The agent will simply use the existing ecosystem support code as a template
+and hook in the many data sources that are ecosystem-independent.
+That said, you'll need to give the AI agent some time to generate support
+for an ecosystem we don't directly support yet.
+Currently this skill includes direct support for Ruby, Python, and JavaScript.
 
 Its core principle is **download and inspect before you install**.
 Downloading and unpacking a package does not execute its code; installing does.
@@ -38,6 +42,15 @@ In all three modes, the skill guards against:
 - **Supply chain attacks**: typosquatting, slopsquatting, compromised
   maintainer accounts, malicious package developers
 - **Adversarial content**: package files crafted to manipulate AI reviewers
+
+We use *deterministic scripts* to gather bulk data, derive important
+signals from that data, and track progress.
+We use AI agents to do what deterministic scripts don't do well such as
+analyze the initial signals and investigate further.
+This approach (combining deterministic scripts with AI)
+is efficient (because it reduces AI token use), faster,
+improves consistency (because the AI always see the same initial data),
+and improves the final results.
 
 ## Requirements
 
@@ -213,6 +226,18 @@ something like:
 
 The skill will ask clarifying questions as needed and keep you informed at
 each step before taking action.
+
+## Current status
+
+This is *not* yet production-ready. We hope you'll work with us to
+make it that way.
+
+Most of the code is currently vibe-coded. That's not as bad as you might
+think in this case, because most of the code involves "download data from X"
+or "do trivial analysis of downloaded data and provide the various summaries
+to an AI sub-agent". The point of the deterministic code is to provide
+a rich source of data for the AI sub-agent to review
+and heuristically summarize.
 
 ## License
 
