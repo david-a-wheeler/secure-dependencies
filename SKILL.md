@@ -117,7 +117,8 @@ tell the user:
 
 > "I don't have analysis hooks for [ecosystem] yet. The hooks enable
 > dangerous-pattern detection specific to that language. Would you like me to
-> create one using `hooks_ruby.py` as a starting point?"
+> create one using `hooks_ruby.py`, and perhaps other hooks,
+> as a starting point?"
 
 If yes, draft the hooks file before proceeding. If no, proceed with reduced
 dangerous-pattern coverage and note this in the session report.
@@ -126,7 +127,9 @@ dangerous-pattern coverage and note this in the session report.
 
 ### Path A: UPDATE mode
 
-Run the vulnerability audit first. Known vulnerabilities are always highest priority:
+Run the vulnerability audit first. Updating packages with
+known vulnerabilities, to eliminate those vulnerabilities,
+are always our highest priority:
 
 ```bash
 python3 SCRIPTS_DIR/dep_session.py vuln-audit --root PROJECT_ROOT
@@ -202,6 +205,7 @@ The BFS queue, cycle guard, depth threshold, and CRITICAL propagation are all
 managed by `dep_session.py`. The orchestrating AI never tracks these manually.
 
 The scripts enforce:
+
 - **Cycle guard**: packages already in the lockfile are skipped automatically.
 - **Depth confirmation**: if > 10 new packages accumulate, the script prints
   `NEXT_ACTION: CONFIRM_DEPTH` with the full list and asks you to relay the

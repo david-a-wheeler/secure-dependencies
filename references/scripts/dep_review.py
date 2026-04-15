@@ -57,25 +57,28 @@ def sec(title: str) -> str:
 # Scan orchestration
 # ---------------------------------------------------------------------------
 
-def run_scans(hooks, unpacked_dir: Path, work: Path) -> tuple[int, list[tuple[str, int]]]:
-    """Run adversarial + structural + dangerous-pattern scans on the full package.
+def run_scans(hooks, unpacked_dir: Path, work: Path) -> tuple[int, list[tuple[str, int]], int]:
+    """Run adversarial + todo + dangerous-pattern scans on the full package.
 
-    Returns (total_matches, [(label, count), ...]).
-    total_matches counts only adversarial and dangerous patterns; NOT structural
-    anomalies (long-lines). Structural matches are included in scan_details for
-    rendering but do not raise SCAN_MATCHES risk flags.
+    Returns (total_matches, [(label, count), ...], source_lines).
+    total_matches counts only adversarial and dangerous patterns; NOT TODO
+    patterns. TODO matches are included in scan_details for rendering but
+    do not raise SCAN_MATCHES risk flags.
+    source_lines is the total non-blank line count across all text files,
+    used to compute TODO density as a percentage.
     """
     total = 0
     details: list[tuple[str, int]] = []
     if not unpacked_dir.is_dir():
-        return 0, []
-    structural_labels = {label for label, _ in shared.STRUCTURAL_PATTERNS}
-    for label, pattern in shared.ADVERSARIAL_PATTERNS + shared.STRUCTURAL_PATTERNS + hooks.DANGEROUS_PATTERNS:
+        return 0, [], 0
+    todo_labels = {label for label, _ in shared.TODO_PATTERNS}
+    for label, pattern in shared.ADVERSARIAL_PATTERNS + shared.TODO_PATTERNS + hooks.DANGEROUS_PATTERNS:
         n = shared.blind_scan(label, pattern, unpacked_dir, work)
-        if label not in structural_labels:
+        if label not in todo_labels:
             total += n
         details.append((label, n))
-    return total, details
+    source_lines = shared.count_source_lines(unpacked_dir)
+    return total, details, source_lines
 
 
 def run_diff_scans(hooks, work: Path, diff_lines: int) -> int:
@@ -147,6 +150,7 @@ def write_auto_findings(  # noqa: C901
     recent_commits: int | None = None,
     commit_activity: dict | None = None,
     source_likely_incompatible: bool = False,
+    source_lines: int = 0,
 ) -> None:
     """Write the rich self-describing auto-findings.txt report."""
     timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
@@ -463,22 +467,31 @@ def write_auto_findings(  # noqa: C901
     else:
         lines.append('All clean \u2014 no evidence of content designed to deceive reviewers.')
 
-    # ---- STRUCTURAL ANOMALIES ----
-    # Rendered only when STRUCTURAL_PATTERNS is non-empty.
-    if shared.STRUCTURAL_PATTERNS:
-        lines.append(sec('STRUCTURAL ANOMALIES'))
-        structural_labels = {label for label, _ in shared.STRUCTURAL_PATTERNS}
-        structural_matches = 0
+    # ---- TODO/FIXME PATTERNS ----
+    # Rendered only when TODO_PATTERNS is non-empty.
+    if shared.TODO_PATTERNS:
+        lines.append(sec('TODO/FIXME PATTERNS'))
+        todo_labels = {label for label, _ in shared.TODO_PATTERNS}
+        todo_count = 0
         for label, count in scan_details:
-            if label not in structural_labels:
+            if label not in todo_labels:
                 continue
-            marker = '[!]' if count > 0 else '[ ]'
+            marker = '[~]' if count > 0 else '[ ]'
             suffix = f'  \u2014 see summary-scan-{label}.txt for affected files' if count > 0 else ''
             lines.append(f'{marker} {label}: {count}{suffix}')
-            structural_matches += count
-        if structural_matches > 0:
-            lines.append('[~] Structural anomalies detected. Review matched file paths.')
-        else:
+            todo_count += count
+        if source_lines > 0:
+            pct = todo_count * 100.0 / source_lines
+            lines.append(
+                f'Total: {todo_count} matches in {source_lines} non-blank source lines ({pct:.1f}%)'
+            )
+            if pct > 2.0:
+                lines.append(
+                    '[~] High TODO/FIXME density (>2%). May indicate incomplete or rushed code.'
+                )
+        elif todo_count > 0:
+            lines.append(f'Total: {todo_count} matches (source line count unavailable)')
+        if todo_count == 0:
             lines.append('All clean.')
 
     # ---- DANGEROUS CODE PATTERNS ----
@@ -492,9 +505,10 @@ def write_auto_findings(  # noqa: C901
         'dynamic dispatch on external input, install-time hooks',
     )
     lines.append(f'Scanned for: {dangerous_what}')
+    todo_labels_set = {label for label, _ in shared.TODO_PATTERNS}
     dangerous_matches = 0
     for label, count in scan_details:
-        if label in adversarial_labels:
+        if label in adversarial_labels or label in todo_labels_set:
             continue
         marker = '[!]' if count > 0 else '[ ]'
         suffix = f'  \u2014 see summary-scan-{label}.txt for affected files' if count > 0 else ''
@@ -1066,6 +1080,7 @@ def run_analysis(  # noqa: C901
     vuln_count: int = 0
     scorecard_checks: dict[str, float] = {}
     source_likely_incompatible: bool = False
+    source_lines: int = 0
     start_time = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
     mode_label = 'UPDATE' if diff_mode else 'NEW/CURRENT'
 
@@ -1125,7 +1140,7 @@ def run_analysis(  # noqa: C901
     print()
     print('--- Adversarial and dangerous-code scans ---')
     if unpacked_dir and unpacked_dir.is_dir():
-        total_matches, scan_details = run_scans(hooks, unpacked_dir, work)
+        total_matches, scan_details, source_lines = run_scans(hooks, unpacked_dir, work)
         for label, count in scan_details:
             if count > 0:
                 print(f'  {label}: {count} matches  [see summary-scan-{label}.txt]')
@@ -1419,6 +1434,7 @@ def run_analysis(  # noqa: C901
         recent_commits=recent_commits,
         commit_activity=commit_activity,
         source_likely_incompatible=source_likely_incompatible,
+        source_lines=source_lines,
     )
 
     # Final summary

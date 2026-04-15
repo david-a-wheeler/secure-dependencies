@@ -324,6 +324,28 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def count_source_lines(unpacked_dir: Path) -> int:
+    """Count non-blank lines across all text files in unpacked_dir.
+
+    Used to compute TODO/FIXME density as a percentage of total source.
+    Binary files are skipped (same heuristic as blind_scan: any null byte
+    in the first 8 KB is treated as binary).
+    """
+    total = 0
+    for path in unpacked_dir.rglob('*'):
+        if not path.is_file():
+            continue
+        try:
+            chunk = path.read_bytes()[:8192]
+            if b'\x00' in chunk:
+                continue  # binary file
+            text = path.read_text(encoding='utf-8', errors='replace')
+            total += sum(1 for ln in text.splitlines() if ln.strip())
+        except OSError:
+            continue
+    return total
+
+
 def blind_scan(label: str, pattern: str, target: Path, work: Path) -> int:
     """Run grep; save raw matches (DO NOT read); write sanitized summary.
 
@@ -419,10 +441,12 @@ ADVERSARIAL_PATTERNS: list[tuple[str, str]] = [
     ('whitespace-hiding', r'[ \t]{1000,}[^ \t\r\n]'),
 ]
 
-# Structural anomaly patterns: lower severity than ADVERSARIAL_PATTERNS.
-# Kept as a separate list for future patterns that are suspicious but commonly
-# benign (e.g. very long lines in generated docs). Currently empty.
-STRUCTURAL_PATTERNS: list[tuple[str, str]] = [
+# TODO/FIXME comment patterns: flag incomplete or rushed code.
+# Matches are NOT counted in SCAN_MATCHES risk flags (they are never
+# adversarial on their own), but count and density are surfaced to the
+# reviewer so the AI sub-agent can judge whether the codebase looks
+# incomplete or hastily developed.
+TODO_PATTERNS: list[tuple[str, str]] = [
     ('todo-fixme', r'(?i)#\s*(?:TODO|FIXME|HACK|XXX)\b'),
 ]
 
