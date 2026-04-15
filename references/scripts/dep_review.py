@@ -151,6 +151,7 @@ def write_signals(  # noqa: C901
     commit_activity: dict | None = None,
     source_likely_incompatible: bool = False,
     source_lines: int = 0,
+    ecosystems_data: dict | None = None,
 ) -> None:
     """Write the rich self-describing signals.txt report."""
     timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
@@ -198,6 +199,10 @@ def write_signals(  # noqa: C901
         risk_parts.append(f'KNOWN_VULNERABILITIES({_vuln_count})')
     if source_likely_incompatible:
         risk_parts.append('SOURCE_LIKELY_INCOMPATIBLE')
+    eco = ecosystems_data or {}
+    eco_status = eco.get('status') or ''
+    if eco_status in ('deprecated', 'archived'):
+        risk_parts.append(f'ECOSYSTEMS_{eco_status.upper()}')
 
     positive_parts: list[str] = []
     if registry.get('mfa_status') == 'true':
@@ -220,6 +225,8 @@ def write_signals(  # noqa: C901
         positive_parts.append('REPRO_BUILD_EXACT')
     if has_security_policy:
         positive_parts.append('SECURITY_POLICY_FOUND')
+    if eco.get('critical'):
+        positive_parts.append('ECOSYSTEMS_CRITICAL')
 
     risk_flags = ' '.join(risk_parts) or 'NONE'
     positive_flags = ' '.join(positive_parts) or 'NONE'
@@ -354,6 +361,12 @@ def write_signals(  # noqa: C901
             '[may indicate supply chain injection; may also be benign unpinned build tooling; '
             'human verification required before install]',
         ))
+    dep_repos = eco.get('dependent_repos_count')
+    dep_pkgs = eco.get('dependent_packages_count')
+    if eco_status in ('deprecated', 'archived'):
+        _concerns.append(('ecosystems_status', eco_status))
+    if dep_repos is not None and dep_repos == 0:
+        _concerns.append(('ecosystems_no_known_users', '0 dependent repos (no known users in the wild)'))
 
     _concern_count = len(_concerns)
     if _concern_count == 0:
@@ -446,6 +459,35 @@ def write_signals(  # noqa: C901
     lines.append('Details: project-health.txt')
     if scorecard != 'not found':
         lines.append('Scorecard details: raw-scorecard.json (DO NOT READ if adversarial-content risk applies)')
+
+    # ---- ECOSYSTE.MS ----
+    lines.append(sec('ECOSYSTE.MS'))
+    if eco:
+        dep_pkgs_str = str(eco.get('dependent_packages_count', 'unknown'))
+        dep_repos_str = str(eco.get('dependent_repos_count', 'unknown'))
+        crit_str = 'YES' if eco.get('critical') else ('NO' if eco.get('critical') is False else 'unknown')
+        status_str = eco.get('status') or 'none'
+        rank_avg = eco.get('rankings_average')
+        rank_str = f'{rank_avg:.3f}' if rank_avg is not None else 'unknown'
+        lines.extend([
+            f'Dependent packages : {dep_pkgs_str}',
+            f'Dependent repos    : {dep_repos_str}',
+            f'Critical package   : {crit_str}',
+            f'Status             : {status_str}',
+            f'Popularity rank    : {rank_str}  (lower = more popular percentile)',
+        ])
+        if eco_status in ('deprecated', 'archived'):
+            lines.append(f'[!] Package is {eco_status} upstream.')
+        if dep_repos is not None and dep_repos == 0:
+            lines.append('[!] No known dependent repos: this package has no known users in the wild.')
+        lines.append('Full data: raw-ecosystems.json (DO NOT READ if adversarial-content risk applies)')
+    else:
+        lines.append('Unavailable (registry not mapped, request failed, or rate limited).')
+        if not shared.ecosystems_email():
+            lines.append(
+                'To enable: run `dep_session.py configure-email YOUR_EMAIL` once '
+                '(or `--no-email` to opt out).'
+            )
 
     # ---- ADVERSARIAL CONTENT SCANS ----
     lines.append(sec('ADVERSARIAL CONTENT SCANS'))
@@ -963,6 +1005,7 @@ def write_health_file(
     vuln_count: int = 0,
     scorecard_checks: dict | None = None,
     commit_activity: dict | None = None,
+    ecosystems_data: dict | None = None,
 ) -> None:
     """Write project-health.txt."""
     age_yr = registry.get('age_years_float')
@@ -981,6 +1024,17 @@ def write_health_file(
         f'COMMIT_TREND: {commit_activity["trend"] if commit_activity else "unknown"}',
         f'SECURITY_POLICY: {"YES" if has_security_policy else "NO"}',
         f'KNOWN_VULNERABILITIES: {vuln_count}',
+    ])
+    eco = ecosystems_data or {}
+    dep_pkgs = eco.get('dependent_packages_count')
+    dep_repos = eco.get('dependent_repos_count')
+    eco_critical = eco.get('critical')
+    eco_status = eco.get('status') or 'OK'
+    health_lines.extend([
+        f'ECOSYSTEMS_DEPENDENT_PACKAGES: {dep_pkgs if dep_pkgs is not None else "unknown"}',
+        f'ECOSYSTEMS_DEPENDENT_REPOS: {dep_repos if dep_repos is not None else "unknown"}',
+        f'ECOSYSTEMS_CRITICAL: {"YES" if eco_critical else ("NO" if eco_critical is False else "unknown")}',
+        f'ECOSYSTEMS_STATUS: {eco_status}',
         '',
         'HEALTH_CONCERNS:',
     ])
@@ -1069,6 +1123,7 @@ def run_analysis(  # noqa: C901
     session_file: Path | None = None,
     deeper_mode: bool = False,
     install_probe_mode: bool = False,
+    registry_key: str = '',
 ) -> None:
     """Execute full analysis for one package version."""
     import shutil
@@ -1300,6 +1355,33 @@ def run_analysis(  # noqa: C901
         if _check_name in scorecard_checks:
             print(f'    {_check_name}: {scorecard_checks[_check_name]:.1f}/10')
 
+    # 10b. Ecosyste.ms cross-ecosystem metadata
+    print()
+    print('--- Ecosyste.ms package metadata ---')
+    ecosystems_data: dict = {}
+    if registry_key:
+        ecosystems_data = shared.lookup_ecosystems_package(registry_key, pkgname, work=work)
+    if ecosystems_data.get('rate_limited'):
+        print('  ECOSYSTEMS_RATE_LIMITED: packages.ecosyste.ms returned HTTP 429.')
+        print('  To use the polite pool (better rate limits), configure your email once:')
+        print('    python3 dep_session.py configure-email YOUR_EMAIL')
+        print('  To opt out and suppress this message:')
+        print('    python3 dep_session.py configure-email --no-email')
+        ecosystems_data = {}
+    elif ecosystems_data:
+        dep_pkgs = ecosystems_data.get('dependent_packages_count')
+        dep_repos = ecosystems_data.get('dependent_repos_count')
+        critical = ecosystems_data.get('critical')
+        status = ecosystems_data.get('status')
+        print(f'  Dependent packages : {dep_pkgs if dep_pkgs is not None else "unknown"}')
+        print(f'  Dependent repos    : {dep_repos if dep_repos is not None else "unknown"}')
+        crit_str = 'YES' if critical else ('NO' if critical is False else 'unknown')
+        print(f'  Critical package   : {crit_str}')
+        if status:
+            print(f'  Status             : {status}')
+    else:
+        print('  Unavailable (registry not mapped or request failed)')
+
     # 11. Health concerns
     health_concerns = shared.compute_health_concerns(
         last_release_days=registry.get('last_release_days'),
@@ -1320,6 +1402,7 @@ def run_analysis(  # noqa: C901
         vuln_count=vuln_count,
         scorecard_checks=scorecard_checks,
         commit_activity=commit_activity,
+        ecosystems_data=ecosystems_data,
     )
 
     # 12. License
@@ -1441,6 +1524,7 @@ def run_analysis(  # noqa: C901
         commit_activity=commit_activity,
         source_likely_incompatible=source_likely_incompatible,
         source_lines=source_lines,
+        ecosystems_data=ecosystems_data,
     )
 
     # Final summary
@@ -1915,7 +1999,8 @@ def main() -> None:  # noqa: C901 (complexity acceptable for CLI validation)
                      install_probe=do_install_probe,
                      registry_url=registry_url, session_file=session_file,
                      deeper_mode=do_deeper_mode,
-                     install_probe_mode=do_install_probe_mode)
+                     install_probe_mode=do_install_probe_mode,
+                     registry_key=registry)
 
 
 if __name__ == '__main__':

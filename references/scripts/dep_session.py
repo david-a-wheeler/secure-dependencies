@@ -52,6 +52,9 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).parent))
+import analysis_shared as shared
+
 SESSION_VERSION = 1
 DEPTH_THRESHOLD = 10
 VALID_RECOMMENDATIONS = frozenset({
@@ -1440,6 +1443,24 @@ def _list_installed_names(root: Path, registry: str) -> list[str]:
     return []
 
 
+def cmd_configure_email(args: argparse.Namespace) -> None:
+    """Save or clear the ecosyste.ms contact email for the polite rate-limit pool."""
+    if getattr(args, 'no_email', False):
+        shared.save_ecosystems_email('')
+        print('Opted out: no email will be sent to ecosyste.ms.')
+        print(f'Config file: {shared.ECOSYSTEMS_EMAIL_FILE}')
+        print('To undo, run: dep_session.py configure-email YOUR_EMAIL')
+    else:
+        email = (args.email or '').strip()
+        if not email or '@' not in email:
+            import sys as _sys
+            _sys.exit(f'Invalid email address: {email!r}  (provide a valid address or use --no-email)')
+        shared.save_ecosystems_email(email)
+        print(f'Saved email: {email}')
+        print(f'Config file: {shared.ECOSYSTEMS_EMAIL_FILE}')
+        print('Future requests to packages.ecosyste.ms will use the polite pool.')
+
+
 def cmd_health_scan(args: argparse.Namespace) -> None:
     """Fetch health metadata for all installed packages and print an annotated triage table."""
     root = Path(args.root).resolve()
@@ -1456,18 +1477,19 @@ def cmd_health_scan(args: argparse.Namespace) -> None:
     print('Fetching metadata from registry... (may take a moment for large projects)')
     print()
 
-    W_PKG, W_LIC, W_REL, W_SC, W_CONC = 24, 20, 20, 10, 38
+    rate_limited_ecosystems = False
+    W_PKG, W_LIC, W_REL, W_DEPS, W_SC, W_CONC = 24, 20, 20, 18, 10, 38
 
     def _hr() -> str:
         return (f'+{"-"*(W_PKG+2)}+{"-"*(W_LIC+2)}+{"-"*(W_REL+2)}'
-                f'+{"-"*(W_SC+2)}+{"-"*(W_CONC+2)}+')
+                f'+{"-"*(W_DEPS+2)}+{"-"*(W_SC+2)}+{"-"*(W_CONC+2)}+')
 
-    def _row(p: str, li: str, rel: str, sc: str, co: str) -> str:
+    def _row(p: str, li: str, rel: str, deps: str, sc: str, co: str) -> str:
         return (f'| {p:<{W_PKG}} | {li:<{W_LIC}} | {rel:<{W_REL}}'
-                f' | {sc:<{W_SC}} | {co:<{W_CONC}} |')
+                f' | {deps:<{W_DEPS}} | {sc:<{W_SC}} | {co:<{W_CONC}} |')
 
     print(_hr())
-    print(_row('Package', 'License', 'Last Release', 'Scorecard', 'Concerns'))
+    print(_row('Package', 'License', 'Last Release', 'Dependents', 'Scorecard', 'Concerns'))
     print(_hr())
 
     flagged: list[tuple[str, list[str]]] = []
@@ -1478,6 +1500,21 @@ def cmd_health_scan(args: argparse.Namespace) -> None:
         rel_str = (f'{days} days ago*' if days is not None and days > _STALE_THRESHOLD_DAYS
                    else f'{days} days ago' if days is not None else 'unknown')
         sc_str = 'N/A'  # scorecard not fetched in basic scan; requires deps.dev call
+
+        eco_data: dict = {}
+        if not rate_limited_ecosystems:
+            eco_data = shared.lookup_ecosystems_package(registry, pkg_name)
+            if eco_data.get('rate_limited'):
+                rate_limited_ecosystems = True
+                eco_data = {}
+        dep_pkgs = eco_data.get('dependent_packages_count')
+        dep_repos = eco_data.get('dependent_repos_count')
+        deps_str = (
+            f'{dep_pkgs}p / {dep_repos}r'
+            if dep_pkgs is not None and dep_repos is not None
+            else 'N/A'
+        )
+        eco_status = eco_data.get('status') or ''
 
         concerns: list[str] = []
         lic_upper = lic.upper()
@@ -1491,17 +1528,26 @@ def cmd_health_scan(args: argparse.Namespace) -> None:
             lic_display = lic[:W_LIC]
         if days is not None and days > _STALE_THRESHOLD_DAYS:
             concerns.append(f'STALE ({days}d > {_STALE_THRESHOLD_DAYS}d threshold)')
+        if eco_status in ('deprecated', 'archived'):
+            concerns.append(f'ECOSYSTEMS_{eco_status.upper()}')
 
         conc_str = (', '.join(concerns) if concerns else 'none')
 
         print(_row(pkg_name[:W_PKG], lic_display[:W_LIC], rel_str[:W_REL],
-                   sc_str[:W_SC], conc_str[:W_CONC]))
+                   deps_str[:W_DEPS], sc_str[:W_SC], conc_str[:W_CONC]))
         if concerns:
             flagged.append((pkg_name, concerns))
 
     print(_hr())
     print('* exceeds threshold or concern')
     print()
+
+    if rate_limited_ecosystems:
+        print()
+        print('NOTE: packages.ecosyste.ms rate limited (HTTP 429); dependent counts unavailable.')
+        print('  To use the polite pool: dep_session.py configure-email YOUR_EMAIL')
+        print('  To opt out:             dep_session.py configure-email --no-email')
+        print()
 
     if flagged:
         print(f'FLAGGED_PACKAGES: {len(flagged)} of {len(packages)}')
@@ -1638,6 +1684,24 @@ def main() -> None:
     p_followon.add_argument('--session', metavar='SESSION_FILE',
                             help='Session file to identify packages flagged this session')
 
+    # configure-email
+    p_cfg_email = sub.add_parser(
+        'configure-email',
+        help='Save contact email for the ecosyste.ms polite rate-limit pool.',
+    )
+    p_cfg_email.add_argument(
+        'email',
+        nargs='?',
+        default='',
+        metavar='EMAIL',
+        help='Your email address (omit with --no-email to opt out)',
+    )
+    p_cfg_email.add_argument(
+        '--no-email',
+        action='store_true',
+        help='Opt out: no email sent; suppresses future RATE_LIMITED warnings',
+    )
+
     # health-scan
     p_health = sub.add_parser(
         'health-scan',
@@ -1666,6 +1730,7 @@ def main() -> None:
         'vuln-audit':        cmd_vuln_audit,
         'follow-on':         cmd_follow_on,
         'health-scan':       cmd_health_scan,
+        'configure-email':   cmd_configure_email,
     }
     dispatch[args.command](args)
 

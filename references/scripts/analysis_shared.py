@@ -1652,6 +1652,109 @@ def write_alternatives(
 
 
 # ---------------------------------------------------------------------------
+# Ecosyste.ms cross-ecosystem package metadata
+# ---------------------------------------------------------------------------
+
+ECOSYSTEMS_REGISTRY_MAP: dict[str, str] = {
+    'rubygems': 'rubygems.org',
+    'pypi':     'pypi.org',
+    'npm':      'npmjs.org',
+}
+
+ECOSYSTEMS_EMAIL_FILE: Path = (
+    Path.home() / '.config' / 'secure-dependencies' / 'ecosystems-email.txt'
+)
+
+
+def ecosystems_email() -> str:
+    """Return the stored contact email for the ecosyste.ms polite pool.
+
+    Returns '' if the file is missing (never configured) or empty (opted out).
+    """
+    try:
+        return ECOSYSTEMS_EMAIL_FILE.read_text(encoding='utf-8').strip()
+    except FileNotFoundError:
+        return ''
+
+
+def save_ecosystems_email(email: str) -> None:
+    """Write email (or '' for opt-out) to the config file.
+
+    Creates parent directories if needed.
+    """
+    ECOSYSTEMS_EMAIL_FILE.parent.mkdir(parents=True, exist_ok=True)
+    content = email.strip()
+    ECOSYSTEMS_EMAIL_FILE.write_text(
+        content + '\n' if content else '', encoding='utf-8',
+    )
+
+
+def lookup_ecosystems_package(registry_key: str, pkgname: str,
+                              work: Path | None = None) -> dict:
+    """Query packages.ecosyste.ms for cross-ecosystem package metadata.
+
+    Uses the stored email (if any) to opt into the polite rate-limit pool via
+    the From header and a mailto= query parameter, as documented at
+    https://ecosyste.ms/api.
+
+    Writes: raw-ecosystems.json to work (if work is provided and request succeeds).
+
+    Returns a dict with these keys on success:
+      dependent_packages_count  int | None
+      dependent_repos_count     int | None
+      critical                  bool | None   (True = widely-depended-on package)
+      status                    str | None    ('deprecated', 'archived', or None)
+      rankings_average          float | None  (lower percentile = more popular)
+
+    Returns {'rate_limited': True} on HTTP 429.
+    Returns {} if the registry is not in ECOSYSTEMS_REGISTRY_MAP or the
+    request fails for any other reason.
+    """
+    eco_registry = ECOSYSTEMS_REGISTRY_MAP.get(registry_key)
+    if not eco_registry:
+        return {}
+
+    email = ecosystems_email()
+    url = (
+        'https://packages.ecosyste.ms/api/v1/registries/'
+        f'{urllib.parse.quote(eco_registry, safe="")}/packages/'
+        f'{urllib.parse.quote(pkgname, safe="")}'
+    )
+    if email:
+        url += f'?mailto={urllib.parse.quote(email)}'
+
+    headers: dict[str, str] = {
+        'User-Agent': 'secure-dependencies/1 (dependency security review)',
+    }
+    if email:
+        headers['From'] = email
+
+    try:
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=15) as resp:  # noqa: S310
+            raw = resp.read()
+        data = json.loads(raw.decode('utf-8', errors='replace'))
+    except urllib.error.HTTPError as e:
+        if e.code == 429:
+            return {'rate_limited': True}
+        return {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+    if work is not None:
+        (work / 'raw-ecosystems.json').write_bytes(raw)
+
+    rankings = data.get('rankings') or {}
+    return {
+        'dependent_packages_count': data.get('dependent_packages_count'),
+        'dependent_repos_count':    data.get('dependent_repos_count'),
+        'critical':                 data.get('critical'),
+        'status':                   data.get('status'),
+        'rankings_average':         rankings.get('average'),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Ecosystem hooks contract
 # ---------------------------------------------------------------------------
 
