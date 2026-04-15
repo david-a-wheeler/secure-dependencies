@@ -1159,6 +1159,109 @@ def compute_diff(
     return diff_lines, changed_files_text
 
 
+def git_diff_between_tags(
+    source_dir: Path,
+    source_url: str,
+    old_ver: str,
+    new_ver: str,
+    pkgname: str,
+    work: Path,
+) -> tuple[int, str]:
+    """Diff old→new using the already-cloned source repo (fallback when old gem unavailable).
+
+    Locates the old version tag via ls-remote, fetches it into the existing
+    shallow clone, then runs ``git diff OLD_TAG..HEAD``.
+
+    Writes: raw-diff-full.txt, diff-filenames.txt.
+    Returns: (total_diff_lines, sanitized_changed_files_text), or (0, '') on failure.
+    """
+    if not source_dir.is_dir():
+        return 0, ''
+
+    # Find old version tag with the same matching logic as clone_source_repo.
+    rc_ls, ls_out, _ = run_cmd(['git', 'ls-remote', '--tags', source_url], timeout=30)
+    old_tag = ''
+    if rc_ls == 0:
+        escaped_old = re.escape(old_ver)
+        for line in ls_out.splitlines():
+            m = re.search(r'refs/tags/([^\^]+)', line)
+            if not m:
+                continue
+            candidate = m.group(1)
+            if re.search(
+                rf'(?:v?|{re.escape(pkgname)}[-_]?){escaped_old}(?:[^0-9]|$)',
+                candidate, re.IGNORECASE,
+            ):
+                old_tag = candidate
+                break
+        if not old_tag:
+            for line in ls_out.splitlines():
+                m = re.search(r'refs/tags/([^\^]+)', line)
+                if m and re.search(rf'{escaped_old}$', m.group(1)):
+                    old_tag = m.group(1)
+                    break
+
+    if not old_tag:
+        (work / 'diff-filenames.txt').write_text(
+            f'DIFF: N/A (old version tag for {sanitize(old_ver)} not found in source repo)\n',
+            encoding='utf-8',
+        )
+        (work / 'raw-diff-full.txt').write_text('', encoding='utf-8')
+        return 0, ''
+
+    # Fetch the old tag into the existing shallow clone.
+    rc_fetch, _, _ = run_cmd(
+        ['git', '-C', str(source_dir), 'fetch', '--depth', '1', 'origin',
+         f'refs/tags/{old_tag}:refs/tags/{old_tag}'],
+        timeout=60,
+    )
+    if rc_fetch != 0:
+        (work / 'diff-filenames.txt').write_text(
+            f'DIFF: N/A (could not fetch old tag {sanitize(old_tag)} into clone)\n',
+            encoding='utf-8',
+        )
+        (work / 'raw-diff-full.txt').write_text('', encoding='utf-8')
+        return 0, ''
+
+    # Full diff output for scan/AI review (written to raw- file; never returned to caller).
+    rc_diff, diff_out, _ = run_cmd(
+        ['git', '-C', str(source_dir), 'diff', f'{old_tag}..HEAD'],
+        timeout=60,
+    )
+    (work / 'raw-diff-full.txt').write_text(diff_out, encoding='utf-8', errors='replace')
+    diff_lines = len(diff_out.splitlines())
+
+    # File-level summary via --name-status (safe to surface to AI).
+    rc_names, names_out, _ = run_cmd(
+        ['git', '-C', str(source_dir), 'diff', '--name-status', f'{old_tag}..HEAD'],
+        timeout=30,
+    )
+    short_names: list[str] = []
+    if rc_names == 0:
+        for line in names_out.splitlines():
+            parts = line.split('\t', 1)
+            if len(parts) == 2:
+                status, fname = parts[0].strip(), sanitize(parts[1].strip())
+                if status == 'D':
+                    short_names.append(f'{fname} (removed)')
+                elif status == 'A':
+                    short_names.append(f'{fname} (added)')
+                else:
+                    short_names.append(fname)
+
+    changed_files_text = '\n'.join(short_names)
+    (work / 'diff-filenames.txt').write_text(
+        '\n'.join([
+            f'DIFF_TOTAL_LINES: {diff_lines}',
+            f'DIFF_SOURCE: git diff {sanitize(old_tag)}..HEAD (source repo; old gem unavailable)',
+            '',
+            'Changed/added/removed files (relative paths):',
+        ] + short_names) + '\n',
+        encoding='utf-8',
+    )
+    return diff_lines, changed_files_text
+
+
 # ---------------------------------------------------------------------------
 # Project health concerns
 # ---------------------------------------------------------------------------

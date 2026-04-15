@@ -35,6 +35,16 @@ import analysis_shared as shared
 def _extract_source_url(gemspec_text: str) -> str:
     """Extract source/homepage URL from gemspec text.
 
+    Tries in priority order for source_code_uri, then homepage_uri:
+      1. Hash-rocket metadata hash  ("source_code_uri" => "URL")
+      2. Subscript assignment       (metadata['source_code_uri'] = 'URL')
+      3. Top-level assignment       (s.source_code_uri = "URL")
+    Then falls back to s.homepage = "URL".
+
+    >>> _extract_source_url("s.metadata['source_code_uri'] = 'https://github.com/foo/bar'")
+    'https://github.com/foo/bar'
+    >>> _extract_source_url('"source_code_uri" => "https://github.com/foo/bar"')
+    'https://github.com/foo/bar'
     >>> _extract_source_url('s.source_code_uri = "https://github.com/foo/bar"')
     'https://github.com/foo/bar'
     >>> _extract_source_url('s.homepage = "https://example.com"')
@@ -42,9 +52,22 @@ def _extract_source_url(gemspec_text: str) -> str:
     >>> _extract_source_url('no url here')
     ''
     """
-    m = re.search(
-        r'(?:source_code_uri|homepage_uri|homepage)\s*=\s*["\']([^"\']+)', gemspec_text
-    )
+    for key in ('source_code_uri', 'homepage_uri'):
+        ek = re.escape(key)
+        # Format 1: hash rocket  ("source_code_uri" => "URL")
+        m = re.search(rf'["\']' + ek + r'["\']\s*=>\s*["\']([^"\']+)', gemspec_text)
+        if m:
+            return m.group(1).strip().rstrip('/')
+        # Format 2: subscript assignment  (metadata['source_code_uri'] = 'URL')
+        m = re.search(r"metadata\[(['\"])" + ek + r"\1\]\s*=\s*['\"]([^'\"]+)", gemspec_text)
+        if m:
+            return m.group(2).strip().rstrip('/')
+    # Format 3: top-level assignment (s.source_code_uri = "URL" or s.homepage_uri = "URL")
+    m = re.search(r'(?:source_code_uri|homepage_uri)\s*=\s*["\']([^"\']+)', gemspec_text)
+    if m:
+        return m.group(1).strip()
+    # Last resort: s.homepage = "URL"
+    m = re.search(r'homepage\s*=\s*["\']([^"\']+)', gemspec_text)
     return m.group(1).strip() if m else ''
 
 
@@ -142,10 +165,18 @@ class Hooks(shared.EcosystemHooks):
         if self.registry_url:
             fetch_cmd += ['--source', self.registry_url]
         rc, _, err = shared.run_cmd(fetch_cmd, cwd=work)
+
+        # gem fetch may download a platform-specific gem (e.g. ffi-1.17.4-x86_64-linux-gnu.gem)
+        # instead of the generic name.  If the exact name is missing, find the actual file.
+        if rc == 0 and not gem_file.is_file():
+            candidates = sorted(work.glob(f'{pkgname}-{version}-*.gem'))
+            if candidates:
+                gem_file = candidates[0]
+
         if rc == 0 and gem_file.is_file():
             sha256 = shared.sha256_file(gem_file)
             (work / 'package-hash.txt').write_text(
-                f'{sha256}  {pkgname}-{version}.gem\n', encoding='utf-8'
+                f'{sha256}  {gem_file.name}\n', encoding='utf-8'
             )
             rc2, _, _ = shared.run_cmd(
                 ['gem', 'unpack', str(gem_file), '--target', str(unpacked_dir_base)]
@@ -157,6 +188,11 @@ class Hooks(shared.EcosystemHooks):
             (work / 'package-hash.txt').write_text('ERROR: gem fetch failed\n', encoding='utf-8')
 
         unpacked_dir = unpacked_dir_base / f'{pkgname}-{version}'
+        # Platform-specific gems unpack to e.g. ffi-1.17.4-x86_64-linux-gnu/
+        if not unpacked_dir.is_dir():
+            candidates = sorted(unpacked_dir_base.glob(f'{pkgname}-{version}-*'))
+            if candidates:
+                unpacked_dir = candidates[0]
 
         # Fall back to `gem specification` for gemspec if not present in unpacked dir
         gemspec_file = unpacked_dir / f'{pkgname}.gemspec'
@@ -367,9 +403,18 @@ class Hooks(shared.EcosystemHooks):
 
         rc_gemdir, gemdir_out, _ = shared.run_cmd(['gem', 'environment', 'gemdir'])
         gemdir = gemdir_out.strip() if rc_gemdir == 0 else ''
-        old_cached_gem = (
-            Path(gemdir) / 'cache' / f'{pkgname}-{old_ver}.gem' if gemdir else None
-        )
+        cache_dir = Path(gemdir) / 'cache' if gemdir else None
+
+        # Check local gem cache; platform-specific gems are named e.g. ffi-1.17.3-x86_64-linux-gnu.gem
+        old_cached_gem = None
+        if cache_dir:
+            exact = cache_dir / f'{pkgname}-{old_ver}.gem'
+            if exact.is_file():
+                old_cached_gem = exact
+            else:
+                candidates = sorted(cache_dir.glob(f'{pkgname}-{old_ver}-*.gem'))
+                if candidates:
+                    old_cached_gem = candidates[0]
 
         if old_cached_gem and old_cached_gem.is_file():
             rc_up, _, _ = shared.run_cmd(
@@ -389,6 +434,11 @@ class Hooks(shared.EcosystemHooks):
             rc_fetch, _, _ = shared.run_cmd(fetch_cmd, cwd=raw_old_pkg)
             if rc_fetch == 0:
                 old_gem = raw_old_pkg / f'{pkgname}-{old_ver}.gem'
+                # Platform-specific gem may have a longer name
+                if not old_gem.is_file():
+                    candidates = sorted(raw_old_pkg.glob(f'{pkgname}-{old_ver}-*.gem'))
+                    if candidates:
+                        old_gem = candidates[0]
                 if old_gem.is_file():
                     rc_up2, _, _ = shared.run_cmd(
                         ['gem', 'unpack', str(old_gem), '--target', str(old_dir_base)]
@@ -408,6 +458,11 @@ class Hooks(shared.EcosystemHooks):
         )
 
         unpacked_dir = old_dir_base / f'{pkgname}-{old_ver}'
+        # Platform-specific gem unpacks to a directory with the platform suffix
+        if not unpacked_dir.is_dir():
+            candidates = sorted(old_dir_base.glob(f'{pkgname}-{old_ver}-*'))
+            if candidates:
+                unpacked_dir = candidates[0]
         return {'ok': ok, 'source': source, 'unpacked_dir': unpacked_dir}
 
     def get_old_license(
@@ -648,6 +703,30 @@ class Hooks(shared.EcosystemHooks):
             except (ValueError, KeyError):
                 pass
         return {'downloads': 'unavailable', 'first_seen': 'unavailable', 'homepage': 'unavailable'}
+
+    def get_source_url_from_registry(self, pkgname: str) -> str:
+        """Query RubyGems API for the source repository URL.
+
+        Returns source_code_uri if it points to github.com; falls back to
+        homepage_uri on the same condition.  Returns '' if neither is found
+        or if the network call fails.  Called by dep_review.py as a fallback
+        when the gemspec is unavailable (e.g. platform-specific gem fetch).
+
+        >>> # integration: real network call, not tested in unit suite
+        """
+        api_base = self.registry_url.rstrip('/') if self.registry_url else 'https://rubygems.org'
+        api_data = shared.http_get(f'{api_base}/api/v1/gems/{pkgname}.json')
+        if not api_data:
+            return ''
+        try:
+            info = json.loads(api_data.decode('utf-8', errors='replace'))
+            for key in ('source_code_uri', 'homepage_uri'):
+                url = str(info.get(key, '') or '').strip().rstrip('/')
+                if url and 'github.com' in url:
+                    return url
+        except (ValueError, KeyError):
+            pass
+        return ''
 
     def get_transitive_deps(
         self,

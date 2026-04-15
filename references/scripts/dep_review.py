@@ -1185,6 +1185,13 @@ def run_analysis(  # noqa: C901
     if hasattr(hooks, 'DANGEROUS_WHAT') and '_dangerous_what' not in manifest:
         manifest['_dangerous_what'] = hooks.DANGEROUS_WHAT
     source_url = manifest.get('source_url', '')
+    if not source_url:
+        _get_src = getattr(hooks, 'get_source_url_from_registry', None)
+        if _get_src:
+            source_url = _get_src(pkgname) or ''
+            if source_url:
+                manifest['source_url'] = source_url
+                print(f'  Source URL (registry API fallback): {shared.sanitize(source_url)}')
     print(f'  Extensions: {manifest.get("extensions", "?")}')
     print(f'  Executables: {manifest.get("executables", "?")}')
     print(f'  Post-install message: {manifest.get("post_install_msg", "?")}')
@@ -1296,11 +1303,27 @@ def run_analysis(  # noqa: C901
             if len(changed_files.splitlines()) > 10:
                 print('    ... (full list in diff-filenames.txt)')
         else:
-            (work / 'diff-filenames.txt').write_text(
-                'DIFF: N/A (old version not available)\n', encoding='utf-8'
-            )
-            (work / 'raw-diff-full.txt').write_text('', encoding='utf-8')
-            print('  Skipped (old version unavailable)')
+            # Fallback: use the source repo clone to diff between version tags.
+            source_dir = work / 'source'
+            if clone_ok and source_url and source_dir.is_dir():
+                print('  Old gem unavailable; trying git diff from source repo...')
+                diff_lines, changed_files = shared.git_diff_between_tags(
+                    source_dir, source_url, old_ver, new_ver, pkgname, work
+                )
+                if diff_lines > 0:
+                    print(f'  Diff size: {diff_lines} lines (source repo git diff)')
+                    for line in changed_files.splitlines()[:10]:
+                        print(f'    {line}')
+                    if len(changed_files.splitlines()) > 10:
+                        print('    ... (full list in diff-filenames.txt)')
+                else:
+                    print('  Skipped (old version unavailable; git diff also failed)')
+            else:
+                (work / 'diff-filenames.txt').write_text(
+                    'DIFF: N/A (old version not available)\n', encoding='utf-8'
+                )
+                (work / 'raw-diff-full.txt').write_text('', encoding='utf-8')
+                print('  Skipped (old version unavailable)')
 
         print()
         print('--- Blind scans on diff ---')
