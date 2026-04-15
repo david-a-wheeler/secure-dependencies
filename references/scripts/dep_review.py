@@ -73,7 +73,8 @@ def run_scans(hooks, unpacked_dir: Path, work: Path) -> tuple[int, list[tuple[st
         return 0, [], 0
     todo_labels = {label for label, _ in shared.TODO_PATTERNS}
     for label, pattern in shared.ADVERSARIAL_PATTERNS + shared.TODO_PATTERNS + hooks.DANGEROUS_PATTERNS:
-        n = shared.blind_scan(label, pattern, unpacked_dir, work)
+        globs = shared.CODE_FILE_GLOBS if label in shared.ADVERSARIAL_CODE_ONLY_LABELS else None
+        n = shared.blind_scan(label, pattern, unpacked_dir, work, include_globs=globs)
         if label not in todo_labels:
             total += n
         details.append((label, n))
@@ -233,13 +234,11 @@ def write_signals(  # noqa: C901
 
     # ---- Pre-compute adversarial gate and concern summary ----
     adversarial_labels_set = {label for label, _ in shared.ADVERSARIAL_PATTERNS}
-    # Gate matches: only patterns that represent unambiguous active attacks.
-    # non-ascii-in-identifiers is excluded — it fires on legitimate i18n content
-    # and requires AI judgment to distinguish homoglyph attacks from normal text.
+    # Gate matches: patterns that represent unambiguous active attacks.
     adversarial_gate_matches = sum(
         count for label, count in scan_details if label in shared.ADVERSARIAL_ABORT_LABELS
     )
-    # All adversarial pattern matches (including non-ascii) count as non-dangerous
+    # All adversarial pattern matches count as non-dangerous
     # scan overhead, not as dangerous-code matches.
     all_adversarial_matches = sum(
         count for label, count in scan_details if label in adversarial_labels_set

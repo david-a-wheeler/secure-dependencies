@@ -346,15 +346,28 @@ def count_source_lines(unpacked_dir: Path) -> int:
     return total
 
 
-def blind_scan(label: str, pattern: str, target: Path, work: Path) -> int:
+def blind_scan(
+    label: str,
+    pattern: str,
+    target: Path,
+    work: Path,
+    include_globs: list[str] | None = None,
+) -> int:
     """Run grep; save raw matches (DO NOT read); write sanitized summary.
+
+    include_globs: if given, passed as --include=GLOB to restrict which files
+    are scanned (e.g. ['*.rb', '*.py'] to scan only source files).
 
     Returns number of matching lines.
     """
     raw_file = work / f'raw-scan-{label}.txt'
     summary_file = work / f'summary-scan-{label}.txt'
 
-    rc, stdout, stderr = run_cmd(['grep', '-rnP', pattern, str(target)], timeout=60)
+    cmd = ['grep', '-rnP', pattern]
+    for glob in (include_globs or []):
+        cmd += [f'--include={glob}']
+    cmd.append(str(target))
+    rc, stdout, stderr = run_cmd(cmd, timeout=60)
 
     if rc > 1:
         # grep error (rc==2+): pattern failure or other error (not a match result)
@@ -451,13 +464,35 @@ ADVERSARIAL_PATTERNS: list[tuple[str, str]] = [
 # non-ascii-in-identifiers is NOT in this set: accented characters and
 # non-Latin scripts are common in documentation, comments, and string literals
 # of internationalised packages.  A hit there is flagged for AI review but
-# does not abort the gate — only homoglyph attacks in actual code identifiers
-# are dangerous, and distinguishing those requires human/AI judgment.
+# does not abort the gate. Only homoglyph attacks in actual code identifiers
+# are esp. dangerous, and distinguishing those requires human/AI judgment.
 ADVERSARIAL_ABORT_LABELS: frozenset[str] = frozenset({
     'bidi-controls',
     'zero-width-chars',
     'prompt-injection',
     'whitespace-hiding',
+})
+
+# Source-code file globs used to scope bidi/zero-width scans.
+# Bidi controls are legitimate in documentation and natural-language text
+# (RTL scripts: Arabic, Hebrew, etc.).  They are only dangerous in source
+# code files where the Trojan Source attack can visually reverse code logic.
+# Scanning only these extensions avoids false positives in .md/.txt/etc.
+CODE_FILE_GLOBS: list[str] = [
+    '*.rb', '*.rake', '*.gemspec',
+    '*.py', '*.pyw',
+    '*.js', '*.mjs', '*.cjs', '*.ts', '*.tsx', '*.jsx',
+    '*.c', '*.cc', '*.cpp', '*.cxx', '*.h', '*.hh', '*.hpp',
+    '*.go', '*.rs', '*.java', '*.kt', '*.swift', '*.cs',
+    '*.php', '*.sh', '*.bash', '*.zsh', '*.pl', '*.pm',
+]
+
+# Labels whose scans should be restricted to CODE_FILE_GLOBS.
+# bidi-controls and zero-width-chars are only dangerous inside source code;
+# seeing them in a README or .txt is normal for RTL-language content.
+ADVERSARIAL_CODE_ONLY_LABELS: frozenset[str] = frozenset({
+    'bidi-controls',
+    'zero-width-chars',
 })
 
 # TODO/FIXME comment patterns: flag incomplete or rushed code.
