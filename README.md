@@ -56,16 +56,19 @@ Add `temp/` to your `.gitignore`.
 
 This skill uses *deterministic scripts* to do mechanical work (such as
 gather bulk data and registry metadata,
-derive important signals from that data, and track progress).
+derive important *signals* from that data, and track progress).
 We then use AI agents to do what deterministic scripts can't do well (such as
-analyze the initial signals for patterns and investigate further).
-This approach (combining deterministic scripts with AI) has many advantages:
+analyze the initial signals for patterns and investigate further) to
+develop a final *assessment*.
+This approach (deterministic scripts to acquire data and signals along
+with AI to analyze them) has many advantages:
 
 - It's gentle on AI token use (AI is only used where needed)
 - Faster (bulk data is first gathered and analyzed by faster processes)
 - More consistent (AI agents always begin with the same data and same
   derived signals, if the situation is the same)
-- Improves final results (AI agents get the same full initial data from the
+- Improves final results (AI agents get the same full initial set of
+  information from the
   deterministic scripts; without this the AI agents might skip steps).
 
 A session file tracks the BFS queue across the full dependency graph so the
