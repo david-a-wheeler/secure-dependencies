@@ -231,7 +231,7 @@ Run the test suite with:
 make test
 ```
 
-## Installing the skill
+## Installing this skill
 
 This repository is an
 [agent skill](https://docs.github.com/en/copilot/how-tos/use-copilot-agents/cloud-agent/create-skills)
@@ -261,6 +261,9 @@ git clone https://github.com/ossf/secure-dependencies ~/.copilot/skills/secure-d
 
 The skill is picked up automatically on next launch; no further
 configuration is required.
+
+Eventually we'll want to put this skill in a "marketplace" but I want to
+give people time to discuss the name first.
 
 ## Using the skill
 
