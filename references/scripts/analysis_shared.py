@@ -369,6 +369,16 @@ def http_get(url: str, timeout: int = 15) -> bytes | None:
         return None
 
 
+def http_post(url: str, data: bytes, content_type: str = 'application/json', timeout: int = 15) -> bytes | None:
+    """POST data to url; return response bytes or None on error."""
+    req = urllib.request.Request(url, data=data, headers={'Content-Type': content_type})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.read()
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def days_since(date_str: str) -> int | None:
     """Parse an ISO-8601 date string and return days elapsed, or None."""
     try:
@@ -412,7 +422,9 @@ ADVERSARIAL_PATTERNS: list[tuple[str, str]] = [
 # Structural anomaly patterns: lower severity than ADVERSARIAL_PATTERNS.
 # Kept as a separate list for future patterns that are suspicious but commonly
 # benign (e.g. very long lines in generated docs). Currently empty.
-STRUCTURAL_PATTERNS: list[tuple[str, str]] = []
+STRUCTURAL_PATTERNS: list[tuple[str, str]] = [
+    ('todo-fixme', r'(?i)#\s*(?:TODO|FIXME|HACK|XXX)\b'),
+]
 
 
 # ---------------------------------------------------------------------------
@@ -696,6 +708,125 @@ def lookup_scorecard(source_url: str, work: Path) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Scorecard sub-checks
+# ---------------------------------------------------------------------------
+
+def parse_scorecard_checks(work: Path) -> dict[str, float]:
+    """Parse individual check scores from raw-scorecard.json.
+
+    Returns dict mapping check name to score (0-10), or {} if unavailable.
+    """
+    sc_path = work / 'raw-scorecard.json'
+    if not sc_path.is_file():
+        return {}
+    try:
+        data = json.loads(sc_path.read_text(encoding='utf-8', errors='replace'))
+        return {
+            c['name']: float(c['score'])
+            for c in data.get('checks', [])
+            if 'name' in c and 'score' in c
+        }
+    except (ValueError, KeyError, TypeError):
+        return {}
+
+
+# ---------------------------------------------------------------------------
+# Commit activity
+# ---------------------------------------------------------------------------
+
+def count_recent_commits(source_dir: Path, work: Path) -> int | None:
+    """Count git commits in the last 12 months in the cloned source repo.
+
+    Returns commit count, or None if source_dir is not a git repo or git fails.
+    """
+    if not (source_dir / '.git').is_dir():
+        return None
+    rc, stdout, _ = run_cmd(
+        ['git', '-C', str(source_dir), 'log', '--oneline', '--since=1.year.ago'],
+        timeout=30,
+    )
+    if rc != 0:
+        return None
+    return len([ln for ln in stdout.splitlines() if ln.strip()])
+
+
+# ---------------------------------------------------------------------------
+# Known vulnerability lookup (OSV)
+# ---------------------------------------------------------------------------
+
+def lookup_vulnerabilities(pkgname: str, version: str, osv_ecosystem: str, work: Path) -> dict:
+    """Query the OSV database for known vulnerabilities affecting pkgname version.
+
+    Writes: vulnerabilities.txt
+    Returns dict with:
+      count (int): total number of matching vulnerabilities
+      vulns (list[dict]): each entry has 'id', 'summary', 'severity'
+    """
+    body = json.dumps({
+        'package': {'name': pkgname, 'ecosystem': osv_ecosystem},
+        'version': version,
+    }).encode()
+    raw = http_post('https://api.osv.dev/v1/query', body)
+    lines = [f'=== Known vulnerabilities: {pkgname} {version} ===', '']
+    vulns: list[dict] = []
+    if raw:
+        try:
+            data = json.loads(raw.decode('utf-8', errors='replace'))
+            for v in data.get('vulns', []):
+                vid = v.get('id', 'unknown')
+                summary = v.get('summary', '')
+                severity = ''
+                for s in v.get('severity', []):
+                    if s.get('type') == 'CVSS_V3':
+                        severity = s.get('score', '')
+                        break
+                vulns.append({'id': vid, 'summary': summary, 'severity': severity})
+        except (ValueError, KeyError):
+            pass
+    if vulns:
+        lines.append(f'VULNERABILITY_COUNT: {len(vulns)}')
+        lines.append('')
+        for v in vulns:
+            lines.append(f'  {v["id"]}  severity={v["severity"] or "unknown"}')
+            if v['summary']:
+                lines.append(f'    {v["summary"]}')
+    else:
+        lines.append('VULNERABILITY_COUNT: 0')
+        lines.append('No known vulnerabilities found in OSV database.')
+    (work / 'vulnerabilities.txt').write_text('\n'.join(lines) + '\n', encoding='utf-8')
+    return {'count': len(vulns), 'vulns': vulns}
+
+
+# ---------------------------------------------------------------------------
+# Security policy (SECURITY.md)
+# ---------------------------------------------------------------------------
+
+def check_security_policy(source_dir: Path, work: Path) -> bool:
+    """Check whether the source repo contains a SECURITY.md file.
+
+    Checks: SECURITY.md, .github/SECURITY.md, docs/SECURITY.md
+    Writes: security-policy.txt
+    Returns True if found.
+    """
+    candidates = [
+        source_dir / 'SECURITY.md',
+        source_dir / '.github' / 'SECURITY.md',
+        source_dir / 'docs' / 'SECURITY.md',
+    ]
+    found_path = next((p for p in candidates if p.is_file()), None)
+    lines = ['=== Security policy ===', '']
+    if found_path:
+        rel = found_path.relative_to(source_dir)
+        lines.append(f'SECURITY_POLICY_FOUND: YES ({rel})')
+        lines.append('Context: Project has a SECURITY.md vulnerability disclosure policy.')
+    else:
+        lines.append('SECURITY_POLICY_FOUND: NO')
+        lines.append('Context: No SECURITY.md found. Vulnerability reporting process is unclear.')
+    (work / 'security-policy.txt').write_text('\n'.join(lines) + '\n', encoding='utf-8')
+    return found_path is not None
+
+
+# ---------------------------------------------------------------------------
 # Package vs source comparison
 # ---------------------------------------------------------------------------
 
@@ -927,15 +1058,17 @@ def compute_health_concerns(
     owner_count: int | None,
     scorecard_score: str,
     version_stability: str,
+    recent_commits: int | None = None,
+    known_vulns: int = 0,
 ) -> list[str]:
     """Return a list of human-readable health concern strings.
 
     All thresholds here are ecosystem-agnostic:
-      - No release in >18 months → likely unmaintained
-      - Package age <6 months → immature / high abandonment risk
-      - Single owner → no succession plan
-      - Scorecard <4.0/10 → multiple security practice failures
-      - Pre-release version → security guarantees rarely made
+      - No release in >18 months: likely unmaintained
+      - Package age <6 months: immature / high abandonment risk
+      - Single owner: no succession plan
+      - Scorecard <4.0/10: multiple security practice failures
+      - Pre-release version: security guarantees rarely made
 
     >>> compute_health_concerns(None, None, None, 'not found', 'stable')
     []
@@ -949,6 +1082,10 @@ def compute_health_concerns(
     ['OpenSSF Scorecard 3.5/10 (<4.0)']
     >>> compute_health_concerns(None, None, None, 'not found', 'pre-release')
     ['version is pre-release (security guarantees rarely made)']
+    >>> compute_health_concerns(None, None, None, 'not found', 'stable', recent_commits=0)
+    ['no commits in last 12 months (activity may have ceased)']
+    >>> compute_health_concerns(None, None, None, 'not found', 'stable', known_vulns=2)
+    ['2 known vulnerabilities in OSV database']
     """
     concerns: list[str] = []
 
@@ -973,6 +1110,13 @@ def compute_health_concerns(
 
     if version_stability == 'pre-release':
         concerns.append('version is pre-release (security guarantees rarely made)')
+
+    if recent_commits == 0:
+        concerns.append('no commits in last 12 months (activity may have ceased)')
+
+    if known_vulns > 0:
+        vuln_word = 'vulnerability' if known_vulns == 1 else 'vulnerabilities'
+        concerns.append(f'{known_vulns} known {vuln_word} in OSV database')
 
     return concerns
 
@@ -1163,6 +1307,7 @@ class EcosystemHooks(ABC):
     DANGEROUS_WHAT: str
     DANGEROUS_PATTERNS: list[tuple[str, str]]
     DIFF_PATTERNS: list[tuple[str, str]]
+    OSV_ECOSYSTEM: str
 
     def __init__(self, registry_url: str | None = None) -> None:
         self.registry_url = registry_url

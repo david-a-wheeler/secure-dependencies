@@ -69,6 +69,7 @@ def _extract_gemspec_license(gemspec_text: str) -> str:
 class Hooks(shared.EcosystemHooks):
     ECOSYSTEM = 'ruby'
     LOCKFILE_NAME = 'Gemfile.lock'
+    OSV_ECOSYSTEM = 'RubyGems'
 
     # Name of the primary manifest file (copied to work dir during analysis).
     MANIFEST_FILE = 'gemspec.txt'

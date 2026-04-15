@@ -141,6 +141,10 @@ def write_auto_findings(  # noqa: C901
     deeper_mode: bool = False,
     install_probe: bool = False,
     install_probe_mode: bool = False,
+    vuln_result: dict | None = None,
+    has_security_policy: bool | None = None,
+    scorecard_checks: dict | None = None,
+    recent_commits: int | None = None,
 ) -> None:
     """Write the rich self-describing auto-findings.txt report."""
     timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
@@ -183,6 +187,10 @@ def write_auto_findings(  # noqa: C901
     if deeper and deeper_result.get('code_diffs', 0) > 0:
         risk_parts.append(f'REPRO_BUILD_DIFFS({deeper_result["code_diffs"]})')
 
+    _vuln_count = (vuln_result or {}).get('count', 0)
+    if _vuln_count > 0:
+        risk_parts.append(f'KNOWN_VULNERABILITIES({_vuln_count})')
+
     positive_parts: list[str] = []
     if registry.get('mfa_status') == 'true':
         positive_parts.append('MFA_ENFORCED')
@@ -202,6 +210,8 @@ def write_auto_findings(  # noqa: C901
             pass
     if deeper and deeper_result.get('repro_result', '').startswith('EXACTLY'):
         positive_parts.append('REPRO_BUILD_EXACT')
+    if has_security_policy:
+        positive_parts.append('SECURITY_POLICY_FOUND')
 
     risk_flags = ' '.join(risk_parts) or 'NONE'
     positive_flags = ' '.join(positive_parts) or 'NONE'
@@ -318,6 +328,17 @@ def write_auto_findings(  # noqa: C901
             'step_failures',
             f'{len(failures)} step(s) failed  [analysis may be incomplete; results less reliable]',
         ))
+    if _vuln_count > 0:
+        _vuln_word = 'vulnerability' if _vuln_count == 1 else 'vulnerabilities'
+        _concerns.append((
+            'known_vulnerabilities',
+            f'{_vuln_count} known {_vuln_word}  [check vulnerabilities.txt; confirm fixed or mitigated before approving]',
+        ))
+    if has_security_policy is False:
+        _concerns.append((
+            'no_security_policy',
+            'NO  [no SECURITY.md found; unclear how to report vulnerabilities]',
+        ))
 
     _concern_count = len(_concerns)
     if _concern_count == 0:
@@ -374,6 +395,13 @@ def write_auto_findings(  # noqa: C901
     sc_str = scorecard
     lines.append(f'Age: {age_str} yr  |  Last release: {last_rel_str}  |  Owners: {owner_str}  |  Scorecard: {sc_str}')
     lines.append(f'Stability: {registry.get("version_stability", "unknown")}')
+    if scorecard_checks:
+        _KEY = ['Branch-Protection', 'CI-Tests', 'Maintained', 'Security-Policy', 'Vulnerabilities', 'Contributors']
+        for _cn in _KEY:
+            if _cn in scorecard_checks:
+                _score = scorecard_checks[_cn]
+                _flag = '  [CONCERN: below 5]' if _score < 5 else ''
+                lines.append(f'  {_cn}: {_score:.1f}/10{_flag}')
 
     health_context = {
         'no release in': 'Projects with no recent release rarely receive security patches.',
@@ -875,6 +903,10 @@ def write_health_file(
     registry: dict,
     scorecard: str,
     health_concerns: list[str],
+    recent_commits: int | None = None,
+    has_security_policy: bool | None = None,
+    vuln_count: int = 0,
+    scorecard_checks: dict | None = None,
 ) -> None:
     """Write project-health.txt."""
     age_yr = registry.get('age_years_float')
@@ -889,6 +921,9 @@ def write_health_file(
         f'VERSION_STABILITY: {registry.get("version_stability", "unknown")}',
         f'OWNER_COUNT: {owner_count if owner_count is not None else "unknown"}',
         f'SCORECARD: {scorecard}',
+        f'RECENT_COMMITS_12MO: {recent_commits if recent_commits is not None else "unknown"}',
+        f'SECURITY_POLICY: {"YES" if has_security_policy else "NO"}',
+        f'KNOWN_VULNERABILITIES: {vuln_count}',
         '',
         'HEALTH_CONCERNS:',
     ])
@@ -897,6 +932,13 @@ def write_health_file(
             health_lines.append(f'  - {c}')
     else:
         health_lines.append('  none')
+    if scorecard_checks:
+        health_lines.append('')
+        health_lines.append('SCORECARD_CHECKS:')
+        _KEY = ['Branch-Protection', 'CI-Tests', 'Maintained', 'Security-Policy', 'Vulnerabilities', 'Contributors']
+        for name in _KEY:
+            if name in scorecard_checks:
+                health_lines.append(f'  {name}: {scorecard_checks[name]:.1f}/10')
     (work / 'project-health.txt').write_text('\n'.join(health_lines) + '\n', encoding='utf-8')
 
 
@@ -968,6 +1010,11 @@ def run_analysis(  # noqa: C901
     """Execute full analysis for one package version."""
     import shutil
     failures: list[str] = []
+    recent_commits: int | None = None
+    has_security_policy: bool = False
+    vuln_result: dict = {'count': 0, 'vulns': []}
+    vuln_count: int = 0
+    scorecard_checks: dict[str, float] = {}
     start_time = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
     mode_label = 'UPDATE' if diff_mode else 'NEW/CURRENT'
 
@@ -1049,6 +1096,18 @@ def run_analysis(  # noqa: C901
         print(f'  Clone: GUESSED (no version tag; commit inferred from history)')
     else:
         print(f'  Clone: {"OK" if clone_ok else ("SKIPPED" if not source_url else "FAILED/SKIPPED")}')
+
+    # 4b. Commit activity (only if clone succeeded)
+    raw_clone_dir = work / 'source'
+    recent_commits = shared.count_recent_commits(raw_clone_dir, work) if clone_ok else None
+    if recent_commits is not None:
+        print(f'  Commits (last 12 months): {recent_commits}')
+    else:
+        print('  Commits (last 12 months): N/A (no clone)')
+
+    # 4c. Security policy
+    has_security_policy = shared.check_security_policy(raw_clone_dir, work) if clone_ok else False
+    print(f'  Security policy (SECURITY.md): {"found" if has_security_policy else "not found"}')
 
     # 5. OpenSSF Badge
     print()
@@ -1145,11 +1204,29 @@ def run_analysis(  # noqa: C901
     registry = hooks.fetch_all_registry_data(pkgname, new_ver, work)
     print(f'  MFA required: {registry.get("mfa_status", "unknown")}')
 
+    # 9b. Vulnerability lookup
+    print()
+    print('--- Known vulnerabilities (OSV) ---')
+    vuln_result = shared.lookup_vulnerabilities(pkgname, new_ver, hooks.OSV_ECOSYSTEM, work)
+    vuln_count = vuln_result['count']
+    print(f'  Known vulnerabilities: {vuln_count}')
+    for v in vuln_result['vulns'][:5]:
+        sev = v['severity'] or 'unknown'
+        summary_preview = v['summary'][:60] if v['summary'] else ''
+        print(f'    {v["id"]}  severity={sev}  {summary_preview}')
+    if vuln_count > 5:
+        print(f'    ... ({vuln_count - 5} more; see vulnerabilities.txt)')
+
     # 10. Scorecard
     print()
     print('--- OpenSSF Scorecard ---')
     scorecard = shared.lookup_scorecard(source_url, work)
     print(f'  Scorecard: {scorecard}')
+    scorecard_checks = shared.parse_scorecard_checks(work)
+    _KEY_CHECKS = ['Branch-Protection', 'CI-Tests', 'Maintained', 'Security-Policy', 'Vulnerabilities', 'Contributors']
+    for _check_name in _KEY_CHECKS:
+        if _check_name in scorecard_checks:
+            print(f'    {_check_name}: {scorecard_checks[_check_name]:.1f}/10')
 
     # 11. Health concerns
     health_concerns = shared.compute_health_concerns(
@@ -1158,11 +1235,19 @@ def run_analysis(  # noqa: C901
         owner_count=registry.get('owner_count_int'),
         scorecard_score=scorecard,
         version_stability=registry.get('version_stability', 'unknown'),
+        recent_commits=recent_commits,
+        known_vulns=vuln_count,
     )
     for hc in health_concerns:
         print(f'  [!] {hc}')
 
-    write_health_file(work, pkgname, new_ver, registry, scorecard, health_concerns)
+    write_health_file(
+        work, pkgname, new_ver, registry, scorecard, health_concerns,
+        recent_commits=recent_commits,
+        has_security_policy=has_security_policy,
+        vuln_count=vuln_count,
+        scorecard_checks=scorecard_checks,
+    )
 
     # 12. License
     print()
@@ -1270,6 +1355,10 @@ def run_analysis(  # noqa: C901
         deeper_mode=deeper_mode,
         install_probe=install_probe,
         install_probe_mode=install_probe_mode,
+        vuln_result=vuln_result,
+        has_security_policy=has_security_policy,
+        scorecard_checks=scorecard_checks,
+        recent_commits=recent_commits,
     )
 
     # Final summary
