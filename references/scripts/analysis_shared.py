@@ -436,13 +436,19 @@ def clone_source_repo(
     pkgname: str,
     new_ver: str,
     work: Path,
-) -> tuple[bool, str, bool]:
+) -> tuple[bool, str, bool, bool]:
     """Shallow-clone the upstream source at the version tag.
 
     Writes: source-url.txt, clone-status.txt, raw-git-clone-output.txt.
-    Returns: (clone_ok, version_tag, commit_guessed).
-    commit_guessed is True when no version tag existed and the commit was
-    inferred from commit-message content; less reliable than a signed tag.
+    Returns: (clone_ok, version_tag, commit_guessed, source_likely_incompatible).
+      clone_ok:                  True if a usable clone exists in work/source/
+      version_tag:               matched tag string, or 'GUESSED:<sha>', or ''
+      commit_guessed:            True when the commit was inferred from history
+      source_likely_incompatible: True when source_url is known and clone was
+                                 attempted but no tag or guessable commit was
+                                 found; the distributed package cannot be matched
+                                 to any specific commit and is HIGH RISK. May be
+                                 benign (unpinned build tooling) but is suspicious.
     """
     (work / 'source-url.txt').write_text(sanitize(source_url) + '\n', encoding='utf-8')
 
@@ -450,11 +456,12 @@ def clone_source_repo(
     clone_ok = False
     version_tag = ''
     commit_guessed = False
+    source_likely_incompatible = False
 
     if not source_url:
         clone_lines.append('CLONE_STATUS: SKIPPED (no source URL)')
         (work / 'clone-status.txt').write_text('\n'.join(clone_lines) + '\n', encoding='utf-8')
-        return False, '', False
+        return False, '', False, False
 
     # Find a matching version tag via ls-remote (no clone needed)
     rc_ls, ls_out, _ = run_cmd(['git', 'ls-remote', '--tags', source_url], timeout=30)
@@ -555,6 +562,15 @@ def clone_source_repo(
             ])
         else:
             clone_lines.append('CLONE_STATUS: SKIPPED (no matching tag or commit message found)')
+            clone_lines.extend([
+                'HIGH_RISK: Source repository identified but published version cannot be matched',
+                '  to any commit or tag. The distributed package may not correspond to the',
+                '  listed source repository at all.',
+                'NOTE: This may be benign (e.g., the project does not use tags, or build tooling',
+                '  was updated and is not pinned), but it is suspicious and warrants explicit',
+                '  human review before installation.',
+            ])
+            source_likely_incompatible = True
             if commits:
                 clone_lines.append('RECENT_COMMITS (for manual inspection):')
                 for sha, date, subject in commits[:5]:
@@ -590,7 +606,7 @@ def clone_source_repo(
                 clone_lines.append('CLONE_STATUS: FAILED')
 
     (work / 'clone-status.txt').write_text('\n'.join(clone_lines) + '\n', encoding='utf-8')
-    return clone_ok, version_tag, commit_guessed
+    return clone_ok, version_tag, commit_guessed, source_likely_incompatible
 
 
 # ---------------------------------------------------------------------------

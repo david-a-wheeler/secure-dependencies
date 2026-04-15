@@ -146,6 +146,7 @@ def write_auto_findings(  # noqa: C901
     scorecard_checks: dict | None = None,
     recent_commits: int | None = None,
     commit_activity: dict | None = None,
+    source_likely_incompatible: bool = False,
 ) -> None:
     """Write the rich self-describing auto-findings.txt report."""
     timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
@@ -191,6 +192,8 @@ def write_auto_findings(  # noqa: C901
     _vuln_count = (vuln_result or {}).get('count', 0)
     if _vuln_count > 0:
         risk_parts.append(f'KNOWN_VULNERABILITIES({_vuln_count})')
+    if source_likely_incompatible:
+        risk_parts.append('SOURCE_LIKELY_INCOMPATIBLE')
 
     positive_parts: list[str] = []
     if registry.get('mfa_status') == 'true':
@@ -339,6 +342,13 @@ def write_auto_findings(  # noqa: C901
         _concerns.append((
             'no_security_policy',
             'NO  [no SECURITY.md found; unclear how to report vulnerabilities]',
+        ))
+    if source_likely_incompatible:
+        _concerns.append((
+            'source_likely_incompatible',
+            'HIGH RISK: source repo found but published version matches no tag or recent commit  '
+            '[may indicate supply chain injection; may also be benign unpinned build tooling; '
+            'human verification required before install]',
         ))
 
     _concern_count = len(_concerns)
@@ -507,6 +517,17 @@ def write_auto_findings(  # noqa: C901
         lines.append('  out the best candidate. This is less reliable than a signed version tag.')
         lines.append('  Nearby commits are listed in clone-status.txt for human verification.')
         lines.append('  The AI reviewer MUST explicitly flag this in the analysis report.')
+    elif source_likely_incompatible:
+        lines.append('Clone: [HIGH RISK] source identified but version cannot be matched to any commit or tag')
+        lines.append('Context: *** SOURCE LIKELY INCOMPATIBLE WITH DISTRIBUTED PACKAGE ***')
+        lines.append('  A source repository was found but no tag or commit in the recent history')
+        lines.append('  matches the published version. The distributed package may have been built')
+        lines.append('  from a different branch, a private fork, or injected code not present in')
+        lines.append('  the listed repository.')
+        lines.append('  This MAY be benign: the project may not use version tags, or unpinned build')
+        lines.append('  tooling may have changed the artifact without a matching commit. However,')
+        lines.append('  this pattern is also consistent with a supply chain injection attack.')
+        lines.append('  Human review of clone-status.txt and the recent commit list is required.')
     elif clone_ok:
         tag_str = f'tag: {shared.sanitize(version_tag)}' if version_tag else 'no tag recorded'
         lines.append(f'Clone: OK ({tag_str})')
@@ -747,6 +768,16 @@ def write_auto_findings(  # noqa: C901
             '  from commit-message text. Review clone-status.txt for the guessed commit hash and\n'
             '  nearby commits. Explicitly note this uncertainty in your analysis report and ask\n'
             '  the human reviewer to verify the commit identity independently.'
+        )
+    elif source_likely_incompatible:
+        questions.append(
+            '- [HIGH RISK] SOURCE LIKELY INCOMPATIBLE: a source repository was identified but the\n'
+            '  published version cannot be matched to any tag or commit in its recent history.\n'
+            '  The distributed package may not correspond to the listed source repository.\n'
+            '  This MIGHT be benign (project does not use tags; unpinned build tooling updated\n'
+            '  the artifact without a matching commit) but the pattern is also consistent with\n'
+            '  a supply chain injection attack. You MUST call this out explicitly in your report\n'
+            '  and ask the human to verify the source provenance before approving installation.'
         )
     elif not clone_ok:
         questions.append(
@@ -1034,6 +1065,7 @@ def run_analysis(  # noqa: C901
     vuln_result: dict = {'count': 0, 'vulns': []}
     vuln_count: int = 0
     scorecard_checks: dict[str, float] = {}
+    source_likely_incompatible: bool = False
     start_time = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
     mode_label = 'UPDATE' if diff_mode else 'NEW/CURRENT'
 
@@ -1109,10 +1141,12 @@ def run_analysis(  # noqa: C901
     # 4. Source clone
     print()
     print('--- Source repository clone ---')
-    clone_ok, version_tag, commit_guessed = shared.clone_source_repo(source_url, pkgname, new_ver, work)
+    clone_ok, version_tag, commit_guessed, source_likely_incompatible = shared.clone_source_repo(source_url, pkgname, new_ver, work)
     print(f'  Source URL: {shared.sanitize(source_url) or "(none)"}')
     if clone_ok and commit_guessed:
         print(f'  Clone: GUESSED (no version tag; commit inferred from history)')
+    elif source_likely_incompatible:
+        print(f'  Clone: [HIGH RISK] source identified but version unmatched (see clone-status.txt)')
     else:
         print(f'  Clone: {"OK" if clone_ok else ("SKIPPED" if not source_url else "FAILED/SKIPPED")}')
 
@@ -1384,6 +1418,7 @@ def run_analysis(  # noqa: C901
         scorecard_checks=scorecard_checks,
         recent_commits=recent_commits,
         commit_activity=commit_activity,
+        source_likely_incompatible=source_likely_incompatible,
     )
 
     # Final summary
