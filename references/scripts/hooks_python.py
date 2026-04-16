@@ -223,6 +223,7 @@ def _get_pkg_file(directory: Path, pkgname: str, version: str) -> Path | None:
 class Hooks(shared.EcosystemHooks):
     ECOSYSTEM = 'python'
     OSV_ECOSYSTEM = 'PyPI'
+    OSS_REBUILD_ECOSYSTEM = 'pypi'
 
     # Python projects use one of several lockfile formats. LOCKFILE_NAME is None
     # so the driver skips the single-lockfile warning; LOCKFILE_NAMES lists the

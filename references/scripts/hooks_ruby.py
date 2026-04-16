@@ -93,6 +93,7 @@ class Hooks(shared.EcosystemHooks):
     ECOSYSTEM = 'ruby'
     LOCKFILE_NAME = 'Gemfile.lock'
     OSV_ECOSYSTEM = 'RubyGems'
+    OSS_REBUILD_ECOSYSTEM = 'rubygems'
 
     # Name of the primary manifest file (copied to work dir during analysis).
     MANIFEST_FILE = 'gemspec.txt'

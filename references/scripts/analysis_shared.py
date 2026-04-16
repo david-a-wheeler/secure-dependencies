@@ -22,6 +22,7 @@
 #
 # Python stdlib only; no third-party packages required.
 
+import base64
 import hashlib
 import json
 import re
@@ -1912,6 +1913,394 @@ def lookup_ecosystems_package(registry_key: str, pkgname: str,
 
 
 # ---------------------------------------------------------------------------
+# OSS Rebuild reproducibility lookup
+# ---------------------------------------------------------------------------
+
+_OSS_REBUILD_BUCKET = 'google-rebuild-attestations'
+_OSS_REBUILD_BASE_URL = 'https://storage.googleapis.com'
+_OSS_REBUILD_API_URL = f'{_OSS_REBUILD_BASE_URL}/storage/v1/b/{_OSS_REBUILD_BUCKET}/o'
+
+# Fallback: maps OSV ecosystem name -> OSS Rebuild bucket identifier.
+# Primary source is hooks.OSS_REBUILD_ECOSYSTEM; this table covers any hook
+# that pre-dates this feature or that leaves the attribute as an empty string.
+# Identifiers from pkg/rebuild/rebuild/models.go in google/oss-rebuild.
+_OSS_REBUILD_ECOSYSTEM_FALLBACK: dict[str, str] = {
+    'PyPI':      'pypi',
+    'npm':       'npm',
+    'RubyGems':  'rubygems',
+    'crates.io': 'cratesio',
+    'Maven':     'maven',
+    'Debian':    'debian',
+}
+
+
+def _oss_rebuild_pkg_key(ecosystem: str, pkgname: str) -> str:
+    """Return the package name as used in the OSS Rebuild GCS path.
+
+    PyPI normalizes package names to lowercase with hyphens (underscores and
+    periods are interchangeable with hyphens and case is ignored).
+    Other ecosystems use the name as-is.
+
+    >>> _oss_rebuild_pkg_key('pypi', 'Pillow')
+    'pillow'
+    >>> _oss_rebuild_pkg_key('pypi', 'my_package')
+    'my-package'
+    >>> _oss_rebuild_pkg_key('pypi', 'My.Package')
+    'my-package'
+    >>> _oss_rebuild_pkg_key('npm', 'lodash')
+    'lodash'
+    >>> _oss_rebuild_pkg_key('rubygems', 'rails')
+    'rails'
+    """
+    if ecosystem == 'pypi':
+        return re.sub(r'[-_.]+', '-', pkgname).lower()
+    return pkgname
+
+
+def _oss_rebuild_list_versions(ecosystem: str, pkg_key: str) -> list[str]:
+    """Return sorted list of versions available in the OSS Rebuild bucket.
+
+    Uses the GCS JSON API with delimiter to enumerate version-level prefixes.
+    Returns [] if no data exists (unknown ecosystem, unknown package, or
+    transient network failure).
+    """
+    versions: list[str] = []
+    page_token: str | None = None
+    prefix = f'{ecosystem}/{pkg_key}/'
+    while True:
+        # safe="" encodes everything including '/', which is correct here:
+        # the prefix is a query parameter value and GCS decodes it fully
+        # before matching, so %2F is equivalent to a literal slash in the
+        # object namespace.  In particular, scoped npm names like
+        # @angular/core must have their '/' encoded so it is not mistaken
+        # for a URL path separator.
+        url = (
+            f'{_OSS_REBUILD_API_URL}?'
+            f'prefix={urllib.parse.quote(prefix, safe="")}'
+            f'&delimiter=%2F&maxResults=500'
+        )
+        if page_token:
+            url += f'&pageToken={urllib.parse.quote(page_token, safe="")}'
+        raw = http_get(url, timeout=15)
+        if not raw:
+            break
+        try:
+            data = json.loads(raw)
+        except (ValueError, KeyError):
+            break
+        for p in data.get('prefixes', []):
+            # p looks like "pypi/requests/2.32.3/"
+            ver = p.rstrip('/').split('/')[-1]
+            if ver:
+                versions.append(ver)
+        page_token = data.get('nextPageToken')
+        if not page_token:
+            break
+    return sorted(versions)
+
+
+def _oss_rebuild_list_artifacts(ecosystem: str, pkg_key: str, version: str) -> list[str]:
+    """Return artifact names available for a specific version.
+
+    Each artifact is the directory segment between version and rebuild.intoto.jsonl,
+    e.g. 'requests-2.32.3-py3-none-any.whl'. Returns [] if none found.
+    """
+    artifacts: list[str] = []
+    prefix = f'{ecosystem}/{pkg_key}/{version}/'
+    # safe="" for the same reason as in _oss_rebuild_list_versions: the
+    # prefix is a query parameter, so all characters including '/' must be
+    # percent-encoded so GCS treats them as part of the value, not the URL.
+    url = (
+        f'{_OSS_REBUILD_API_URL}?'
+        f'prefix={urllib.parse.quote(prefix, safe="")}'
+        f'&maxResults=50'
+    )
+    raw = http_get(url, timeout=15)
+    if not raw:
+        return artifacts
+    try:
+        data = json.loads(raw)
+    except (ValueError, KeyError):
+        return artifacts
+    for item in data.get('items', []):
+        name = item.get('name', '')
+        # Strip the version prefix and take the next path component.
+        # This handles pkg_key values that contain '/' (e.g. scoped npm
+        # packages like @angular/core) where fixed-index splitting breaks.
+        # name: "pypi/requests/2.32.3/requests-2.32.3-py3-none-any.whl/rebuild.intoto.jsonl"
+        # name: "npm/@angular/core/19.0.0/angular-core-19.0.0.tgz/rebuild.intoto.jsonl"
+        remainder = name.removeprefix(prefix)
+        artifact = remainder.split('/')[0]
+        if artifact:
+            artifacts.append(artifact)
+    return artifacts
+
+
+def _oss_rebuild_fetch_verdict(
+    ecosystem: str, pkg_key: str, version: str, artifact: str,
+) -> str | None:
+    """Fetch one attestation bundle and return 'PASS', 'FAIL', or None.
+
+    OSS Rebuild only publishes an attestation bundle when the rebuild
+    succeeds (source: internal/api/apiservice/rebuild.go, which returns
+    FailedPrecondition before calling PublishBundle if neither exactMatch
+    nor stabilizedMatch).  So the verdict rule is:
+
+        ArtifactEquivalence attestation present in bundle  ->  PASS
+        Bundle present but no ArtifactEquivalence           ->  FAIL (guard
+            against a future format change where failures get attestations)
+        Bundle absent or unparseable                        ->  None
+
+    Note: the attestation stores the raw rebuild hash and the stabilized
+    upstream hash, but NOT the stabilized rebuild hash.  The in-process
+    comparison (rb.StabilizedHash == up.StabilizedHash) cannot be
+    reproduced from the attestation data alone, which is why presence
+    of the attestation is the correct signal, not any hash comparison.
+    """
+    # This is a direct-download URL, not a query parameter, so path
+    # structure matters.  safe="/" for pkg_key preserves any '/' within
+    # the name as a literal URL path separator (e.g. scoped npm packages
+    # like @angular/core become ...npm/@angular/core/...).  Using safe=""
+    # here would encode '/' as '%2F'; HTTP servers (including GCS) do NOT
+    # decode %2F back to '/' in paths, so the request would 404.
+    # version and artifact never contain '/' so safe="" is fine for those.
+    url = (
+        f'{_OSS_REBUILD_BASE_URL}/{_OSS_REBUILD_BUCKET}/'
+        f'{ecosystem}/{urllib.parse.quote(pkg_key, safe="/")}/'
+        f'{urllib.parse.quote(version, safe="")}/'
+        f'{urllib.parse.quote(artifact, safe="")}/rebuild.intoto.jsonl'
+    )
+    raw = http_get(url, timeout=15)
+    if not raw:
+        return None
+    bundle_found = False
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            envelope = json.loads(line)
+            payload_b64 = envelope.get('payload', '')
+            if not payload_b64:
+                continue
+            payload = json.loads(
+                base64.b64decode(payload_b64).decode('utf-8', errors='replace')
+            )
+            bundle_found = True
+            pred = payload.get('predicate', {})
+            build_def = pred.get('buildDefinition', {})
+            if 'ArtifactEquivalence' in build_def.get('buildType', ''):
+                return 'PASS'
+        except Exception:  # noqa: BLE001
+            continue
+    # Bundle was readable but contained no ArtifactEquivalence attestation.
+    # This should not happen with the current service, but guard against it.
+    return 'FAIL' if bundle_found else None
+
+
+def _oss_rebuild_version_verdict(
+    ecosystem: str, pkg_key: str, version: str,
+) -> str | None:
+    """Get the overall verdict for a package version across all its artifacts.
+
+    Returns 'PASS' if any artifact has an ArtifactEquivalence attestation,
+    'FAIL' if bundles exist but none contain ArtifactEquivalence, or None
+    if no verdict could be determined.
+
+    In practice with current OSS Rebuild data, versions only appear in the
+    bucket when they passed, so a listed version will virtually always return
+    'PASS' here.  The FAIL path exists as a guard against future format
+    changes where failures might also get attestation bundles.
+
+    We use "any PASS = PASS" because a single reproduced artifact is a
+    positive signal; a FAIL on one artifact format may just be a tooling gap.
+    """
+    artifacts = _oss_rebuild_list_artifacts(ecosystem, pkg_key, version)
+    if not artifacts:
+        return None
+    verdicts = [
+        v for v in (
+            _oss_rebuild_fetch_verdict(ecosystem, pkg_key, version, a)
+            for a in artifacts
+        )
+        if v is not None
+    ]
+    if not verdicts:
+        return None
+    return 'PASS' if any(v == 'PASS' for v in verdicts) else 'FAIL'
+
+
+def _oss_rebuild_sample_other_versions(
+    ecosystem: str, pkg_key: str, all_versions: list[str], exclude: str,
+) -> tuple[bool, bool]:
+    """Check a spread sample of versions (excluding `exclude`) for pass/fail.
+
+    Samples up to 3 versions spread across the list (first, middle, last).
+    Returns (any_pass, any_fail).
+    """
+    others = [v for v in all_versions if v != exclude]
+    if not others:
+        return False, False
+    if len(others) == 1:
+        sample = others[:]
+    else:
+        idxs = sorted({0, len(others) // 2, len(others) - 1})
+        sample = [others[i] for i in idxs]
+    verdicts = [_oss_rebuild_version_verdict(ecosystem, pkg_key, v) for v in sample]
+    return (
+        any(v == 'PASS' for v in verdicts),
+        any(v == 'FAIL' for v in verdicts),
+    )
+
+
+def lookup_oss_rebuild(
+    oss_rebuild_ecosystem: str,
+    pkgname: str,
+    version: str,
+    work: Path,
+) -> dict:
+    """Query OSS Rebuild for reproducibility data on pkgname@version.
+
+    Always performs the lookup regardless of ecosystem; returns gracefully
+    with signal_level='NONE' if no data exists.  An absent version in the
+    bucket means unknown, not failed.
+
+    See docs/oss-rebuild.md for background on the data source, update cadence,
+    coverage gaps, and how to interpret the signals.
+
+    Writes: oss-rebuild.txt
+
+    Returns dict with keys:
+        available     (bool): any data exists for this package
+        exact_found   (bool): data for this exact version is in the bucket
+        exact_verdict (str | None): 'PASS', 'FAIL', or None
+        older_found   (bool): data for other versions exists
+        older_any_pass (bool): at least one sampled older version passed
+        older_any_fail (bool): at least one sampled older version failed
+        signal        (str): human-readable one-line summary
+        signal_level  (str): 'NONE' | 'MILD_POSITIVE' | 'POSITIVE'
+                             | 'MILD_NEGATIVE' | 'NEGATIVE' | 'REGRESSION'
+    """
+    result: dict = {
+        'available': False,
+        'exact_found': False,
+        'exact_verdict': None,
+        'older_found': False,
+        'older_any_pass': False,
+        'older_any_fail': False,
+        'signal': 'No OSS Rebuild data for this ecosystem/package.',
+        'signal_level': 'NONE',
+    }
+    lines: list[str] = [
+        f'=== OSS Rebuild reproducibility: {pkgname} {version} ===',
+        '',
+        'OSS Rebuild independently rebuilds packages and checks whether the',
+        'result matches the artifact published to the registry.  See docs/oss-rebuild.md.',
+        '',
+    ]
+
+    if not oss_rebuild_ecosystem:
+        lines.append('OSS_REBUILD: SKIPPED (no ecosystem identifier)')
+        (work / 'oss-rebuild.txt').write_text('\n'.join(lines) + '\n', encoding='utf-8')
+        return result
+
+    pkg_key = _oss_rebuild_pkg_key(oss_rebuild_ecosystem, pkgname)
+    lines.append(f'ECOSYSTEM  : {oss_rebuild_ecosystem}')
+    lines.append(f'PACKAGE_KEY: {pkg_key}')
+    lines.append(f'VERSION    : {version}')
+    lines.append('')
+
+    # Step 1: list all versions in the bucket for this package.
+    all_versions = _oss_rebuild_list_versions(oss_rebuild_ecosystem, pkg_key)
+    lines.append(f'VERSIONS_IN_BUCKET: {len(all_versions)}')
+    if all_versions:
+        shown = all_versions[:20]
+        lines.append('  ' + '  '.join(shown) + ('  ...' if len(all_versions) > 20 else ''))
+    lines.append('')
+
+    if not all_versions:
+        lines.append('OSS_REBUILD: NO_DATA')
+        lines.append(
+            'No data for this package.  Either the ecosystem is not yet covered or '
+            'this package was not included in the bulk run.'
+        )
+        (work / 'oss-rebuild.txt').write_text('\n'.join(lines) + '\n', encoding='utf-8')
+        return result
+
+    result['available'] = True
+    exact_found = version in all_versions
+    result['exact_found'] = exact_found
+    result['older_found'] = len(all_versions) > (1 if exact_found else 0)
+
+    # Step 2: check exact version verdict.
+    if exact_found:
+        exact_verdict = _oss_rebuild_version_verdict(oss_rebuild_ecosystem, pkg_key, version)
+        result['exact_verdict'] = exact_verdict
+        lines.append(f'EXACT_VERSION_VERDICT: {exact_verdict or "UNDETERMINED"}')
+    else:
+        lines.append('EXACT_VERSION_VERDICT: NOT_IN_BUCKET (absent = unknown, not failed)')
+
+    # Step 3: sample other versions for track record / regression check.
+    if result['older_found']:
+        older_any_pass, older_any_fail = _oss_rebuild_sample_other_versions(
+            oss_rebuild_ecosystem, pkg_key, all_versions, version,
+        )
+        result['older_any_pass'] = older_any_pass
+        result['older_any_fail'] = older_any_fail
+        track = []
+        if older_any_pass:
+            track.append('some pass')
+        if older_any_fail:
+            track.append('some fail')
+        lines.append(f'OTHER_VERSIONS_SAMPLE: {", ".join(track) or "all undetermined"}')
+    lines.append('')
+
+    # Step 4: determine signal.
+    ev = result['exact_verdict']
+    if exact_found and ev == 'PASS':
+        result['signal_level'] = 'POSITIVE'
+        result['signal'] = (
+            f'Version {version} REPRODUCED. '
+            'Any malicious code in the compiled artifact is also visible in the source; '
+            'one attack vector is closed.'
+        )
+    elif exact_found and ev == 'FAIL' and result['older_any_pass']:
+        result['signal_level'] = 'REGRESSION'
+        result['signal'] = (
+            f'Version {version} FAILED to reproduce, but older versions DID. '
+            'This regression is a classic supply chain attack pattern. '
+            'Deeper analysis strongly recommended.'
+        )
+    elif exact_found and ev == 'FAIL':
+        result['signal_level'] = 'NEGATIVE'
+        result['signal'] = (
+            f'Version {version} FAILED to reproduce. '
+            'Build environment differences are a common non-malicious cause. '
+            'Mildly negative; consider deeper analysis.'
+        )
+    elif not exact_found and result['older_any_pass']:
+        result['signal_level'] = 'MILD_POSITIVE'
+        result['signal'] = (
+            f'Version {version} not yet evaluated by OSS Rebuild, '
+            'but other versions reproduce. '
+            'Mildly positive track record; does not confirm this version is clean.'
+        )
+    elif not exact_found and result['older_any_fail']:
+        result['signal_level'] = 'MILD_NEGATIVE'
+        result['signal'] = (
+            f'Version {version} not yet evaluated by OSS Rebuild; '
+            'other versions also do not reproduce. '
+            'Project does not prioritize reproducible builds.'
+        )
+    # else: data exists but all verdicts undetermined -> leave NONE
+
+    lines.append(f'SIGNAL_LEVEL: {result["signal_level"]}')
+    lines.append(f'SIGNAL: {result["signal"]}')
+    (work / 'oss-rebuild.txt').write_text('\n'.join(lines) + '\n', encoding='utf-8')
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Ecosystem hooks contract
 # ---------------------------------------------------------------------------
 
@@ -1938,6 +2327,7 @@ class EcosystemHooks(ABC):
     DANGEROUS_PATTERNS: list[tuple[str, str]]
     DIFF_PATTERNS: list[tuple[str, str]]
     OSV_ECOSYSTEM: str
+    OSS_REBUILD_ECOSYSTEM: str
 
     def __init__(self, registry_url: str | None = None) -> None:
         self.registry_url = registry_url

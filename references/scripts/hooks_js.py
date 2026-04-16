@@ -119,6 +119,7 @@ def _unpack_tgz(tgz_file: Path, target_dir: Path, failures: list[str], key: str)
 class Hooks(shared.EcosystemHooks):
     ECOSYSTEM = 'javascript'
     OSV_ECOSYSTEM = 'npm'
+    OSS_REBUILD_ECOSYSTEM = 'npm'
 
     # Multiple lockfile formats; LOCKFILE_NAME is None so the driver skips the
     # single-lockfile warning. LOCKFILE_NAMES lists candidates in priority order.

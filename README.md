@@ -53,6 +53,7 @@ In all three modes, the skill guards against:
 
 Several external services are queried during analysis (all free, no API key
 necessarily required): the package registry, [OSV](https://osv.dev),
+[OSS Rebuild](https://oss-rebuild.dev),
 [OpenSSF Scorecard](https://securityscorecards.dev),
 [OpenSSF Best Practices](https://bestpractices.dev), and
 [packages.ecosyste.ms](https://packages.ecosyste.ms).
@@ -156,6 +157,11 @@ package it:
   especially those that meet at least the `passing` or `baseline-1` criteria.
 - Queries the OSV vulnerability database for known CVEs affecting the
   specific version under review; writes `vulnerabilities.txt`
+- Queries [OSS Rebuild](https://oss-rebuild.dev) to check whether the
+  published package artifact can be independently reproduced from source.
+  A regression (version fails but older versions passed) is a classic
+  supply chain attack pattern and is flagged as a high-priority concern.
+  See [docs/oss-rebuild.md](docs/oss-rebuild.md) for details.
 - Checks commit activity in the last 12 months (separate from release recency:
   a project may cut no release but still be active, or may have gone silent)
 - Checks for a `SECURITY.md` vulnerability disclosure policy in the repo

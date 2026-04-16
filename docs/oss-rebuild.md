@@ -143,28 +143,36 @@ by ecosystem name is needed.
 
 ## Interpreting the verdict
 
-**The presence of an ArtifactEquivalence attestation does not by itself mean the
-rebuild succeeded.** Both successful and failed rebuilds are published to the
-bucket. To determine the outcome, decode the base64 payload and inspect the
-predicate:
+**Presence of an ArtifactEquivalence attestation in a bundle means the rebuild
+succeeded.** The service only publishes a bundle when the rebuild passes: if
+neither an exact match nor a stabilized match is found, the process returns an
+error before calling `PublishBundle`, so no attestation reaches the bucket.
+(Source: `internal/api/apiservice/rebuild.go` in the OSS Rebuild repo.)
 
-- The `externalParameters.candidate` field gives the SHA-256 of the rebuilt
-  artifact (after stabilization).
-- The `externalParameters.target` field gives the SHA-256 of the upstream
-  registry artifact (after stabilization).
-- If the two hashes match, the rebuild succeeded (the package is reproducible).
-- If they differ, the rebuild failed (the published artifact cannot be
-  reproduced from source with the recorded procedure).
+The practical implication: if a version appears in the bucket listing, it
+passed. If it does not appear, it was either never attempted or failed (the
+two are indistinguishable from the bucket alone).
 
-Before comparing, both artifacts go through a "stabilization" step that strips
-non-deterministic content (embedded timestamps, etc.). The hashes in the
-attestation are of the stabilized artifacts, not the raw downloads.
+### What the attestation stores
+
+The `ArtifactEquivalence@v0.1` predicate records:
+
+- `resolvedDependencies`: raw SHA-256 of the rebuilt artifact, and raw
+  SHA-256 of the upstream artifact.
+- `byproducts`: SHA-256 of the **stabilized upstream** artifact.
+- `subject`: SHA-256 of the upstream artifact (same as resolvedDependencies).
+
+The stabilized rebuild hash (the value actually compared for equivalence) is
+used in-process but is not stored in the attestation. You cannot reproduce the
+PASS/FAIL determination from the attestation data alone without re-running the
+stabilization step. The presence of the attestation is the verdict.
+
+Stabilization strips non-deterministic content (embedded timestamps, etc.)
+before comparing rebuild and upstream. A build that does not match exactly may
+still pass after stabilization; both cases produce an attestation.
 
 A successful rebuild is described by the OSS Rebuild project as "a mild positive
-signal that a build was free from tampering." A failed rebuild is not
-necessarily evidence of compromise; common causes include automation
-limitations, legitimate build environment differences, and inherently
-non-deterministic build processes.
+signal that a build was free from tampering."
 
 ## Update cadence and data freshness
 
@@ -226,27 +234,25 @@ storage path prefixes, which is why they map directly to the GCS bucket paths.
 
 Add this lookup to basic analysis - it takes almost no time or effort.
 Always do the lookup regardless of ecosystem, just in case data has been
-added for the ecosystem we care about. There are various possible outcomes:
+added for the ecosystem we care about.
 
-* This ecosystem or package isn't in the database: say nothing; absence
-  of data is not a signal, reporting it would just be noise.
+### What "absent" means
+
+Because the service only publishes attestations for builds that pass, an
+absent version can mean either "never tested" or "tested and failed." The two
+are indistinguishable from the bucket alone. Code must treat absence as
+*unknown*, not as evidence of failure.
+
+### Possible outcomes and their signals
+
+* This ecosystem or package has no data: say nothing. Absence of data
+  is not a signal; reporting it would just be noise.
   Otherwise (the rest of the cases below), report what we know and
   suggest what it might mean.
-* We have data for the exact version we care about, and it reproduces.
-  That means that if there is malicious code in the compiled version it is
-  also visible in the source, cutting off one kind of attack and giving us
-  a small amount of confidence.
-* We have data for the exact version and it does not reproduce, but older
-  versions DID reproduce: that is VERY concerning. A project that was
-  reproducible and then stopped is a classic supply chain attack pattern.
-  We definitely want deeper analysis here.
-* We have data for the exact version we care about, and it does not
-  reproduce, and past versions also didn't reproduce: that is a mildly
-  negative signal; say so. It might be okay. Not all project developers
-  consider reproducibility important. Many projects don't try to make
-  their packages reproduce, build environment differences are a common
-  cause, and it can sometimes be hard to do. It is worth flagging for
-  potential deeper analysis.
+* We have data for the exact version we care about: the build reproduced
+  (attestation present = PASS by design). That means any malicious code
+  in the compiled version is also visible in the source, cutting off one
+  class of supply chain attack and giving us a small amount of confidence.
 * We have no data for the exact version, but we do have older versions
   that reproduced: that is a mildly positive signal. It tells us the
   project has a track record of reproducible builds: the maintainers care
@@ -254,17 +260,21 @@ added for the ecosystem we care about. There are various possible outcomes:
   version is clean, but the prior versions at least were, and we have no
   evidence to the contrary. Worth noting, but not worth drawing a strong
   conclusion from.
-* We have no data for the exact version and older versions also did not
-  reproduce (for our available data): worth noting and slightly negative,
-  but it tells relatively little. The project doesn't worry about
-  reproducibility, but that's all we know.
+* We have no data for the exact version and no data for other versions
+  either: no signal either way. The package simply has not been evaluated.
 
-The regression check (exact version fails, older versions passed) requires
-multiple lookups, but lookups are much cheaper than full rebuilds, so this
-is fine to do during basic analysis. One important note: given coverage
-gaps in the bucket, an absent version means unknown, not failed. Only
-count an older version as having passed or failed if its attestation is
-actually present.
+### What about regressions?
+
+In principle, "current version absent but older versions present" is
+ambiguous: the current version might have been tested and failed (a
+potential red flag) or simply not yet tested (no information). With the
+current bucket layout there is no way to distinguish these cases. Treat
+this as the MILD_POSITIVE case (positive track record) rather than sounding
+a false alarm.
+
+If the service ever adds explicit failure attestations, the NEGATIVE and
+REGRESSION signals would become meaningful. The code retains those
+signal_level values as a forward-compatibility hook.
 
 ### Multiple artifacts per version
 

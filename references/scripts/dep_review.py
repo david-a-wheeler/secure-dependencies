@@ -153,6 +153,7 @@ def write_signals(  # noqa: C901
     source_likely_incompatible: bool = False,
     source_lines: int = 0,
     ecosystems_data: dict | None = None,
+    oss_rebuild_result: dict | None = None,
 ) -> None:
     """Write the rich self-describing signals.txt report."""
     timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
@@ -204,6 +205,12 @@ def write_signals(  # noqa: C901
     eco_status = eco.get('status') or ''
     if eco_status in ('deprecated', 'archived'):
         risk_parts.append(f'ECOSYSTEMS_{eco_status.upper()}')
+    _orb = oss_rebuild_result or {}
+    _orb_level = _orb.get('signal_level', 'NONE')
+    if _orb_level == 'REGRESSION':
+        risk_parts.append('OSS_REBUILD_REGRESSION')
+    elif _orb_level == 'NEGATIVE':
+        risk_parts.append('OSS_REBUILD_FAIL')
 
     positive_parts: list[str] = []
     if registry.get('mfa_status') == 'true':
@@ -228,6 +235,8 @@ def write_signals(  # noqa: C901
         positive_parts.append('SECURITY_POLICY_FOUND')
     if eco.get('critical'):
         positive_parts.append('ECOSYSTEMS_CRITICAL')
+    if _orb_level == 'POSITIVE':
+        positive_parts.append('OSS_REBUILD_REPRODUCED')
 
     risk_flags = ' '.join(risk_parts) or 'NONE'
     positive_flags = ' '.join(positive_parts) or 'NONE'
@@ -374,6 +383,19 @@ def write_signals(  # noqa: C901
         _concerns.append(('ecosystems_status', eco_status))
     if dep_repos is not None and dep_repos == 0:
         _concerns.append(('ecosystems_no_known_users', '0 dependent repos (no known users in the wild)'))
+    if _orb_level == 'REGRESSION':
+        _concerns.append((
+            'oss_rebuild_regression',
+            'FAIL (older versions PASSED)  [classic supply chain attack pattern: was reproducible, now is not; '
+            'human verification required before install]',
+        ))
+    elif _orb_level == 'NEGATIVE':
+        _concerns.append((
+            'oss_rebuild_fail',
+            'FAIL  [published artifact cannot be reproduced from source; '
+            'may indicate tampering, build environment differences, or non-deterministic build; '
+            'review oss-rebuild.txt for details]',
+        ))
 
     _concern_count = len(_concerns)
     if _concern_count == 0:
@@ -756,6 +778,41 @@ def write_signals(  # noqa: C901
     elif mfa == 'true':
         lines.append('Context: MFA requirement significantly raises the bar for account takeover.')
     lines.append('Details: provenance.txt')
+
+    # ---- OSS REBUILD ----
+    lines.append(sec('OSS REBUILD'))
+    _orb_signal_str = _orb.get('signal', '')
+    if _orb_level == 'NONE':
+        lines.append('No data: this package/version has no OSS Rebuild attestation.')
+        lines.append('Context: Absence of data is not a signal. OSS Rebuild coverage is selective;')
+        lines.append('  many packages have not yet been rebuilt.')
+    elif _orb_level == 'POSITIVE':
+        lines.append(f'Result: REPRODUCED  [{_orb_signal_str}]')
+        lines.append('Context: The published artifact was independently rebuilt from source and the')
+        lines.append('  hashes matched. This cuts off one class of supply chain attack (injecting code')
+        lines.append('  between source and the published artifact). It is a mild positive signal, not')
+        lines.append('  a guarantee of safety.')
+    elif _orb_level == 'REGRESSION':
+        lines.append(f'Result: REGRESSION (FAIL after prior PASSes)  [{_orb_signal_str}]')
+        lines.append('[!] CONCERN: This version fails reproducibility but older versions passed.')
+        lines.append('  This is the classic supply chain attack pattern. A project that maintained')
+        lines.append('  reproducible builds and then stopped is a high-priority signal for human review.')
+    elif _orb_level == 'NEGATIVE':
+        lines.append(f'Result: FAIL  [{_orb_signal_str}]')
+        lines.append('Context: The published artifact does not match a rebuild from source.')
+        lines.append('  Common causes: build environment differences, non-deterministic build tooling,')
+        lines.append('  embedded timestamps. This is a mildly negative signal. If older versions also')
+        lines.append('  failed, the project likely does not prioritize reproducibility.')
+    elif _orb_level == 'MILD_POSITIVE':
+        lines.append(f'Result: NO DATA FOR THIS VERSION; older versions reproduced  [{_orb_signal_str}]')
+        lines.append('Context: No attestation exists for this exact version, but older versions passed.')
+        lines.append('  This is mildly positive: the project has a track record of reproducible builds.')
+        lines.append('  It does not confirm this version is clean.')
+    elif _orb_level == 'MILD_NEGATIVE':
+        lines.append(f'Result: NO DATA FOR THIS VERSION; older versions did not reproduce  [{_orb_signal_str}]')
+        lines.append('Context: No attestation for this version, and older versions failed rebuilds.')
+        lines.append('  The project does not appear to prioritize reproducible builds. Mildly negative.')
+    lines.append('Details: oss-rebuild.txt')
 
     # ---- OPENSSF BADGE ----
     lines.append(sec('OPENSSF BEST PRACTICES BADGE'))
@@ -1147,6 +1204,7 @@ def run_analysis(  # noqa: C901
     scorecard_checks: dict[str, float] = {}
     source_likely_incompatible: bool = False
     source_lines: int = 0
+    oss_rebuild_result: dict = {'signal_level': 'NONE', 'signal': ''}
     start_time = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
     mode_label = 'UPDATE' if diff_mode else 'NEW/CURRENT'
 
@@ -1412,6 +1470,18 @@ def run_analysis(  # noqa: C901
     if vuln_count > 5:
         print(f'    ... ({vuln_count - 5} more; see vulnerabilities.txt)')
 
+    # 9c. OSS Rebuild reproducibility lookup
+    print()
+    print('--- OSS Rebuild reproducibility ---')
+    _oss_rebuild_ecosystem = getattr(hooks, 'OSS_REBUILD_ECOSYSTEM', '') or \
+        shared._OSS_REBUILD_ECOSYSTEM_FALLBACK.get(hooks.OSV_ECOSYSTEM, '')
+    oss_rebuild_result = shared.lookup_oss_rebuild(_oss_rebuild_ecosystem, pkgname, new_ver, work)
+    _orb_signal = oss_rebuild_result.get('signal_level', 'NONE')
+    if _orb_signal == 'NONE':
+        print('  No OSS Rebuild data available for this package/version.')
+    else:
+        print(f'  Signal: {_orb_signal}  ({oss_rebuild_result.get("signal", "")})')
+
     # 10. Scorecard
     print()
     print('--- OpenSSF Scorecard ---')
@@ -1593,6 +1663,7 @@ def run_analysis(  # noqa: C901
         source_likely_incompatible=source_likely_incompatible,
         source_lines=source_lines,
         ecosystems_data=ecosystems_data,
+        oss_rebuild_result=oss_rebuild_result,
     )
 
     # Final summary
