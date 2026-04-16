@@ -260,14 +260,15 @@ outcomes:
 * We have no data for the exact version and older versions also
   did not reproduce (for our available data).
   This is worth noting and slightly negative, but it tells
-  relatively little.
+  relatively little. The project doesn't worry about reproducibility, but
+  that's all we know.
 
 The regression check (exact version fails, older versions passed) requires
-fetching attestations for multiple versions and requires multiple lookups.
-Given coverage gaps in the bucket, it is also possible that
-an older version is simply absent rather than failed.
-Lookups are much cheaper than full rebuilds and analysis of them, so it's
-fine to do this during basic analysis.
+multiple lookups, but lookups are much cheaper than full rebuilds, so this
+is fine to do during basic analysis. One important note: given coverage gaps
+in the bucket, an absent version means unknown, not failed. Only count an
+older version as having passed or failed if its attestation is actually
+present.
 
 ## Further reading
 
