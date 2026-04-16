@@ -232,35 +232,42 @@ outcomes:
 
 * This ecosystem or package isn't in the database - say nothing; absence
   of data is not a signal, reporting it would just be noise.
-* We have data for the exact version we care about, and it reproduces -
-  that means that if there is malicious code in the compiled version it is
+  Otherwise (the rest of the cases below),
+  report what we know and suggest what it might mean.
+* We have data for the exact version we care about, and it reproduces.
+  That means that if there is malicious code in the compiled version it is
   also visible in the source, cutting off one kind of attack and giving us
   a small amount of confidence.
-* We have data for the exact version we care about, and it does not
-  reproduce - that is a mildly negative signal; say so. It might be okay
-  (build environment differences are a common cause), but it is worth
-  flagging for deeper analysis.
 * We have data for the exact version and it does not reproduce, but older
-  versions did reproduce - that is VERY concerning. A project that was
+  versions DID reproduce - that is VERY concerning. A project that was
   reproducible and then stopped is a classic supply chain attack pattern.
   We definitely want deeper analysis here.
+* We have data for the exact version we care about, and it does not
+  reproduce, but past versions also didn't reproduce.
+  That is a mildly negative signal; say so. It might be okay.
+  Not all project developers consider reproducibility important.
+  Many projects don't try to make their packages reproduce,
+  build environment differences are a common cause, and it can sometimes
+  be hard to do. It is worth
+  flagging for potential deeper analysis.
 * We have no data for the exact version, but we do have older versions that
   reproduced - that is a mildly positive signal. It tells us the project
   has a track record of reproducible builds: the maintainers care about it
   and the build tooling works. It does not confirm the current version is
-  clean, but it raises the prior that it is fine. Worth noting, but not
+  clean, but the prior versions at least were, and we have no evidence to
+  the contrary. Worth noting, but not
   worth drawing a strong conclusion from.
-* We have no data for the exact version and older versions did not reproduce
-  (or only failed results are available) - that is a mildly negative signal;
-  the project has a history of reproducibility problems, which makes the
-  unknown current version somewhat more suspicious.
+* We have no data for the exact version and older versions also
+  did not reproduce (for our available data).
+  This is worth noting and slightly negative, but it tells
+  relatively little.
 
 The regression check (exact version fails, older versions passed) requires
-fetching attestations for multiple versions and is more expensive than a
-single lookup. Given coverage gaps in the bucket, it is also possible that
-an older version is simply absent rather than failed. This check is better
-suited to deeper analysis; in basic analysis it is sufficient to report
-the result for the exact version and note whether any older data exists.
+fetching attestations for multiple versions and requires multiple lookups.
+Given coverage gaps in the bucket, it is also possible that
+an older version is simply absent rather than failed.
+Lookups are much cheaper than full rebuilds and analysis of them, so it's
+fine to do this during basic analysis.
 
 ## Further reading
 
