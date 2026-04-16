@@ -17,6 +17,11 @@ standard GCS JSON API.
 
 ### Download one attestation bundle
 
+Because a package version can have multiple artifacts (e.g. a universal
+wheel and a source distribution), the artifact filename is part of the
+path. List the artifacts within a version first (see below) to discover
+the exact filename, then construct the download URL:
+
 ```
 GET https://storage.googleapis.com/google-rebuild-attestations/{ecosystem}/{package}/{version}/{artifact}/rebuild.intoto.jsonl
 ```
@@ -217,58 +222,93 @@ const (
 The constants serve dual purposes in the codebase: ecosystem selection and
 storage path prefixes, which is why they map directly to the GCS bucket paths.
 
-## Path structure summary
+## Analysis strategy
 
-```
-{ecosystem}/{package}/{version}/{artifact-filename}/rebuild.intoto.jsonl
-```
+Add this lookup to basic analysis - it takes almost no time or effort.
+Always do the lookup regardless of ecosystem, just in case data has been
+added for the ecosystem we care about. There are various possible outcomes:
 
-## How we plan to use it
-
-Our plan is to add this lookup in basic analysis - it takes almost no
-time or effort to do the lookup. We'll always do the lookup, just in case
-they've added the ecosystem we care about. There are various possible
-outcomes:
-
-* This ecosystem or package isn't in the database - say nothing; absence
+* This ecosystem or package isn't in the database: say nothing; absence
   of data is not a signal, reporting it would just be noise.
-  Otherwise (the rest of the cases below),
-  report what we know and suggest what it might mean.
+  Otherwise (the rest of the cases below), report what we know and
+  suggest what it might mean.
 * We have data for the exact version we care about, and it reproduces.
   That means that if there is malicious code in the compiled version it is
   also visible in the source, cutting off one kind of attack and giving us
   a small amount of confidence.
 * We have data for the exact version and it does not reproduce, but older
-  versions DID reproduce - that is VERY concerning. A project that was
+  versions DID reproduce: that is VERY concerning. A project that was
   reproducible and then stopped is a classic supply chain attack pattern.
   We definitely want deeper analysis here.
 * We have data for the exact version we care about, and it does not
-  reproduce, but past versions also didn't reproduce.
-  That is a mildly negative signal; say so. It might be okay.
-  Not all project developers consider reproducibility important.
-  Many projects don't try to make their packages reproduce,
-  build environment differences are a common cause, and it can sometimes
-  be hard to do. It is worth
-  flagging for potential deeper analysis.
-* We have no data for the exact version, but we do have older versions that
-  reproduced - that is a mildly positive signal. It tells us the project
-  has a track record of reproducible builds: the maintainers care about it
-  and the build tooling works. It does not confirm the current version is
-  clean, but the prior versions at least were, and we have no evidence to
-  the contrary. Worth noting, but not
-  worth drawing a strong conclusion from.
-* We have no data for the exact version and older versions also
-  did not reproduce (for our available data).
-  This is worth noting and slightly negative, but it tells
-  relatively little. The project doesn't worry about reproducibility, but
-  that's all we know.
+  reproduce, and past versions also didn't reproduce: that is a mildly
+  negative signal; say so. It might be okay. Not all project developers
+  consider reproducibility important. Many projects don't try to make
+  their packages reproduce, build environment differences are a common
+  cause, and it can sometimes be hard to do. It is worth flagging for
+  potential deeper analysis.
+* We have no data for the exact version, but we do have older versions
+  that reproduced: that is a mildly positive signal. It tells us the
+  project has a track record of reproducible builds: the maintainers care
+  about it and the build tooling works. It does not confirm the current
+  version is clean, but the prior versions at least were, and we have no
+  evidence to the contrary. Worth noting, but not worth drawing a strong
+  conclusion from.
+* We have no data for the exact version and older versions also did not
+  reproduce (for our available data): worth noting and slightly negative,
+  but it tells relatively little. The project doesn't worry about
+  reproducibility, but that's all we know.
 
 The regression check (exact version fails, older versions passed) requires
 multiple lookups, but lookups are much cheaper than full rebuilds, so this
-is fine to do during basic analysis. One important note: given coverage gaps
-in the bucket, an absent version means unknown, not failed. Only count an
-older version as having passed or failed if its attestation is actually
-present.
+is fine to do during basic analysis. One important note: given coverage
+gaps in the bucket, an absent version means unknown, not failed. Only
+count an older version as having passed or failed if its attestation is
+actually present.
+
+### Multiple artifacts per version
+
+A single package version can have more than one artifact (e.g. a
+universal wheel and a source distribution, or wheels for different Python
+versions). Always list the artifacts within a version to discover what is
+available rather than guessing the filename.
+
+When multiple artifacts exist, use this approach:
+
+* If you know the exact artifact the user installed (e.g. from pip
+  metadata), look up that artifact specifically.
+* If you don't know the exact artifact, check all available ones. If any
+  reproduce, report that as a positive signal. If none reproduce, report
+  that as a negative signal.
+
+### PyPI artifact coverage: current state and uncertainty
+
+The current PyPI data covers only universal wheels (`py3-none-any.whl`).
+Packages with C extensions (numpy, cryptography, pillow, etc.) are absent
+from the bucket entirely - OSS Rebuild has not yet published data for
+platform-specific wheels or source distributions. It is unclear how they
+will handle these when they expand PyPI coverage: they might rebuild the
+source distribution, each platform wheel, or only select artifacts.
+
+The listing-based approach above will work correctly regardless of how
+they resolve this: when they start publishing platform-specific wheels,
+the version listing will return them and the per-artifact lookup will find
+the right one.
+
+### Coding for future ecosystems now
+
+Since we always query and handle absence gracefully, any new ecosystem
+that OSS Rebuild publishes will be picked up automatically with no code
+changes. The listing approach discovers artifact names at runtime, so
+unknown artifact filename conventions for new ecosystems (e.g. RubyGems
+`.gem` files, Maven `.jar` files) are handled without special cases.
+
+The only thing that could silently improve is the package name passed to
+the lookup. PyPI normalizes package names (hyphens and underscores are
+interchangeable, case is ignored), so normalize to lowercase with hyphens
+when constructing PyPI paths - e.g. `Pillow` becomes `pillow`,
+`my_package` becomes `my-package`. This matches what OSS Rebuild uses as
+the path key.
 
 ## Further reading
 
