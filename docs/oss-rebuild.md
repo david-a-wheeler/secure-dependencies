@@ -225,24 +225,42 @@ storage path prefixes, which is why they map directly to the GCS bucket paths.
 
 ## How we plan to use it
 
-Our plan is to add this lookup in `basic analysis` - it takes almost no
-tiem or effort to do the lookup. We'll always do the lookup, just in case
+Our plan is to add this lookup in basic analysis - it takes almost no
+time or effort to do the lookup. We'll always do the lookup, just in case
 they've added the ecosystem we care about. There are various possible
 outcomes:
 
-* This ecosystem or package isn't in the datbase - say nothing as a signal,
-  that would just be noise.
-* We can only find an older version of the package - that can still give us
-  information on what it was like, though it's less relevant.
-* It reproduces - that means that if there is malicious code in the compiled
-  version it's visible in the source, cutting off one kind of attack and
-  giving us a small amount of confidence
-* It doesn't reproduce, and it hasn't reproduced in the past or we don't
-  know if it reproduced in the past - that's a mildly negative signal, say so.
-  It MIGHT be okay, but there are some concerns, it might be wise for us to
-  rebuild to check it further (in deeper analysis).
-* It doesn't reproduce and it used to - that is VERY concerning. We DEFINITELY
-  want to do deeper analysis.
+* This ecosystem or package isn't in the database - say nothing; absence
+  of data is not a signal, reporting it would just be noise.
+* We have data for the exact version we care about, and it reproduces -
+  that means that if there is malicious code in the compiled version it is
+  also visible in the source, cutting off one kind of attack and giving us
+  a small amount of confidence.
+* We have data for the exact version we care about, and it does not
+  reproduce - that is a mildly negative signal; say so. It might be okay
+  (build environment differences are a common cause), but it is worth
+  flagging for deeper analysis.
+* We have data for the exact version and it does not reproduce, but older
+  versions did reproduce - that is VERY concerning. A project that was
+  reproducible and then stopped is a classic supply chain attack pattern.
+  We definitely want deeper analysis here.
+* We have no data for the exact version, but we do have older versions that
+  reproduced - that is a mildly positive signal. It tells us the project
+  has a track record of reproducible builds: the maintainers care about it
+  and the build tooling works. It does not confirm the current version is
+  clean, but it raises the prior that it is fine. Worth noting, but not
+  worth drawing a strong conclusion from.
+* We have no data for the exact version and older versions did not reproduce
+  (or only failed results are available) - that is a mildly negative signal;
+  the project has a history of reproducibility problems, which makes the
+  unknown current version somewhat more suspicious.
+
+The regression check (exact version fails, older versions passed) requires
+fetching attestations for multiple versions and is more expensive than a
+single lookup. Given coverage gaps in the bucket, it is also possible that
+an older version is simply absent rather than failed. This check is better
+suited to deeper analysis; in basic analysis it is sufficient to report
+the result for the exact version and note whether any older data exists.
 
 ## Further reading
 
