@@ -1,15 +1,18 @@
 # OSS Rebuild
 
-[OSS Rebuild](https://oss-rebuild.dev/) is a Google project that verifies whether
-open-source package releases are reproducible: it re-executes the build and checks
-whether the artifact in the registry matches what the source code produces.
-Results are published as signed in-toto/SLSA attestations.
+[OSS Rebuild](https://oss-rebuild.dev/) is a Google project that verifies
+whether open-source package releases are reproducible: it re-executes
+the build and checks whether the artifact in the registry matches what
+the source code produces. Results are published as signed in-toto/SLSA
+attestations.
 
 ## Data access: no tool required
 
 Attestations are stored in a public Google Cloud Storage (GCS) bucket named
-`google-rebuild-attestations`. No GCP account, no `gcloud` CLI, and no Go tool
-installation is needed. Everything is accessible via plain HTTPS using Google's
+`google-rebuild-attestations`. While they *supply* a go tool, it's also
+possible to get the data directly without a GCP account,
+`gcloud` CLI, or Go tool installation.
+Everything is accessible via plain HTTPS using Google's
 standard GCS JSON API.
 
 ### Download one attestation bundle
@@ -27,10 +30,10 @@ https://storage.googleapis.com/google-rebuild-attestations/pypi/absl-py/2.0.0/ab
 The response is a newline-delimited JSON file (`.jsonl`). Each line is a
 base64-encoded in-toto envelope. A typical bundle contains two attestations:
 
-- **Rebuild** (`Rebuild@v0.1`): documents the exact build procedure used (Docker image, Alpine
-  version, build steps, source repo, timing, etc.)
-- **ArtifactEquivalence** (`ArtifactEquivalence@v0.1`): records the comparison between the
-  rebuilt artifact and the upstream registry release
+- **Rebuild** (`Rebuild@v0.1`): documents the exact build procedure used
+  (Docker image, Alpine version, build steps, source repo, timing, etc.)
+- **ArtifactEquivalence** (`ArtifactEquivalence@v0.1`): records the
+  comparison between the rebuilt artifact and the upstream registry release
 
 ### List versions of a package
 
@@ -61,7 +64,8 @@ Response shape:
 }
 ```
 
-Paginate with `&pageToken={nextPageToken}` until the response has no `nextPageToken`.
+Paginate with `&pageToken={nextPageToken}` until the response has no
+`nextPageToken`.
 
 ### List artifact files within a version
 
@@ -152,9 +156,10 @@ non-deterministic content (embedded timestamps, etc.). The hashes in the
 attestation are of the stabilized artifacts, not the raw downloads.
 
 A successful rebuild is described by the OSS Rebuild project as "a mild positive
-signal that a build was free from tampering." A failed rebuild is not necessarily
-evidence of compromise; common causes include automation limitations, legitimate
-build environment differences, and inherently non-deterministic build processes.
+signal that a build was free from tampering." A failed rebuild is not
+necessarily evidence of compromise; common causes include automation
+limitations, legitimate build environment differences, and inherently
+non-deterministic build processes.
 
 ## Update cadence and data freshness
 
@@ -217,6 +222,27 @@ storage path prefixes, which is why they map directly to the GCS bucket paths.
 ```
 {ecosystem}/{package}/{version}/{artifact-filename}/rebuild.intoto.jsonl
 ```
+
+## How we plan to use it
+
+Our plan is to add this lookup in `basic analysis` - it takes almost no
+tiem or effort to do the lookup. We'll always do the lookup, just in case
+they've added the ecosystem we care about. There are various possible
+outcomes:
+
+* This ecosystem or package isn't in the datbase - say nothing as a signal,
+  that would just be noise.
+* We can only find an older version of the package - that can still give us
+  information on what it was like, though it's less relevant.
+* It reproduces - that means that if there is malicious code in the compiled
+  version it's visible in the source, cutting off one kind of attack and
+  giving us a small amount of confidence
+* It doesn't reproduce, and it hasn't reproduced in the past or we don't
+  know if it reproduced in the past - that's a mildly negative signal, say so.
+  It MIGHT be okay, but there are some concerns, it might be wise for us to
+  rebuild to check it further (in deeper analysis).
+* It doesn't reproduce and it used to - that is VERY concerning. We DEFINITELY
+  want to do deeper analysis.
 
 ## Further reading
 
