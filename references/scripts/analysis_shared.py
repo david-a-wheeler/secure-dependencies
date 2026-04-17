@@ -1963,6 +1963,13 @@ def _oss_rebuild_list_versions(ecosystem: str, pkg_key: str) -> list[str]:
     Uses the GCS JSON API with delimiter to enumerate version-level prefixes.
     Returns [] if no data exists (unknown ecosystem, unknown package, or
     transient network failure).
+
+    Try it:
+        python3 -c "
+        import sys; sys.path.insert(0, 'references/scripts')
+        import analysis_shared as s
+        print(s._oss_rebuild_list_versions('pypi', 'absl-py'))
+        "
     """
     versions: list[str] = []
     page_token: str | None = None
@@ -2004,6 +2011,13 @@ def _oss_rebuild_list_artifacts(ecosystem: str, pkg_key: str, version: str) -> l
 
     Each artifact is the directory segment between version and rebuild.intoto.jsonl,
     e.g. 'requests-2.32.3-py3-none-any.whl'. Returns [] if none found.
+
+    Try it:
+        python3 -c "
+        import sys; sys.path.insert(0, 'references/scripts')
+        import analysis_shared as s
+        print(s._oss_rebuild_list_artifacts('pypi', 'absl-py', '2.0.0'))
+        "
     """
     artifacts: list[str] = []
     prefix = f'{ecosystem}/{pkg_key}/{version}/'
@@ -2040,6 +2054,15 @@ def _oss_rebuild_fetch_verdict(
     ecosystem: str, pkg_key: str, version: str, artifact: str,
 ) -> str | None:
     """Fetch one attestation bundle and return 'PASS', 'FAIL', or None.
+
+    Try it:
+        python3 -c "
+        import sys; sys.path.insert(0, 'references/scripts')
+        import analysis_shared as s
+        print(s._oss_rebuild_fetch_verdict(
+            'pypi', 'absl-py', '2.0.0', 'absl_py-2.0.0-py3-none-any.whl'))
+        "
+
 
     OSS Rebuild only publishes an attestation bundle when the rebuild
     succeeds (source: internal/api/apiservice/rebuild.go, which returns
@@ -2157,7 +2180,7 @@ def lookup_oss_rebuild(
     oss_rebuild_ecosystem: str,
     pkgname: str,
     version: str,
-    work: Path,
+    work: Path | None = None,
 ) -> dict:
     """Query OSS Rebuild for reproducibility data on pkgname@version.
 
@@ -2167,6 +2190,9 @@ def lookup_oss_rebuild(
 
     See docs/oss-rebuild.md for background on the data source, update cadence,
     coverage gaps, and how to interpret the signals.
+
+    work: directory for output files.  If None, a temporary directory is used
+    and oss-rebuild.txt is printed to stdout on return.
 
     Writes: oss-rebuild.txt
 
@@ -2180,7 +2206,22 @@ def lookup_oss_rebuild(
         signal        (str): human-readable one-line summary
         signal_level  (str): 'NONE' | 'MILD_POSITIVE' | 'POSITIVE'
                              | 'MILD_NEGATIVE' | 'NEGATIVE' | 'REGRESSION'
+
+    Quick invocation (no work dir needed):
+        python3 -c "
+        import sys; sys.path.insert(0, 'references/scripts')
+        import analysis_shared as shared
+        shared.lookup_oss_rebuild('pypi', 'absl-py', '2.0.0')
+        "
+
+    Or via __main__ (from the references/scripts directory):
+        python3 analysis_shared.py pypi absl-py 2.0.0
     """
+    import tempfile as _tempfile
+    _tmpdir = None
+    if work is None:
+        _tmpdir = _tempfile.TemporaryDirectory()
+        work = Path(_tmpdir.name)
     result: dict = {
         'available': False,
         'exact_found': False,
@@ -2296,7 +2337,11 @@ def lookup_oss_rebuild(
 
     lines.append(f'SIGNAL_LEVEL: {result["signal_level"]}')
     lines.append(f'SIGNAL: {result["signal"]}')
-    (work / 'oss-rebuild.txt').write_text('\n'.join(lines) + '\n', encoding='utf-8')
+    txt = '\n'.join(lines) + '\n'
+    (work / 'oss-rebuild.txt').write_text(txt, encoding='utf-8')
+    if _tmpdir is not None:
+        print(txt, end='')
+        _tmpdir.cleanup()
     return result
 
 
@@ -2401,3 +2446,33 @@ class EcosystemHooks(ABC):
     def reproducible_build(
         self, pkgname: str, version: str, work: Path, sandbox: str,
     ) -> tuple[str, int, int]: ...
+
+
+# ---------------------------------------------------------------------------
+# Library-import usage examples
+# ---------------------------------------------------------------------------
+# analysis_shared.py is a library; use dep_review.py for dependency analysis.
+#
+# To try individual functions from a Python REPL or one-liner:
+#
+#   from references.scripts.analysis_shared import lookup_oss_rebuild
+#   lookup_oss_rebuild('pypi', 'absl-py', '2.0.0')
+#
+# Or from the references/scripts directory:
+#
+#   python3 -c "from analysis_shared import lookup_oss_rebuild; lookup_oss_rebuild('pypi','absl-py','2.0.0')"
+#   python3 -c "from analysis_shared import lookup_oss_rebuild; lookup_oss_rebuild('npm','lodash','4.18.1')"
+#
+# lookup_oss_rebuild prints oss-rebuild.txt to stdout when no work dir is given.
+if __name__ == '__main__':
+    import sys as _sys
+    print(
+        'analysis_shared.py is a library, not a standalone script.\n'
+        'For dependency analysis, use: dep_review.py\n'
+        '\n'
+        'To try a function interactively:\n'
+        '  python3 -c "from analysis_shared import lookup_oss_rebuild;'
+        " lookup_oss_rebuild('pypi','absl-py','2.0.0')\"",
+        file=_sys.stderr,
+    )
+    _sys.exit(1)
