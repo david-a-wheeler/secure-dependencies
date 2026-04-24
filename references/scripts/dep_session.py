@@ -66,7 +66,7 @@ VALID_RISKS = frozenset({'LOW', 'MEDIUM', 'HIGH', 'CRITICAL'})
 # {packages} is replaced with a space-separated list of package names.
 ECOSYSTEM_INSTALL_CMD: dict[str, str] = {
     'rubygems': 'bundle update {packages}',
-    'pypi':     'pip install --upgrade {packages}',
+    'pypi':     'python3 -m pip install --upgrade {packages}',
     'npm':      'npm update {packages}',
 }
 
@@ -1103,7 +1103,7 @@ _VULN_FALLBACK: dict[str, list[str] | None] = {
 # Outdated-package check commands per ecosystem
 _OUTDATED_CMDS: dict[str, list[str]] = {
     'rubygems': ['bundle', 'outdated', '--strict'],
-    'pypi':     ['pip', 'list', '--outdated', '--format=columns'],
+    'pypi':     ['python3', '-m', 'pip', 'list', '--outdated', '--format=columns'],
     'npm':      ['npm', 'outdated'],
 }
 
@@ -1210,7 +1210,7 @@ def cmd_vuln_audit(args: argparse.Namespace) -> None:  # noqa: C901
                 if eco == 'rubygems':
                     print('  Install: gem install bundler-audit')
                 elif eco == 'pypi':
-                    print('  Install: pip install pip-audit   (or: pip install safety)')
+                    print('  Install: python3 -m pip install pip-audit   (or: pip install safety)')
                 elif eco == 'npm':
                     print('  npm audit is bundled with npm; check your npm installation.')
                 print('  Proceeding without vulnerability audit for this ecosystem.')
@@ -1423,8 +1423,8 @@ def _list_installed_names(root: Path, registry: str) -> list[str]:
         return names
     elif registry == 'pypi':
         import shutil as _shutil
-        if _shutil.which('pip'):
-            rc, out, _ = _run_cmd(['pip', 'list', '--format=columns'], root)
+        if _shutil.which('pip') or _shutil.which('pip3'):
+            rc, out, _ = _run_cmd(['python3', '-m', 'pip', 'list', '--format=columns'], root)
             names = []
             for line in out.splitlines():
                 parts = line.split()
