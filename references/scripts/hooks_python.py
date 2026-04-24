@@ -318,6 +318,7 @@ class Hooks(shared.EcosystemHooks):
         unpacked_dir.mkdir(parents=True, exist_ok=True)
 
         dl_cmd = [
+            'python3', '-m',
             'pip', 'download',
             f'{pkgname}=={version}',
             '--no-deps',
@@ -614,7 +615,7 @@ class Hooks(shared.EcosystemHooks):
 
         # Check pip cache
         rc_cache, cache_out, _ = shared.run_cmd(
-            ['pip', 'cache', 'info'], timeout=10
+            ['python3', '-m', 'pip', 'cache', 'info'], timeout=10
         )
         cache_dir: Path | None = None
         if rc_cache == 0:
@@ -645,6 +646,7 @@ class Hooks(shared.EcosystemHooks):
                 source = 'pip-cache'
         else:
             dl_cmd = [
+                'python3', '-m',
                 'pip', 'download',
                 f'{pkgname}=={old_ver}',
                 '--no-deps',
@@ -1092,7 +1094,7 @@ class Hooks(shared.EcosystemHooks):
 
         # --- B: Installed packages via pip list ---
         installed_names: list[str] = []
-        rc_pip, pip_out, _ = shared.run_cmd(['pip', 'list', '--format=columns'], timeout=30)
+        rc_pip, pip_out, _ = shared.run_cmd(['python3', '-m', 'pip', 'list', '--format=columns'], timeout=30)
         if rc_pip == 0:
             for line in pip_out.splitlines()[2:]:  # skip header rows
                 parts = line.split()
@@ -1385,7 +1387,7 @@ class Hooks(shared.EcosystemHooks):
             # python:X images don't pre-install 'build', so install it first.
             # container_allow_network=True is required for that pip install step.
             container_shell_cmd=(
-                'pip install build --quiet --disable-pip-version-check && '
+                'python3 -m pip install build --quiet --disable-pip-version-check && '
                 'python -m build --wheel --no-isolation --outdir {out} {src}'
             ),
             container_allow_network=True,

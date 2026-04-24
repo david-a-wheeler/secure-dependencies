@@ -23,7 +23,7 @@ Use the lock file to determine what versions are actually pinned.
 
 ```bash
 # pip
-pip list --outdated
+python3 -m pip list --outdated
 
 # Poetry
 poetry show --outdated
@@ -61,14 +61,14 @@ awk '/^name = "PKGNAME"/{f=1} f && /^version/{print; exit}' uv.lock
 
 ## Downloading Without Installing
 
-`pip download` fetches a package to disk without installing it.
+`python3 -m pip download` fetches a package to disk without installing it.
 `--prefer-binary` downloads a pre-built wheel when available, avoiding
 any build-time code execution. `--no-deps` fetches only the named package.
 
 ```bash
 mkdir -p temp/dep-review/PKGNAME/unpacked
 
-pip download PKGNAME==VERSION --no-deps --prefer-binary \
+python3 -m pip download PKGNAME==VERSION --no-deps --prefer-binary \
   -d temp/dep-review/PKGNAME/
 ```
 
@@ -174,10 +174,10 @@ diff -rq \
 
 ```bash
 # Show available versions and release dates
-pip index versions PKGNAME  # pip >= 21.2
+python3 -m pip index versions PKGNAME  # pip >= 21.2
 
 # Show current metadata
-pip show PKGNAME
+python3 -m pip show PKGNAME
 
 # PyPI JSON API (no auth required):
 curl -s "https://pypi.org/pypi/PKGNAME/VERSION/json" | \
@@ -201,7 +201,7 @@ Update packages **by name**, never an unconstrained upgrade-all:
 
 ```bash
 # pip: upgrade specific packages
-pip install --upgrade PKGNAME1 PKGNAME2
+python3 -m pip install --upgrade PKGNAME1 PKGNAME2
 
 # Poetry: update specific packages and regenerate lock
 poetry update PKGNAME1 PKGNAME2
