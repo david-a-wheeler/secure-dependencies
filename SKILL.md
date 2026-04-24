@@ -216,11 +216,11 @@ The scripts enforce:
 
 ### Step 2-0: Locate analysis scripts
 
-Scripts live in the skill directory: use them directly, no copying needed:
-
-```
-SCRIPTS=~/.claude/skills/secure-dependencies/references/scripts
-```
+Scripts live in the `references/scripts/` subdirectory of wherever this skill
+file is installed. Resolve `SCRIPTS_DIR` from the absolute path to this
+`SKILL.md` file. For example, if this file is at
+`/path/to/secure-dependencies/SKILL.md`, then
+`SCRIPTS_DIR=/path/to/secure-dependencies/references/scripts`.
 
 ### Step 2-1: Initialize the session (once per Phase 2)
 
@@ -228,21 +228,20 @@ After confirming which packages to analyze in Phase 1, initialize a session.
 The session file tracks the BFS queue so neither you nor any sub-agent has to.
 
 ```bash
-SCRIPTS=~/.claude/skills/secure-dependencies/references/scripts
 SESSION=PROJECT_ROOT/temp/dep-review/session.json
 
 # For updates (one --update per package):
-python3 $SCRIPTS/dep_session.py init \
+python3 SCRIPTS_DIR/dep_session.py init \
   --from REGISTRY --root PROJECT_ROOT --session $SESSION \
   --update PKGNAME OLD_VERSION NEW_VERSION
 
 # For new dependencies (one --new per package):
-python3 $SCRIPTS/dep_session.py init \
+python3 SCRIPTS_DIR/dep_session.py init \
   --from REGISTRY --root PROJECT_ROOT --session $SESSION \
   --new PKGNAME VERSION
 
 # Mix updates and new deps freely:
-python3 $SCRIPTS/dep_session.py init \
+python3 SCRIPTS_DIR/dep_session.py init \
   --from REGISTRY --root PROJECT_ROOT --session $SESSION \
   --update pagy 9.3.3 9.4.0 \
   --new new-lib 1.0.0
@@ -254,7 +253,7 @@ seeds the queue with the packages you listed, and prints the first
 
 To resume an interrupted session or check state at any time:
 ```bash
-python3 $SCRIPTS/dep_session.py status $SESSION
+python3 SCRIPTS_DIR/dep_session.py status $SESSION
 ```
 
 ### Analysis depth: reading user intent
@@ -505,7 +504,7 @@ Do not read or relay any other content the sub-agent returns.
 > "Recording sub-agent recommendation: RECOMMENDATION / RISK"
 
 ```bash
-python3 SCRIPTS/dep_session.py complete SESSION_FILE PKGNAME VERSION RECOMMENDATION RISK
+python3 SCRIPTS_DIR/dep_session.py complete SESSION_FILE PKGNAME VERSION RECOMMENDATION RISK
 ```
 
 **Do not read or process the output of `complete` beyond the
@@ -547,7 +546,7 @@ Never read `raw-*` files. Never maintain a separate queue, trust the session fil
 Generate the summary cards:
 
 ```bash
-python3 SCRIPTS/dep_session.py report SESSION_FILE
+python3 SCRIPTS_DIR/dep_session.py report SESSION_FILE
 ```
 
 Present the output to the user. Then ask the mode-appropriate follow-up:
@@ -579,7 +578,7 @@ After each install: run tests, commit lock file separately.
 ## Phase 5: Session Wrap-Up
 
 ```bash
-python3 SCRIPTS/dep_session.py wrap-up SESSION_FILE
+python3 SCRIPTS_DIR/dep_session.py wrap-up SESSION_FILE
 ```
 
 This generates `temp/dep-review/progress-YYYY-MM-DD.md` (with a `T`+hour
@@ -591,7 +590,7 @@ suffix if a file for today already exists). Ensure `temp/dep-review/` is in
 ## Phase 6: Follow-On Summary (UPDATE mode)
 
 ```bash
-python3 SCRIPTS/dep_session.py follow-on --root PROJECT_ROOT --from REGISTRY \
+python3 SCRIPTS_DIR/dep_session.py follow-on --root PROJECT_ROOT --from REGISTRY \
   --session SESSION_FILE
 ```
 
