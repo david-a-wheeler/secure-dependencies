@@ -451,13 +451,13 @@ class Hooks(shared.EcosystemHooks):
             if re.search(r'^\s*\[console_scripts\]', ep_text, re.MULTILINE):
                 executables = 'YES'
                 scripts = re.findall(r'^\s*(\S+)\s*=', ep_text, re.MULTILINE)
-                executables_list = shared.sanitize(', '.join(scripts[:10]))
+                executables_list = shared.sanitize_line(', '.join(scripts[:10]))
         # Also check pyproject.toml project.scripts
         if executables == 'NO' and ppt_text:
             if re.search(r'\[project\.scripts\]|\[project\.gui-scripts\]', ppt_text):
                 executables = 'YES'
                 scripts = re.findall(r'^\s*(\S+)\s*=', ppt_text, re.MULTILINE)
-                executables_list = shared.sanitize(', '.join(scripts[:10]))
+                executables_list = shared.sanitize_line(', '.join(scripts[:10]))
         manifest_lines.append(f'HAS_EXECUTABLES: {executables}')
         if executables == 'YES':
             manifest_lines.append(f'EXECUTABLES: {executables_list}')
@@ -499,31 +499,31 @@ class Hooks(shared.EcosystemHooks):
             requires_dist = [requires_dist]
         runtime_dep_lines = [str(r) for r in requires_dist if r and '; extra ==' not in str(r)]
         if runtime_dep_lines:
-            manifest_lines.extend(shared.sanitize(l) for l in runtime_dep_lines)
+            manifest_lines.extend(shared.sanitize_line(l) for l in runtime_dep_lines)
         else:
             manifest_lines.append('  (none declared)')
 
         # Python version requirement
         py_req = meta.get('Requires-Python', '')
         if py_req and isinstance(py_req, str):
-            manifest_lines.extend(['', f'REQUIRES_PYTHON: {shared.sanitize(py_req)}'])
+            manifest_lines.extend(['', f'REQUIRES_PYTHON: {shared.sanitize_line(py_req)}'])
 
         # Homepage / source URL
         source_url = _extract_source_url_from_meta(meta)
-        hp_display = shared.sanitize(source_url) if source_url else '(not found)'
+        hp_display = shared.sanitize_line(source_url) if source_url else '(not found)'
         manifest_lines.extend(['', f'HOMEPAGE: {hp_display}'])
 
         # Authors
         author = meta.get('Author', '') or meta.get('Author-email', '')
         if isinstance(author, list):
             author = ', '.join(author)
-        manifest_lines.append(f'AUTHOR: {shared.sanitize(str(author)[:200])}')
+        manifest_lines.append(f'AUTHOR: {shared.sanitize_line(str(author)[:200])}')
 
         # License
         manifest_license_raw = _extract_license_from_meta(meta)
         manifest_lines.extend([
             '',
-            f'LICENSE_DECLARED: {shared.sanitize(manifest_license_raw) or "(not declared)"}',
+            f'LICENSE_DECLARED: {shared.sanitize_line(manifest_license_raw) or "(not declared)"}',
         ])
 
         # Summary
@@ -531,7 +531,7 @@ class Hooks(shared.EcosystemHooks):
         if isinstance(summary, list):
             summary = summary[0] if summary else ''
         if summary:
-            manifest_lines.append(f'SUMMARY: {shared.sanitize(str(summary)[:300])}')
+            manifest_lines.append(f'SUMMARY: {shared.sanitize_line(str(summary)[:300])}')
 
         manifest_lines.append('')
         (work / 'manifest-analysis.txt').write_text(
@@ -798,7 +798,7 @@ class Hooks(shared.EcosystemHooks):
                 yanked = info.get('yanked', False)
                 prov_lines.append(f'YANKED: {"YES" if yanked else "NO"}')
                 if yanked:
-                    reason = shared.sanitize(str(info.get('yanked_reason', '')))
+                    reason = shared.sanitize_line(str(info.get('yanked_reason', '')))
                     prov_lines.append(f'YANKED_REASON: {reason}')
                 prov_lines.append('')
 
@@ -807,9 +807,9 @@ class Hooks(shared.EcosystemHooks):
                 maintainer = info.get('maintainer', '') or ''
                 home = info.get('home_page', '') or ''
                 prov_lines.extend([
-                    f'AUTHOR: {shared.sanitize(str(author)[:200])}',
-                    f'MAINTAINER: {shared.sanitize(str(maintainer)[:200])}',
-                    f'HOME_PAGE: {shared.sanitize(str(home)[:300])}',
+                    f'AUTHOR: {shared.sanitize_line(str(author)[:200])}',
+                    f'MAINTAINER: {shared.sanitize_line(str(maintainer)[:200])}',
+                    f'HOME_PAGE: {shared.sanitize_line(str(home)[:300])}',
                     '',
                 ])
 
@@ -828,10 +828,10 @@ class Hooks(shared.EcosystemHooks):
                     for key in ('filename', 'upload_time_iso_8601', 'packagetype',
                                 'python_version', 'requires_python', 'size'):
                         val = u.get(key, '')
-                        ver_info_lines.append(f'  {key}: {shared.sanitize(str(val))[:200]}')
+                        ver_info_lines.append(f'  {key}: {shared.sanitize_line(str(val))[:200]}')
                     sha = u.get('digests', {}).get('sha256', '')
                     if sha:
-                        ver_info_lines.append(f'  sha256: {shared.sanitize(sha)}')
+                        ver_info_lines.append(f'  sha256: {shared.sanitize_line(sha)}')
             except (ValueError, KeyError, TypeError):
                 ver_info_lines.append('VERSION_INFO: (parse error)')
         else:
@@ -885,7 +885,7 @@ class Hooks(shared.EcosystemHooks):
                 if not m_dep:
                     continue
                 dep_name = m_dep.group(1)
-                safe_dep = shared.sanitize(dep_name)
+                safe_dep = shared.sanitize_line(dep_name)
                 norm_dep = _NORM_RE.sub('_',dep_name).lower()
 
                 found = self._dep_in_lockfile(dep_name, norm_dep, lf_text, lockfile_format)
@@ -974,12 +974,12 @@ class Hooks(shared.EcosystemHooks):
                 if all_times:
                     all_times.sort()
                     date_m = re.search(r'\d{4}-\d{2}-\d{2}', all_times[0])
-                    first_seen = shared.sanitize(date_m.group() if date_m else 'unknown')
+                    first_seen = shared.sanitize_line(date_m.group() if date_m else 'unknown')
                 home = pkg_info.get('home_page', '') or pkg_info.get('project_url', '') or ''
                 return {
-                    'downloads': shared.sanitize(str(downloads))[:50],
+                    'downloads': shared.sanitize_line(str(downloads))[:50],
                     'first_seen': first_seen,
-                    'homepage': shared.sanitize(str(home))[:200],
+                    'homepage': shared.sanitize_line(str(home))[:200],
                 }
             except (ValueError, KeyError):
                 pass
@@ -1348,7 +1348,7 @@ class Hooks(shared.EcosystemHooks):
             return shared.finish_reproducible_build(lines, work, 'SKIPPED (no source clone)')
 
         rc_pv, pv_out, _ = shared.run_cmd(['python3', '--version'], timeout=10)
-        python_ver = shared.sanitize(pv_out.strip()) if rc_pv == 0 else 'unknown'
+        python_ver = shared.sanitize_line(pv_out.strip()) if rc_pv == 0 else 'unknown'
         lines.append(f'PYTHON_VERSION: {python_ver}')
 
         # Locate pyproject.toml or setup.py in the clone
@@ -1368,7 +1368,7 @@ class Hooks(shared.EcosystemHooks):
         if not (build_root / 'pyproject.toml').is_file() and not (build_root / 'setup.py').is_file():
             return shared.finish_reproducible_build(lines, work, 'SKIPPED (no pyproject.toml or setup.py in source)')
 
-        lines.append(f'BUILD_ROOT: {shared.sanitize(str(build_root))}')
+        lines.append(f'BUILD_ROOT: {shared.sanitize_line(str(build_root))}')
         build_log_path = work / 'raw-build-output.txt'
 
         rc_pv2, pv2_out, _ = shared.run_cmd(

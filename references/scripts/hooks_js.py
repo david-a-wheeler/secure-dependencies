@@ -300,9 +300,9 @@ class Hooks(shared.EcosystemHooks):
             if bin_field:
                 executables = 'YES'
                 if isinstance(bin_field, dict):
-                    executables_list = shared.sanitize(', '.join(list(bin_field.keys())[:10]))
+                    executables_list = shared.sanitize_line(', '.join(list(bin_field.keys())[:10]))
                 elif isinstance(bin_field, str):
-                    executables_list = shared.sanitize(bin_field)
+                    executables_list = shared.sanitize_line(bin_field)
                 manifest_lines.extend([
                     'HAS_EXECUTABLES: YES',
                     f'EXECUTABLES: {executables_list}',
@@ -316,7 +316,7 @@ class Hooks(shared.EcosystemHooks):
                 has_build_hooks = 'YES'
                 manifest_lines.extend([
                     'HAS_PREINSTALL: YES',
-                    f'  preinstall: {shared.sanitize(preinstall_val[:300])}',
+                    f'  preinstall: {shared.sanitize_line(preinstall_val[:300])}',
                 ])
                 install_script_content.append(('preinstall', preinstall_val))
                 post_install_msg = 'YES'
@@ -324,16 +324,16 @@ class Hooks(shared.EcosystemHooks):
                 has_build_hooks = 'YES'
                 manifest_lines.extend([
                     'HAS_INSTALL_SCRIPT: YES',
-                    f'  install: {shared.sanitize(install_val[:300])}',
+                    f'  install: {shared.sanitize_line(install_val[:300])}',
                 ])
                 install_script_content.append(('install', install_val))
             elif is_native and install_val:
-                manifest_lines.append(f'NATIVE_INSTALL_SCRIPT: {shared.sanitize(install_val[:300])}')
+                manifest_lines.append(f'NATIVE_INSTALL_SCRIPT: {shared.sanitize_line(install_val[:300])}')
             if postinstall_val:
                 has_build_hooks = 'YES'
                 manifest_lines.extend([
                     'HAS_POSTINSTALL: YES',
-                    f'  postinstall: {shared.sanitize(postinstall_val[:300])}',
+                    f'  postinstall: {shared.sanitize_line(postinstall_val[:300])}',
                 ])
                 install_script_content.append(('postinstall', postinstall_val))
                 post_install_msg = 'YES'
@@ -350,35 +350,35 @@ class Hooks(shared.EcosystemHooks):
                 for dep_name, dep_range in list(all_runtime.items())[:50]:
                     line = f'{dep_name}@{dep_range}'
                     runtime_dep_lines.append(line)
-                    manifest_lines.append(f'  {shared.sanitize(line)}')
+                    manifest_lines.append(f'  {shared.sanitize_line(line)}')
                 if len(all_runtime) > 50:
                     manifest_lines.append(f'  ... and {len(all_runtime) - 50} more')
             else:
                 manifest_lines.append('  (none)')
 
             source_url = _extract_source_url(pkg_json)
-            hp_display = shared.sanitize(source_url) if source_url else '(not found)'
+            hp_display = shared.sanitize_line(source_url) if source_url else '(not found)'
             manifest_lines.extend(['', f'HOMEPAGE: {hp_display}'])
 
             author = pkg_json.get('author', '') or ''
             if isinstance(author, dict):
                 author = author.get('name', '') or ''
-            manifest_lines.append(f'AUTHOR: {shared.sanitize(str(author)[:200])}')
+            manifest_lines.append(f'AUTHOR: {shared.sanitize_line(str(author)[:200])}')
 
             manifest_license_raw = _extract_license(pkg_json)
             manifest_lines.extend([
                 '',
-                f'LICENSE_DECLARED: {shared.sanitize(manifest_license_raw) or "(not declared)"}',
+                f'LICENSE_DECLARED: {shared.sanitize_line(manifest_license_raw) or "(not declared)"}',
             ])
 
             desc = str(pkg_json.get('description', '') or '')[:300]
             if desc:
-                manifest_lines.append(f'DESCRIPTION: {shared.sanitize(desc)}')
+                manifest_lines.append(f'DESCRIPTION: {shared.sanitize_line(desc)}')
 
             main_field = pkg_json.get('main', '') or pkg_json.get('exports', '')
             if main_field:
                 main_str = str(main_field) if not isinstance(main_field, dict) else '(exports map)'
-                manifest_lines.append(f'MAIN: {shared.sanitize(main_str[:200])}')
+                manifest_lines.append(f'MAIN: {shared.sanitize_line(main_str[:200])}')
 
             manifest_lines.append('')
 
@@ -393,7 +393,7 @@ class Hooks(shared.EcosystemHooks):
                 ]
                 for hook_name, hook_val in install_script_content:
                     script_lines.append(f'--- {hook_name} ---')
-                    script_lines.append(shared.sanitize(hook_val))
+                    script_lines.append(shared.sanitize_line(hook_val))
                     script_lines.append('')
                 (work / 'install-scripts.txt').write_text(
                     '\n'.join(script_lines), encoding='utf-8'
@@ -573,7 +573,7 @@ class Hooks(shared.EcosystemHooks):
                 if isinstance(maintainers, list):
                     owner_count_int = len(maintainers)
                     maint_names = [
-                        shared.sanitize(
+                        shared.sanitize_line(
                             m.get('name', '') if isinstance(m, dict) else str(m)
                         )[:80]
                         for m in maintainers[:20]
@@ -597,7 +597,7 @@ class Hooks(shared.EcosystemHooks):
                 if deprecated:
                     prov_lines.extend([
                         'DEPRECATED: YES',
-                        f'DEPRECATED_REASON: {shared.sanitize(str(deprecated)[:300])}',
+                        f'DEPRECATED_REASON: {shared.sanitize_line(str(deprecated)[:300])}',
                         '',
                     ])
                 else:
@@ -616,11 +616,11 @@ class Hooks(shared.EcosystemHooks):
                 for key in ('version', '_npmUser', 'gitHead'):
                     val = ver_json.get(key, '')
                     if val:
-                        ver_info_lines.append(f'  {key}: {shared.sanitize(str(val))[:200]}')
+                        ver_info_lines.append(f'  {key}: {shared.sanitize_line(str(val))[:200]}')
                 for dist_key in ('integrity', 'shasum', 'tarball', 'fileCount', 'unpackedSize'):
                     val = dist.get(dist_key, '')
                     if val:
-                        ver_info_lines.append(f'  dist.{dist_key}: {shared.sanitize(str(val))[:200]}')
+                        ver_info_lines.append(f'  dist.{dist_key}: {shared.sanitize_line(str(val))[:200]}')
                 sigs = dist.get('signatures', [])
                 if sigs:
                     ver_info_lines.append(
@@ -682,7 +682,7 @@ class Hooks(shared.EcosystemHooks):
                 dep_name = m.group(1) if m else dep_line.strip()
                 if not dep_name:
                     continue
-                safe_dep = shared.sanitize(dep_name)
+                safe_dep = shared.sanitize_line(dep_name)
                 if self._dep_in_lockfile(dep_name, lf_text, lockfile_format):
                     lockfile_lines.append(f'IN_LOCKFILE: {safe_dep}')
                 else:
@@ -755,8 +755,8 @@ class Hooks(shared.EcosystemHooks):
                         homepage = repo.get('url', '') or ''
                 return {
                     'downloads': f'see npmjs.com/package/{dep_name}',
-                    'first_seen': shared.sanitize(date_m.group() if date_m else 'unknown'),
-                    'homepage': shared.sanitize(str(homepage))[:200],
+                    'first_seen': shared.sanitize_line(date_m.group() if date_m else 'unknown'),
+                    'homepage': shared.sanitize_line(str(homepage))[:200],
                 }
             except (ValueError, KeyError, TypeError):
                 pass
@@ -1058,7 +1058,7 @@ class Hooks(shared.EcosystemHooks):
             return shared.finish_reproducible_build(lines, work, 'SKIPPED (no source clone)')
 
         rc_nv, nv_out, _ = shared.run_cmd(['npm', '--version'], timeout=10)
-        npm_ver = shared.sanitize(nv_out.strip()) if rc_nv == 0 else 'unknown'
+        npm_ver = shared.sanitize_line(nv_out.strip()) if rc_nv == 0 else 'unknown'
         lines.append(f'NPM_VERSION: {npm_ver}')
 
         # Find package.json in the source clone; check one level deep for monorepos
@@ -1072,7 +1072,7 @@ class Hooks(shared.EcosystemHooks):
         if not pkg_json_path.is_file():
             return shared.finish_reproducible_build(lines, work, 'SKIPPED (no package.json in source)')
 
-        lines.append(f'BUILD_ROOT: {shared.sanitize(str(clone_dir))}')
+        lines.append(f'BUILD_ROOT: {shared.sanitize_line(str(clone_dir))}')
         build_log_path = work / 'raw-build-output.txt'
 
         rc_nv2, nv2_out, _ = shared.run_cmd(['node', '--version'], timeout=5)

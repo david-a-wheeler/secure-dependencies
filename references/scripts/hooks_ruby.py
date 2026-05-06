@@ -260,7 +260,7 @@ class Hooks(shared.EcosystemHooks):
             exec_lines = [l for l in gemspec_text.splitlines() if 'executables' in l]
             if exec_lines:
                 executables = 'YES'
-                executables_list = shared.sanitize('; '.join(exec_lines[:3]))
+                executables_list = shared.sanitize_line('; '.join(exec_lines[:3]))
                 manifest_lines.extend(['HAS_EXECUTABLES: YES', f'EXECUTABLES_LINES: {executables_list}'])
             else:
                 manifest_lines.append('HAS_EXECUTABLES: NO')
@@ -280,28 +280,28 @@ class Hooks(shared.EcosystemHooks):
             ]
             if dep_lines:
                 runtime_dep_lines = dep_lines
-                manifest_lines.extend(shared.sanitize(l) for l in dep_lines)
+                manifest_lines.extend(shared.sanitize_line(l) for l in dep_lines)
             else:
                 manifest_lines.append('  (none)')
 
             manifest_lines.extend(['', 'DEV_DEPS:'])
             dev_lines = [l for l in gemspec_text.splitlines() if 'add_development_dependency' in l]
-            (manifest_lines.extend(shared.sanitize(l) for l in dev_lines)
+            (manifest_lines.extend(shared.sanitize_line(l) for l in dev_lines)
              if dev_lines else manifest_lines.append('  (none)'))
 
             hp_match = re.search(
                 r'(?:homepage|source_code_uri|homepage_uri)\s*=\s*["\']([^"\']+)', gemspec_text
             )
-            homepage_val = shared.sanitize(hp_match.group(1)) if hp_match else '(not found)'
+            homepage_val = shared.sanitize_line(hp_match.group(1)) if hp_match else '(not found)'
             manifest_lines.extend(['', f'HOMEPAGE: {homepage_val}'])
 
             auth_match = re.search(r'authors?\s*=\s*([^\n]+)', gemspec_text)
-            authors_val = shared.sanitize(auth_match.group(1)[:200]) if auth_match else '(not found)'
+            authors_val = shared.sanitize_line(auth_match.group(1)[:200]) if auth_match else '(not found)'
             manifest_lines.append(f'AUTHORS: {authors_val}')
 
             gemspec_license_raw = _extract_gemspec_license(gemspec_text)
             manifest_lines.extend(
-                ['', f'LICENSE_DECLARED: {shared.sanitize(gemspec_license_raw) or "(not declared)"}']
+                ['', f'LICENSE_DECLARED: {shared.sanitize_line(gemspec_license_raw) or "(not declared)"}']
             )
 
             manifest_lines.append('')
@@ -345,7 +345,7 @@ class Hooks(shared.EcosystemHooks):
                 for fname, fpath in install_script_files:
                     raw = fpath.read_text(encoding='utf-8', errors='replace')
                     script_lines.append(f'--- {fname} ---')
-                    script_lines.append(shared.sanitize(raw))
+                    script_lines.append(shared.sanitize_line(raw))
                     script_lines.append('')
                 (work / 'install-scripts.txt').write_text(
                     '\n'.join(script_lines), encoding='utf-8'
@@ -560,7 +560,7 @@ class Hooks(shared.EcosystemHooks):
                         mfa_status = 'false'
             except (ValueError, KeyError):
                 pass
-        prov_lines.extend([f'MFA_REQUIRED: {shared.sanitize(mfa_status)}', ''])
+        prov_lines.extend([f'MFA_REQUIRED: {shared.sanitize_line(mfa_status)}', ''])
 
         # Versions endpoint: age, stability, license
         ver_api_data_bytes = shared.http_get(f'{api_base}/api/v1/versions/{pkgname}.json')
@@ -596,7 +596,7 @@ class Hooks(shared.EcosystemHooks):
                     for key in ('number', 'created_at', 'authors', 'sha',
                                 'ruby_version', 'rubygems_version', 'licenses'):
                         val = target_ver_info.get(key, '')
-                        ver_info_lines.append(f'  {key}: {shared.sanitize(str(val))[:200]}')
+                        ver_info_lines.append(f'  {key}: {shared.sanitize_line(str(val))[:200]}')
                     lic_field = target_ver_info.get('licenses')
                     if isinstance(lic_field, list):
                         license_from_registry.extend(str(lc) for lc in lic_field if lc)
@@ -659,7 +659,7 @@ class Hooks(shared.EcosystemHooks):
                 if not m_dep:
                     continue
                 dep_name = m_dep.group(1)
-                safe_dep = shared.sanitize(dep_name)
+                safe_dep = shared.sanitize_line(dep_name)
                 if re.search(rf'^    {re.escape(dep_name)} ', lf_text, re.MULTILINE):
                     lockfile_lines.append(f'IN_LOCKFILE: {safe_dep}')
                 else:
@@ -697,9 +697,9 @@ class Hooks(shared.EcosystemHooks):
                 homepage_v = info.get('homepage_uri', 'unknown')
                 date_m = re.search(r'\d{4}-\d{2}-\d{2}', str(created))
                 return {
-                    'downloads': shared.sanitize(str(downloads))[:50],
-                    'first_seen': shared.sanitize(date_m.group() if date_m else 'unknown'),
-                    'homepage': shared.sanitize(str(homepage_v))[:200],
+                    'downloads': shared.sanitize_line(str(downloads))[:50],
+                    'first_seen': shared.sanitize_line(date_m.group() if date_m else 'unknown'),
+                    'homepage': shared.sanitize_line(str(homepage_v))[:200],
                 }
             except (ValueError, KeyError):
                 pass
@@ -988,14 +988,14 @@ class Hooks(shared.EcosystemHooks):
             return shared.finish_reproducible_build(lines, work, 'SKIPPED (no source clone)')
 
         rc_rv, rv_out, _ = shared.run_cmd(['ruby', '--version'], timeout=10)
-        ruby_ver = shared.sanitize(rv_out.strip()) if rc_rv == 0 else 'unknown'
+        ruby_ver = shared.sanitize_line(rv_out.strip()) if rc_rv == 0 else 'unknown'
         lines.append(f'RUBY_VERSION: {ruby_ver}')
 
         gemspec_candidates = list(clone_dir.rglob('*.gemspec'))
         if not gemspec_candidates:
             return shared.finish_reproducible_build(lines, work, 'SKIPPED (no gemspec in source)')
         source_gemspec = str(gemspec_candidates[0])
-        lines.append(f'SOURCE_GEMSPEC: {shared.sanitize(source_gemspec)}')
+        lines.append(f'SOURCE_GEMSPEC: {shared.sanitize_line(source_gemspec)}')
 
         build_log_path = work / 'raw-build-output.txt'
 

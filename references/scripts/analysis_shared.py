@@ -27,6 +27,7 @@ import hashlib
 import json
 import re
 import shutil
+import unicodedata
 import subprocess
 import urllib.parse
 import urllib.request
@@ -221,7 +222,7 @@ def compute_dep_diff(
     """Compute sorted dep lists and added/removed sets from new and old dep lines.
 
     Returns (dep_lines_new, dep_lines_old, added_deps, removed_deps).
-    All returned lists are sorted. Sanitizes each line with sanitize().
+    All returned lists are sorted. Sanitizes each line with sanitize_line().
 
     >>> new, old, added, removed = compute_dep_diff(['b', 'a'], ['a', 'c'])
     >>> new
@@ -231,8 +232,8 @@ def compute_dep_diff(
     >>> removed
     ['c']
     """
-    dep_lines_new = sorted(sanitize(l) for l in runtime_dep_lines)
-    dep_lines_old = sorted(sanitize(l) for l in old_dep_lines)
+    dep_lines_new = sorted(sanitize_line(l) for l in runtime_dep_lines)
+    dep_lines_old = sorted(sanitize_line(l) for l in old_dep_lines)
     added_deps = sorted(set(dep_lines_new) - set(dep_lines_old))
     removed_deps = sorted(set(dep_lines_old) - set(dep_lines_new))
     return dep_lines_new, dep_lines_old, added_deps, removed_deps
@@ -267,28 +268,84 @@ def levenshtein(a: str, b: str) -> int:
     return prev[-1]
 
 
-def sanitize(text: str) -> str:
-    """Replace C0/C1 control chars with '?'.
+# Sanitization helpers for attacker-controlled text.
+#
+# Allowed Unicode general categories: letters (L*), numbers (N*),
+# punctuation (P*), symbols (S*), space separator (Zs). Tab is always
+# kept. Newline and carriage return are kept only by sanitize(), not
+# sanitize_line(). Everything else is replaced with '?'.
+#
+# This counters several classes of attack: C0/C1 control characters,
+# bidi override characters (U+202A-U+202E, U+2066-U+2069, U+200E-U+200F),
+# zero-width characters (U+200B-U+200D, U+2060, U+FEFF, U+00AD), and
+# other Unicode format characters (category Cf). Bidi overrides and most
+# zero-width characters are in category Cf, so they are stripped as a
+# consequence of the allowlist rather than by explicit enumeration.
+#
+# Limitation: stripping bidi marks causes right-to-left scripts (Arabic,
+# Hebrew) to lose their directional formatting. We accept this tradeoff
+# to reduce the attack surface against the reviewing agent.
+#
+# Limitation: homoglyph attacks (a Cyrillic letter visually identical to
+# a Latin one) are NOT countered here. Homoglyphs are valid Unicode
+# letters and remain in the allowed set. Detecting them requires a
+# separate signal (non-ascii-in-identifiers), not character stripping.
 
-    Strips bidi controls and zero-width chars used for visual spoofing or
-    prompt injection before any text reaches the AI.
+def sanitize(text: str) -> str:
+    """Replace disallowed Unicode with '?'; preserve tab, newline, and CR.
+
+    Use for multi-line attacker-controlled content (scripts, long blobs).
+    For single-line fields use sanitize_line().
 
     >>> sanitize('hello')
     'hello'
     >>> sanitize('hel\\x01lo')
     'hel?lo'
     >>> sanitize('tab\\there')
-    'tab?here'
+    'tab\\there'
     >>> sanitize('del\\x7fchar')
     'del?char'
+    >>> sanitize('\\u202ereverse')
+    '?reverse'
     """
     result = []
     for ch in text:
-        cp = ord(ch)
-        if (0x00 <= cp <= 0x1F) or (0x7F <= cp <= 0x9F):
-            result.append('?')
-        else:
+        if ch in '\t\n\r':
             result.append(ch)
+        else:
+            cat = unicodedata.category(ch)
+            result.append(ch if (cat[0] in ('L', 'N', 'P', 'S') or cat == 'Zs') else '?')
+    return ''.join(result)
+
+
+def sanitize_line(text: str) -> str:
+    """Replace disallowed Unicode with '?'; collapse newline/CR runs to a space.
+
+    Use for single-line fields (author, version, URL, license, etc.) where
+    an embedded newline would break structured output. Consecutive \\r and \\n
+    characters (including Windows \\r\\n) are collapsed to a single space so
+    the field remains readable when legitimate data contains a stray newline.
+    Tab is preserved. For multi-line content use sanitize().
+
+    >>> sanitize_line('hello')
+    'hello'
+    >>> sanitize_line('hel\\x01lo')
+    'hel?lo'
+    >>> sanitize_line('line\\nbreak')
+    'line break'
+    >>> sanitize_line('a\\r\\nb')
+    'a b'
+    >>> sanitize_line('\\u202ereverse')
+    '?reverse'
+    """
+    text = re.sub(r'[\r\n]+', ' ', text)
+    result = []
+    for ch in text:
+        if ch == '\t':
+            result.append(ch)
+        else:
+            cat = unicodedata.category(ch)
+            result.append(ch if (cat[0] in ('L', 'N', 'P', 'S') or cat == 'Zs') else '?')
     return ''.join(result)
 
 
@@ -372,7 +429,7 @@ def blind_scan(
 
     if rc > 1:
         # grep error (rc==2+): pattern failure or other error (not a match result)
-        err_msg = sanitize(stderr.strip())
+        err_msg = sanitize_line(stderr.strip())
         raw_file.write_text(f'GREP_ERROR: {stderr}', encoding='utf-8', errors='replace')
         summary_file.write_text(
             f'label={label}\nmatch_count=0\nGREP_ERROR: {err_msg}\n', encoding='utf-8'
@@ -391,7 +448,7 @@ def blind_scan(
                 fname = line.split(':', 1)[0]
                 if fname not in seen:
                     seen.add(fname)
-                    summary_lines.append(sanitize(fname))
+                    summary_lines.append(sanitize_line(fname))
     summary_file.write_text('\n'.join(summary_lines) + '\n', encoding='utf-8')
     return count
 
@@ -529,7 +586,7 @@ def clone_source_repo(
                                  to any specific commit and is HIGH RISK. May be
                                  benign (unpinned build tooling) but is suspicious.
     """
-    (work / 'source-url.txt').write_text(sanitize(source_url) + '\n', encoding='utf-8')
+    (work / 'source-url.txt').write_text(sanitize_line(source_url) + '\n', encoding='utf-8')
 
     clone_lines: list[str] = []
     clone_ok = False
@@ -569,7 +626,7 @@ def clone_source_repo(
     if not tag:
         # No version tag found. Attempt to locate the release commit by scanning
         # recent history for a commit message that mentions the version string.
-        clone_lines.append(f'SOURCE_URL: {sanitize(source_url)}')
+        clone_lines.append(f'SOURCE_URL: {sanitize_line(source_url)}')
         clone_lines.append('NO_TAG: no matching version tag found in repository')
         source_dir = work / 'source'
         guessed_sha = ''
@@ -627,7 +684,7 @@ def clone_source_repo(
                 sha, date, subject = commits[j]
                 marker = '>>>' if j == guessed_idx else '   '
                 nearby.append(
-                    f'  {marker} {sha[:12]}  {date[:19]}  {sanitize(subject)}'
+                    f'  {marker} {sha[:12]}  {date[:19]}  {sanitize_line(subject)}'
                 )
 
             clone_lines.extend([
@@ -654,13 +711,13 @@ def clone_source_repo(
                 clone_lines.append('RECENT_COMMITS (for manual inspection):')
                 for sha, date, subject in commits[:5]:
                     clone_lines.append(
-                        f'  {sha[:12]}  {date[:19]}  {sanitize(subject)}'
+                        f'  {sha[:12]}  {date[:19]}  {sanitize_line(subject)}'
                     )
     else:
         version_tag = tag
         clone_lines.extend([
-            f'VERSION_TAG: {sanitize(tag)}',
-            f'SOURCE_URL: {sanitize(source_url)}',
+            f'VERSION_TAG: {sanitize_line(tag)}',
+            f'SOURCE_URL: {sanitize_line(source_url)}',
         ])
         source_dir = work / 'source'
         if source_dir.exists() and any(source_dir.iterdir()):
@@ -743,13 +800,13 @@ def lookup_openssf_badge(
 
     badge_lines = [
         f'=== OpenSSF Best Practices Badge: {pkgname} ===',
-        f'SOURCE_URL_QUERIED: {sanitize(source_url)}',
+        f'SOURCE_URL_QUERIED: {sanitize_line(source_url)}',
         f'BADGE_FOUND: {"yes" if result["found"] else "no"}',
     ]
     if result['found']:
         badge_lines.extend([
-            f'BADGE_PROJECT_ID: {sanitize(str(result["id"]))}',
-            f'BADGE_LEVEL (metal): {sanitize(str(result["level"]))}',
+            f'BADGE_PROJECT_ID: {sanitize_line(str(result["id"]))}',
+            f'BADGE_LEVEL (metal): {sanitize_line(str(result["level"]))}',
         ])
         if result['tiered']:
             badge_lines.append(
@@ -1039,7 +1096,7 @@ def compare_pkg_vs_source(
             '(files in distributed package but absent from source repo)',
             'Expected extras: METADATA, RECORD, PKG-INFO, .gemspec, Gemfile.lock, dist-info/',
             '',
-        ] + [sanitize(p) for p in extra]) + '\n',
+        ] + [sanitize_line(p) for p in extra]) + '\n',
         encoding='utf-8',
     )
     return len(extra)
@@ -1099,7 +1156,7 @@ def detect_binary_files(unpacked_dir: Path, work: Path) -> int:
     for fp in sorted(unpacked_dir.rglob('*')):
         if not fp.is_file() or fp.is_symlink():
             continue
-        rel = sanitize(str(fp.relative_to(unpacked_dir)))
+        rel = sanitize_line(str(fp.relative_to(unpacked_dir)))
         fmt = ''
 
         # Check by file extension first (catches zip-container formats like .jar)
@@ -1184,7 +1241,7 @@ def compute_diff(
             # Last token is the new path; second-to-last is the old path
             old_path = parts[-2] if len(parts) >= 2 else ''
             rel = old_path.removeprefix(old_prefix) if old_path.startswith(old_prefix) else old_path
-            short_names.append(sanitize(rel))
+            short_names.append(sanitize_line(rel))
         elif line.startswith('Only in '):
             # "Only in /path/dir: filename"
             rest = line[len('Only in '):]
@@ -1193,15 +1250,15 @@ def compute_diff(
                 dir_part = dir_part.rstrip('/')
                 full = dir_part + '/' + fname
                 if full.startswith(old_prefix):
-                    short_names.append(sanitize(full.removeprefix(old_prefix)) + ' (removed)')
+                    short_names.append(sanitize_line(full.removeprefix(old_prefix)) + ' (removed)')
                 elif full.startswith(new_prefix):
-                    short_names.append(sanitize(full.removeprefix(new_prefix)) + ' (added)')
+                    short_names.append(sanitize_line(full.removeprefix(new_prefix)) + ' (added)')
                 else:
-                    short_names.append(sanitize(full))
+                    short_names.append(sanitize_line(full))
             else:
-                short_names.append(sanitize(line))
+                short_names.append(sanitize_line(line))
         else:
-            short_names.append(sanitize(line))
+            short_names.append(sanitize_line(line))
 
     changed_files_text = '\n'.join(short_names)
     (work / 'diff-filenames.txt').write_text(
@@ -1258,7 +1315,7 @@ def git_diff_between_tags(
 
     if not old_tag:
         (work / 'diff-filenames.txt').write_text(
-            f'DIFF: N/A (old version tag for {sanitize(old_ver)} not found in source repo)\n',
+            f'DIFF: N/A (old version tag for {sanitize_line(old_ver)} not found in source repo)\n',
             encoding='utf-8',
         )
         (work / 'raw-diff-full.txt').write_text('', encoding='utf-8')
@@ -1272,7 +1329,7 @@ def git_diff_between_tags(
     )
     if rc_fetch != 0:
         (work / 'diff-filenames.txt').write_text(
-            f'DIFF: N/A (could not fetch old tag {sanitize(old_tag)} into clone)\n',
+            f'DIFF: N/A (could not fetch old tag {sanitize_line(old_tag)} into clone)\n',
             encoding='utf-8',
         )
         (work / 'raw-diff-full.txt').write_text('', encoding='utf-8')
@@ -1296,7 +1353,7 @@ def git_diff_between_tags(
         for line in names_out.splitlines():
             parts = line.split('\t', 1)
             if len(parts) == 2:
-                status, fname = parts[0].strip(), sanitize(parts[1].strip())
+                status, fname = parts[0].strip(), sanitize_line(parts[1].strip())
                 if status == 'D':
                     short_names.append(f'{fname} (removed)')
                 elif status == 'A':
@@ -1308,7 +1365,7 @@ def git_diff_between_tags(
     (work / 'diff-filenames.txt').write_text(
         '\n'.join([
             f'DIFF_TOTAL_LINES: {diff_lines}',
-            f'DIFF_SOURCE: git diff {sanitize(old_tag)}..HEAD (source repo; old gem unavailable)',
+            f'DIFF_SOURCE: git diff {sanitize_line(old_tag)}..HEAD (source repo; old gem unavailable)',
             '',
             'Changed/added/removed files (relative paths):',
         ] + short_names) + '\n',
@@ -1615,7 +1672,7 @@ def deep_source_comparison(
     primary_extra = sorted(primary_pkg - primary_src)
     lines.append(f'{primary_label} source files in package but NOT in source (highest concern):')
     for p in primary_extra[:30]:
-        lines.append(sanitize(p))
+        lines.append(sanitize_line(p))
     lines.append('(end)')
 
     # Native extension files in package but NOT in source
@@ -1626,7 +1683,7 @@ def deep_source_comparison(
         native_extra = sorted(native_pkg - native_src)
         lines.append('C/C++ extension files in package but NOT in source:')
         for p in native_extra[:20]:
-            lines.append(sanitize(p))
+            lines.append(sanitize_line(p))
         lines.append('(end)')
 
     # Binary files vs source counterpart
@@ -1644,7 +1701,7 @@ def deep_source_comparison(
         rel = './' + str(pkg_file.relative_to(dist_unpacked))
         src_counterpart = clone_dir / rel.lstrip('./')
         tag = '[source present]' if src_counterpart.is_file() else '[NO SOURCE COUNTERPART]'
-        lines.append(sanitize(fout.rstrip()) + f' {tag}')
+        lines.append(sanitize_line(fout.rstrip()) + f' {tag}')
         count += 1
         if count >= 20:
             break
@@ -1691,8 +1748,8 @@ def compare_repro_sha256(
     if pkg_hash_file.is_file():
         first_line = pkg_hash_file.read_text(encoding='utf-8').splitlines()[0]
         dist_sha = first_line.split()[0] if first_line.split() else ''
-    lines.append(f'BUILT_SHA256: {sanitize(built_sha)}')
-    lines.append(f'DISTRIBUTED_SHA256: {sanitize(dist_sha or "UNKNOWN")}')
+    lines.append(f'BUILT_SHA256: {sanitize_line(built_sha)}')
+    lines.append(f'DISTRIBUTED_SHA256: {sanitize_line(dist_sha or "UNKNOWN")}')
     if built_sha and built_sha == dist_sha:
         return finish_reproducible_build(lines, work, 'EXACTLY REPRODUCIBLE (sha256 match)')
     return None
@@ -1715,7 +1772,7 @@ def classify_repro_diffs(
     metadata_diffs = 0
     for line in diff_out.splitlines():
         if line.startswith('Only in') or line.startswith('diff '):
-            differing.append(sanitize(line))
+            differing.append(sanitize_line(line))
         if re_code.search(line):
             code_diffs += 1
         if re_meta.search(line):
@@ -1754,7 +1811,7 @@ def write_transitive_deps(
         'NEW_PACKAGES (not in current lockfile):',
     ]
     if new_deps:
-        trans_lines.extend(f'  {sanitize(d)}' for d in new_deps)
+        trans_lines.extend(f'  {sanitize_line(d)}' for d in new_deps)
     else:
         trans_lines.append('  none')
     (work / 'transitive-deps.txt').write_text('\n'.join(trans_lines) + '\n', encoding='utf-8')
