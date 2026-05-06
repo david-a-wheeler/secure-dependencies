@@ -72,6 +72,8 @@ Downloading and unpacking a package does not execute its code. Installing does.
 Keep these steps strictly separate. During analysis,
 ensure external package code only ever runs inside
 a secure sandbox (such as bwrap, firejail, Docker, or podman).
+bwrap and container (Docker/Podman) sandboxes provide stronger confinement
+than firejail; prefer them when available.
 
 ---
 

@@ -1682,10 +1682,16 @@ def run_sandboxed(
         return rc, out + err
 
     if sandbox == 'firejail':
+        # firejail is materially weaker than bwrap or a container: $HOME and most
+        # of the filesystem remain readable/writable.  --private would isolate $HOME
+        # but breaks gem/npm/python builds that read ~/.gem, ~/.npm, ~/.local/, etc.
+        # --private-tmp is safe: builds that use /tmp work fine with an isolated /tmp.
+        # Prefer bwrap or docker/podman for stronger confinement.
         cwd = firejail_cwd or src_dir
         args = [
             'firejail', '--quiet', '--net=none',
             f'--read-only={src_dir}',
+            '--private-tmp',
         ]
         if cmd is not None:
             args += [a.replace('{src}', str(src_dir)).replace('{out}', str(out_dir)) for a in cmd]
