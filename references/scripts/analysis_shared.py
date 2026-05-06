@@ -470,6 +470,8 @@ def blind_scan(
 
 def http_get(url: str, timeout: int = 15) -> bytes | None:
     """Fetch a URL; return bytes or None on error."""
+    if not url.startswith('https://'):
+        return None
     try:
         with urllib.request.urlopen(url, timeout=timeout) as resp:
             return resp.read()
@@ -479,6 +481,8 @@ def http_get(url: str, timeout: int = 15) -> bytes | None:
 
 def http_post(url: str, data: bytes, content_type: str = 'application/json', timeout: int = 15) -> bytes | None:
     """POST data to url; return response bytes or None on error."""
+    if not url.startswith('https://'):
+        return None
     req = urllib.request.Request(url, data=data, headers={'Content-Type': content_type})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -1988,9 +1992,11 @@ def lookup_ecosystems_package(registry_key: str, pkgname: str,
     if email:
         headers['From'] = email
 
+    if not url.startswith('https://'):
+        return {}
     try:
         req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req, timeout=15) as resp:  # noqa: S310
+        with urllib.request.urlopen(req, timeout=15) as resp:
             raw = resp.read()
         data = json.loads(raw.decode('utf-8', errors='replace'))
     except urllib.error.HTTPError as e:
