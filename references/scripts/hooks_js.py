@@ -27,6 +27,12 @@ import analysis_shared as shared
 _RE_REPRO_CODE = re.compile(r'^diff.*\.(js|mjs|cjs|ts|jsx|tsx)\b')
 _RE_REPRO_META = re.compile(r'^diff.*(package\.json|package-lock\.json|\.npmignore|\.gitignore)')
 
+# npm package name allowlist: letters, digits, '.', '-', '_', '/', '@'.
+# Scoped names start with '@' (e.g. @scope/name). Max 214 chars (npm spec).
+# Rejects names containing ';', '$', backticks, spaces, '..', or other
+# shell-special characters before they reach LLM-visible command strings.
+_NPM_NAME_RE = re.compile(r'^[@A-Za-z0-9][A-Za-z0-9._/-]{0,213}$')
+
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -680,7 +686,7 @@ class Hooks(shared.EcosystemHooks):
                 # Extract name from "pkgname@^version" or "@scope/name@version"
                 m = re.match(r'^(@[^@]+|[^@]+)@', dep_line.strip())
                 dep_name = m.group(1) if m else dep_line.strip()
-                if not dep_name:
+                if not dep_name or not _NPM_NAME_RE.match(dep_name):
                     continue
                 safe_dep = shared.sanitize_line(dep_name)
                 if self._dep_in_lockfile(dep_name, lf_text, lockfile_format):
@@ -792,6 +798,9 @@ class Hooks(shared.EcosystemHooks):
                 all_deps = dict(ver_json.get('dependencies', {}) or {})
                 all_deps.update(ver_json.get('optionalDependencies', {}) or {})
                 for dep_name, dep_range in all_deps.items():
+                    if not isinstance(dep_name, str) or not _NPM_NAME_RE.match(dep_name):
+                        raw_lines.append(f'REJECTED: {shared.sanitize_line(str(dep_name)[:200])}')
+                        continue
                     deps.append(dep_name)
                     raw_lines.append(f'{dep_name}@{dep_range}')
             except (ValueError, KeyError, TypeError):

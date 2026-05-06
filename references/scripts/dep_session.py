@@ -60,6 +60,12 @@ DEPTH_THRESHOLD = 10
 VALID_RECOMMENDATIONS = frozenset({
     'APPROVE', 'APPROVE_WITH_CAUTION', 'REVIEW_MANUALLY', 'DO_NOT_INSTALL',
 })
+
+# Defense-in-depth: reject any queued dep name that contains shell-special
+# characters, regardless of which ecosystem hook produced it. This catches
+# malformed names that slip past ecosystem-level validation (e.g. a hook
+# bug or a new ecosystem added later).
+_DEP_NAME_RE = re.compile(r'^[@A-Za-z0-9][A-Za-z0-9._/-]{0,213}$')
 VALID_RISKS = frozenset({'LOW', 'MEDIUM', 'HIGH', 'CRITICAL'})
 
 # Shell command to install approved packages, per ecosystem.
@@ -581,6 +587,9 @@ def cmd_complete(args: argparse.Namespace) -> None:
     queued_names = {q['name'].lower() for q in session['queue']}
 
     for dep_name in new_dep_names:
+        if not isinstance(dep_name, str) or not _DEP_NAME_RE.match(dep_name):
+            print(f'Warning: skipping malformed dep name: {shared.sanitize_line(str(dep_name)[:200])}', file=sys.stderr)
+            continue
         dep_lower = dep_name.lower()
         if dep_lower in baseline or dep_lower in analyzed_names or dep_lower in queued_names:
             continue  # already known; cycle guard
