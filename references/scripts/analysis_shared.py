@@ -270,17 +270,33 @@ def levenshtein(a: str, b: str) -> int:
 
 # Sanitization helpers for attacker-controlled text.
 #
+# Our sanitizers only allow specific character classes & replace the rest.
 # Allowed Unicode general categories: letters (L*), numbers (N*),
 # punctuation (P*), symbols (S*), space separator (Zs). Tab is always
 # kept. Newline and carriage return are kept only by sanitize(), not
-# sanitize_line(). Everything else is replaced with '?'.
+# sanitize_line() (where [\n\r]+ become a space).
+# Everything else is replaced with '?'.
 #
-# This counters several classes of attack: C0/C1 control characters,
+# Implementation: sanitize() uses a pre-compiled regex to identify
+# characters outside the printable-ASCII + tab + LF + CR fast path; only
+# those characters are checked via unicodedata.category(). Real-world
+# package metadata is mostly ASCII, so the callback is seldom invoked.
+# We have to do it this way, instead of a simple pre-compiled regex in all
+# cases, because Python's built-in regex doesn't support Unicode
+# character classes. We're trying to limit external dependencies, so
+# we instead work around this limitation of the built-in regex system.
+#
+# sanitize_line() pre-collapses [\r\n]+ runs to a single space, then
+# delegates to sanitize().
+#
+# This approach counters several classes of attack: C0/C1 control characters
+# (including ESC escapes like hidden terminal escapes),
 # bidi override characters (U+202A-U+202E, U+2066-U+2069, U+200E-U+200F),
 # zero-width characters (U+200B-U+200D, U+2060, U+FEFF, U+00AD), and
 # other Unicode format characters (category Cf). Bidi overrides and most
 # zero-width characters are in category Cf, so they are stripped as a
-# consequence of the allowlist rather than by explicit enumeration.
+# consequence of not being in the allowlist
+# rather than by explicit enumeration of disallowed characters.
 #
 # Limitation: stripping bidi marks causes right-to-left scripts (Arabic,
 # Hebrew) to lose their directional formatting. We accept this tradeoff
@@ -290,6 +306,20 @@ def levenshtein(a: str, b: str) -> int:
 # a Latin one) are NOT countered here. Homoglyphs are valid Unicode
 # letters and remain in the allowed set. Detecting them requires a
 # separate signal (non-ascii-in-identifiers), not character stripping.
+# This also allows really weird accents, but that would simply
+# be reporting the data as provided.
+
+# Matches chars outside the printable-ASCII + tab + LF + CR fast path.
+_SANITIZE_RE = re.compile(r'[^\x09\x0a\x0d\x20-\x7e]')
+_SANITIZE_NEWLINE_RE = re.compile(r'[\r\n]+')
+
+
+def _sanitize_char(m: re.Match) -> str:
+    """Return char if it's allowed, else return ?"""
+    ch = m.group(0)
+    cat = unicodedata.category(ch)
+    return ch if (cat[0] in ('L', 'N', 'P', 'S') or cat == 'Zs') else '?'
+
 
 def sanitize(text: str) -> str:
     """Replace disallowed Unicode with '?'; preserve tab, newline, and CR.
@@ -308,18 +338,11 @@ def sanitize(text: str) -> str:
     >>> sanitize('\\u202ereverse')
     '?reverse'
     """
-    result = []
-    for ch in text:
-        if ch in '\t\n\r':
-            result.append(ch)
-        else:
-            cat = unicodedata.category(ch)
-            result.append(ch if (cat[0] in ('L', 'N', 'P', 'S') or cat == 'Zs') else '?')
-    return ''.join(result)
+    return _SANITIZE_RE.sub(_sanitize_char, text)
 
 
 def sanitize_line(text: str) -> str:
-    """Replace disallowed Unicode with '?'; collapse newline/CR runs to a space.
+    """Collapse newline/CR runs to a space, then apply sanitize().
 
     Use for single-line fields (author, version, URL, license, etc.) where
     an embedded newline would break structured output. Consecutive \\r and \\n
@@ -338,15 +361,7 @@ def sanitize_line(text: str) -> str:
     >>> sanitize_line('\\u202ereverse')
     '?reverse'
     """
-    text = re.sub(r'[\r\n]+', ' ', text)
-    result = []
-    for ch in text:
-        if ch == '\t':
-            result.append(ch)
-        else:
-            cat = unicodedata.category(ch)
-            result.append(ch if (cat[0] in ('L', 'N', 'P', 'S') or cat == 'Zs') else '?')
-    return ''.join(result)
+    return sanitize(_SANITIZE_NEWLINE_RE.sub(' ', text))
 
 
 def run_cmd(
