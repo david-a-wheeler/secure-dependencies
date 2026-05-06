@@ -27,6 +27,8 @@ import hashlib
 import json
 import re
 import shutil
+import sys
+import tarfile
 import unicodedata
 import subprocess
 import urllib.parse
@@ -417,6 +419,22 @@ def count_source_lines(unpacked_dir: Path) -> int:
         except OSError:
             continue
     return total
+
+
+def tarfile_extractall_safe(
+    tf: tarfile.TarFile, target_dir: Path, members: list[tarfile.TarInfo],
+) -> None:
+    """Extract tar members, blocking symlink/hardlink attacks.
+
+    On Python 3.12+, delegates to the built-in filter='data' policy.
+    On older Python, drops any member that is not a plain file or directory,
+    or that has a non-empty linkname (symlink or hardlink target).
+    """
+    if sys.version_info >= (3, 12):
+        tf.extractall(str(target_dir), members=members, filter='data')
+    else:
+        safe = [m for m in members if (m.isfile() or m.isdir()) and not m.linkname]
+        tf.extractall(str(target_dir), members=safe)
 
 
 def blind_scan(

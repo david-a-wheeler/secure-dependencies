@@ -175,6 +175,7 @@ def _unpack_pkg(
     try:
         if pkg_file.suffix == '.whl' or name.endswith('.zip'):
             with zipfile.ZipFile(str(pkg_file), 'r') as zf:
+                # zipfile strips leading '/' and '..' itself, so no member filter needed.
                 zf.extractall(str(target_dir))
             return 'wheel' if pkg_file.suffix == '.whl' else 'sdist-zip'
         if name.endswith(('.tar.gz', '.tgz', '.tar.bz2', '.tar.xz')):
@@ -189,7 +190,7 @@ def _unpack_pkg(
                         if '..' in Path(m.name).parts:
                             continue
                         members.append(m)
-                tf.extractall(str(target_dir), members=members)
+                shared.tarfile_extractall_safe(tf, target_dir, members)
             return 'sdist'
     except Exception as exc:
         failures.append(f'{failure_key}: {exc}')

@@ -111,7 +111,7 @@ def _unpack_tgz(tgz_file: Path, target_dir: Path, failures: list[str], key: str)
                 if not m.name or '..' in Path(m.name).parts:
                     continue
                 members.append(m)
-            tf.extractall(str(target_dir), members=members)
+            shared.tarfile_extractall_safe(tf, target_dir, members)
         return True
     except Exception as exc:
         failures.append(f'{key}: {exc}')
