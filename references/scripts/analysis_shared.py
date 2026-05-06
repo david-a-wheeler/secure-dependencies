@@ -548,7 +548,10 @@ ADVERSARIAL_PATTERNS: list[tuple[str, str]] = [
     ('zero-width-chars',
      '[\u200b-\u200d\ufeff\u00ad\u2060]'),
     ('non-ascii-in-identifiers',
-     r'[a-zA-Z0-9_][\x80-\xFF]+[a-zA-Z0-9_]'),
+     # [^\x00-\x7F] covers all non-ASCII code points.  [\x80-\xFF] looks equivalent
+     # but PCRE in UTF-8 mode (grep -P with a UTF-8 locale) treats it as the Unicode
+     # range U+0080-U+00FF, leaving Cyrillic (U+0400+) and Greek (U+0370+) undetected.
+     r'[a-zA-Z0-9_][^\x00-\x7F]+[a-zA-Z0-9_]'),
     ('prompt-injection',
      r'(?i)(?:disregard\s+(?:prior|previous|earlier|above)\s+(?:instructions?|rules?|constraints?)'
      r'|you\s+(?:must|should|shall|are\s+required\s+to)\s+(?:approve|skip|allow|install|bypass|ignore)'
