@@ -98,29 +98,29 @@ This skill operates in one of three modes determined by what the user asks for:
 
 1. **Which mode you've detected** from their request (UPDATE, NEW, or CURRENT)
    and what that means.
-2. **What Phase 1 will do** — list the specific read-only steps you are about
+2. **What Phase 1 will do**: list the specific read-only steps you are about
    to run and why each one is needed.
-3. **What will NOT happen yet** — no packages will be installed or modified
+3. **What will NOT happen yet**: no packages will be installed or modified
    until the user explicitly confirms in Phase 3.
 
 Example for CURRENT mode (user asked "do we have any dependencies we should update?"):
 
 > "This looks like a **dependency audit** (CURRENT mode). Here's what I'll do
-> in Phase 1 — nothing will be installed or modified:
+> in Phase 1; nothing will be installed or modified:
 >
-> 1. **Environment check** — verify which analysis tools are available (read-only).
-> 2. **Ecosystem detection** — confirm this is a Ruby/Python/JavaScript project.
-> 3. **Vulnerability audit** — run `bundle audit` / `bundle outdated` to find
+> 1. **Environment check**: verify which analysis tools are available (read-only).
+> 2. **Ecosystem detection**: confirm this is a Ruby/Python/JavaScript project.
+> 3. **Vulnerability audit**: run `bundle audit` / `bundle outdated` to find
 >    gems with known CVEs and gems that are out of date (read-only, no network
 >    installs).
-> 4. **Health scan** — query the package registry for license, last-release
+> 4. **Health scan**: query the package registry for license, last-release
 >    date, and health signals for all installed packages (network queries only,
 >    no installs).
 >
 > After Phase 1 I'll show you the triage table and ask which packages to
 > deep-dive. Shall I proceed?"
 
-Tailor the explanation to the actual mode and ecosystem — do not copy-paste
+Tailor the explanation to the actual mode and ecosystem; do not copy-paste
 the example verbatim. Wait for the user to confirm before running anything.
 
 ---

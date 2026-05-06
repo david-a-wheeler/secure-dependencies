@@ -1,11 +1,11 @@
 Here is a demo of this skill in action...
 
 ● This is a dependency audit (CURRENT mode) for a Ruby project. Here's what I'll
-   run — nothing will be installed or modified:
+   run; nothing will be installed or modified:
 
-  1. Vulnerability audit — bundle audit + bundle outdated to find gems with
+  1. Vulnerability audit: bundle audit + bundle outdated to find gems with
   known CVEs and outdated versions
-  2. Health scan — query RubyGems.org for license and last-release signals
+  2. Health scan: query RubyGems.org for license and last-release signals
   across all installed gems
 
   You've confirmed to proceed, so starting now.
@@ -19,7 +19,7 @@ Here is a demo of this skill in action...
      … +9 lines (ctrl+o to expand)
   ⎿  (timeout 2m)
 
-● Good — no known CVEs. Two gems are outdated: multi_xml (0.9.0 → 0.9.1) and
+● Good; no known CVEs. Two gems are outdated: multi_xml (0.9.0 → 0.9.1) and
   rb_sys (0.9.127 → 0.9.128). Now running the health scan across all installed
   gems:
 
@@ -41,7 +41,7 @@ Here is a demo of this skill in action...
 ● Background command "Scan all installed gems for license and staleness signals"
  completed (exit code 0)
 
-● The output is large — let me pull just the flagged packages section:
+● The output is large; let me pull just the flagged packages section:
 
   Read 1 file, searched memories (ctrl+o to expand)
 
@@ -61,7 +61,7 @@ Here is a demo of this skill in action...
   LICENSE_NON_OSI (false positives, mostly): Many Ruby stdlib gems (base64,
   bigdecimal, cgi, csv, date, erb, etc.) report "Ruby, BSD-2-Clause" as their
   license. The scanner flags this because the combined string doesn't match a
-  single SPDX identifier — but both Ruby and BSD-2-Clause are OSI-approved.
+  single SPDX identifier; but both Ruby and BSD-2-Clause are OSI-approved.
   These aren't real concerns.
 
   STALE (genuinely old, worth noting): Several non-stdlib gems haven't had a
@@ -78,7 +78,7 @@ Here is a demo of this skill in action...
   ├────────────────────────┼───────────┼────────────────────────────────────┤
   │ bootstrap-social-rails │ 10 years  │ Probably intentionally frozen      │
   ├────────────────────────┼───────────┼────────────────────────────────────┤
-  │ sassc / sassc-rails    │ 6–7 years │ Upstream is in maintenance-only    │
+  │ sassc / sassc-rails    │ 6-7 years │ Upstream is in maintenance-only    │
   │                        │           │ mode                               │
   ├────────────────────────┼───────────┼────────────────────────────────────┤
   │ capybara               │ 2.3 years │ Test dep                           │
@@ -218,7 +218,7 @@ Here is a demo of this skill in action...
    56   executables: NO
    57   post_install_message: NO
    58   build_hooks: NO
-   59   new_runtime_deps: bigdecimal (>= 3.1, < 5) — already present in
+   59   new_runtime_deps: bigdecimal (>= 3.1, < 5); already present in
  Gemfile.l
       ock as 4.1.2
    60
@@ -344,7 +344,7 @@ Both packages assessed as LOW risk / APPROVE. The assessment for rb_sys has
   Please review it with:
 
   less temp/dep-review/rb_sys-0.9.128/assessment.txt
-  Both analyses are complete — no blocking findings. When you've reviewed the
+  Both analyses are complete; no blocking findings. When you've reviewed the
   assessments and are ready to install, say so and I'll run bundle update
   multi_xml rb_sys and verify tests pass.
 
