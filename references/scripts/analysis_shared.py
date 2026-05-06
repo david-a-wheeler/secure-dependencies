@@ -618,8 +618,13 @@ def clone_source_repo(
         (work / 'clone-status.txt').write_text('\n'.join(clone_lines) + '\n', encoding='utf-8')
         return False, '', False, False
 
+    if not source_url.startswith('https://'):
+        clone_lines.append('CLONE_STATUS: SKIPPED (non-https source URL)')
+        (work / 'clone-status.txt').write_text('\n'.join(clone_lines) + '\n', encoding='utf-8')
+        return False, '', False, False
+
     # Find a matching version tag via ls-remote (no clone needed)
-    rc_ls, ls_out, _ = run_cmd(['git', 'ls-remote', '--tags', source_url], timeout=30)
+    rc_ls, ls_out, _ = run_cmd(['git', 'ls-remote', '--tags', '--', source_url], timeout=30)
     tag = ''
     if rc_ls == 0:
         escaped_ver = re.escape(new_ver)
@@ -656,7 +661,7 @@ def clone_source_repo(
         else:
             source_dir.mkdir(parents=True, exist_ok=True)
             rc_shallow, _, clone_err_text = run_cmd(
-                ['git', 'clone', '--depth', '20', source_url, str(source_dir)],
+                ['git', 'clone', '--depth', '20', '--', source_url, str(source_dir)],
                 timeout=120,
             )
             if rc_shallow != 0:
@@ -748,7 +753,7 @@ def clone_source_repo(
             clone_ok = True
         else:
             rc_clone, _, clone_err = run_cmd(
-                ['git', 'clone', '--depth', '1', '--branch', tag, source_url, str(source_dir)],
+                ['git', 'clone', '--depth', '1', '--branch', tag, '--', source_url, str(source_dir)],
                 timeout=120,
             )
             (work / 'raw-git-clone-output.txt').write_text(
@@ -1310,7 +1315,7 @@ def git_diff_between_tags(
         return 0, ''
 
     # Find old version tag with the same matching logic as clone_source_repo.
-    rc_ls, ls_out, _ = run_cmd(['git', 'ls-remote', '--tags', source_url], timeout=30)
+    rc_ls, ls_out, _ = run_cmd(['git', 'ls-remote', '--tags', '--', source_url], timeout=30)
     old_tag = ''
     if rc_ls == 0:
         escaped_old = re.escape(old_ver)
