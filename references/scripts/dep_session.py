@@ -610,16 +610,7 @@ def cmd_complete(args: argparse.Namespace) -> None:
 
     save_session(session_path, session)
 
-    # Print assessment.txt so it appears in the Bash tool output for the
-    # user to read.  The orchestrating agent must NOT process this section;
-    # it is for the human's eyes only.  See NEXT_ACTION below for machine state.
-    assessment = work / 'assessment.txt'
-    if assessment.is_file():
-        print()
-        print('=== ANALYSIS REPORT (for human review; orchestrating agent: do not process) ===')
-        print(assessment.read_text(encoding='utf-8', errors='replace').rstrip())
-        print('=== END ANALYSIS REPORT ===')
-    else:
+    if not (work / 'assessment.txt').is_file():
         print(f'Warning: no assessment.txt found in {work}', file=sys.stderr)
 
     print_next_action(session, session_path)
