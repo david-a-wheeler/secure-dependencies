@@ -2045,7 +2045,7 @@ def main() -> None:  # noqa: C901 (complexity acceptable for CLI validation)
         )
 
     # --- Warn: --deeper without work dir (will auto-run --basic) ---
-    work = root / 'temp' / 'dep-review' / f'{pkgname}-{new_ver}'
+    work = root / 'temp' / 'dep-review' / shared.safe_dir_component(pkgname, new_ver)
     signals_file = work / 'signals.txt'
     if do_deeper and not do_basic and not signals_file.exists():
         print(
@@ -2159,7 +2159,7 @@ def main() -> None:  # noqa: C901 (complexity acceptable for CLI validation)
 
     # --install-probe requires --basic artifacts; auto-enable if missing
     if do_install_probe and not do_basic:
-        signals_file = root / 'temp' / 'dep-review' / f'{pkgname}-{new_ver}' / 'signals.txt'
+        signals_file = root / 'temp' / 'dep-review' / shared.safe_dir_component(pkgname, new_ver) / 'signals.txt'
         if not signals_file.exists():
             print(
                 f'NOTE: --install-probe requested but no prior --basic run found for {pkgname} {new_ver}.\n'

@@ -437,6 +437,16 @@ def tarfile_extractall_safe(
         tf.extractall(str(target_dir), members=safe)
 
 
+def safe_dir_component(name: str, version: str) -> str:
+    safe_name = name.replace('/', '_').replace('\\', '_')
+    safe_ver = version.replace('/', '_').replace('\\', '_') if version else 'unknown'
+    component = f'{safe_name}-{safe_ver}'
+    if '..' in component:
+        # Replace regardless of how the sequence was assembled
+        component = component.replace('..', '__')
+    return component
+
+
 def blind_scan(
     label: str,
     pattern: str,

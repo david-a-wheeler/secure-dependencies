@@ -215,7 +215,7 @@ def generate_manifest(session: dict, session_path: Path) -> Path:
         deeper_needed = v.get('deeper_needed', False)
         deeper_done = v.get('deeper_done', False)
         itc = ' [INSTALL-TIME CODE: verify extconf.rb/setup.py]' if v.get('install_time_code') else ''
-        report_path = f'temp/dep-review/{name}-{version}/assessment.txt'
+        report_path = f'temp/dep-review/{shared.safe_dir_component(name, version)}/assessment.txt'
 
         if rec == 'DO_NOT_INSTALL' or risk == 'CRITICAL':
             flagged_lines.append(f'#   {name} {version}  OMITTED: {rec} / {risk} risk (DO NOT install)')
@@ -521,7 +521,7 @@ def cmd_complete(args: argparse.Namespace) -> None:
 
     # Read session-update.json written by dep_review.py --session
     root = Path(session['project_root'])
-    work = root / 'temp' / 'dep-review' / f'{name}-{version}'
+    work = root / 'temp' / 'dep-review' / shared.safe_dir_component(name, version)
     update_file = work / 'session-update.json'
     new_dep_names: list[str] = []
     alternatives_critical = False
@@ -964,7 +964,7 @@ def cmd_report(args: argparse.Namespace) -> None:
         version = v['version']
         rec = v.get('recommendation', 'UNKNOWN')
         risk = v.get('risk', 'UNKNOWN')
-        work_dir = root / 'temp' / 'dep-review' / f'{name}-{version}'
+        work_dir = root / 'temp' / 'dep-review' / shared.safe_dir_component(name, version)
         af = _parse_signals(work_dir / 'signals.txt')
         summary = _parse_assessment_summary(work_dir / 'assessment.txt')
 
@@ -984,7 +984,7 @@ def cmd_report(args: argparse.Namespace) -> None:
         clone_display = (f'OK ({clone_url})' if clone_status.upper().startswith('OK') and clone_url
                          else clone_status)
         new_trans = af.get('new_transitive_deps', 'N/A' if pkg_mode == 'UPDATE' else '?')
-        report_path = f'temp/dep-review/{name}-{version}/assessment.txt'
+        report_path = f'temp/dep-review/{shared.safe_dir_component(name, version)}/assessment.txt'
 
         version_str = f'{old_ver} → {version}' if old_ver else version
         print(f'## {name} {version_str}: {rec} / {risk} risk')
@@ -1055,7 +1055,7 @@ def cmd_wrap_up(args: argparse.Namespace) -> None:
         version = v['version']
         rec = v.get('recommendation', 'pending')
         risk = v.get('risk', '')
-        work_dir = root / 'temp' / 'dep-review' / f'{name}-{version}'
+        work_dir = root / 'temp' / 'dep-review' / shared.safe_dir_component(name, version)
         af = _parse_signals(work_dir / 'signals.txt')
         pkg_mode = af.get('mode', '?')
         old_ver = af.get('old_version', '')
@@ -1064,7 +1064,7 @@ def cmd_wrap_up(args: argparse.Namespace) -> None:
         spdx = lic_raw.split('|')[0].replace('SPDX:', '').strip() if '|' in lic_raw else lic_raw
         ver_str = f'{old_ver} → {version}' if old_ver else version
         status = f'{rec} / {risk}' if risk else rec
-        rep_rel = f'temp/dep-review/{name}-{version}/assessment.txt'
+        rep_rel = f'temp/dep-review/{shared.safe_dir_component(name, version)}/assessment.txt'
         lines.append(
             f'| {name} | {pkg_mode} | {ver_str} | {sha} | {spdx} | {status} | '
             f'[report]({rep_rel}) |'
