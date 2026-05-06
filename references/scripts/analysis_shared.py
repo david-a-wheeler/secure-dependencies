@@ -554,10 +554,16 @@ ADVERSARIAL_PATTERNS: list[tuple[str, str]] = [
      # range U+0080-U+00FF, leaving Cyrillic (U+0400+) and Greek (U+0370+)
      # undetected.
      r'[a-zA-Z0-9_][^\x00-\x7F]+[a-zA-Z0-9_]'),
+    # Heuristic: catches some common injection phrases but misses rephrasing,
+    # base64 payloads, instructions targeting the orchestrator, other phrases,
+    # and the use of other languages.
+    # The real defenses are sub-agent isolation and the "never read raw-*" rule.
     ('prompt-injection',
-     r'(?i)(?:disregard\s+(?:prior|previous|earlier|above)\s+(?:instructions?|rules?|constraints?)'
+     r'(?i)(?:(?:disregard|ignore)\s+(?:all\s+)?(?:prior|previous|earlier|above)\s+(?:instructions?|rules?|constraints?)'
      r'|you\s+(?:must|should|shall|are\s+required\s+to)\s+(?:approve|skip|allow|install|bypass|ignore)'
      r'|new\s+(?:directives?|instructions?)\s*:'
+     r'|system\s+prompt\s*:'
+     r'|<<SYS>>'
      r'|(?:as|being)\s+an?\s+(?:AI|LLM|assistant|language\s+model)\b)'),
     # 1000+ spaces/tabs followed by a non-whitespace character: content hidden
     # after padding that won't be visible in most editors or diff views.
@@ -568,7 +574,9 @@ ADVERSARIAL_PATTERNS: list[tuple[str, str]] = [
 # active attacks with no legitimate use in package code:
 #   - bidi controls can visually reverse or hide code to deceive reviewers
 #   - zero-width chars inject invisible content into identifiers
-#   - prompt-injection text directly targets AI reviewers
+#   - prompt-injection: heuristic; catches common phrases only. Misses
+#     rephrasing, base64 payloads, and orchestrator-targeted instructions.
+#     The primary defenses are sub-agent isolation and never reading raw-* files.
 #   - whitespace-hiding hides content after 1000+ spaces, invisible in editors
 #
 # non-ascii-in-identifiers is NOT in this set: accented characters and
