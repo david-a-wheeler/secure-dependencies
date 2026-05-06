@@ -63,9 +63,10 @@ VALID_RECOMMENDATIONS = frozenset({
 
 # Defense-in-depth: reject any queued dep name that contains shell-special
 # characters, regardless of which ecosystem hook produced it. This catches
-# malformed names that slip past ecosystem-level validation (e.g. a hook
-# bug or a new ecosystem added later).
-_DEP_NAME_RE = re.compile(r'^[@A-Za-z0-9][A-Za-z0-9._/-]{0,213}$')
+# malformed names that slip past ecosystem-level validation or a hook bug.
+# Covers npm, PyPI, RubyGems, Maven (group:artifact), and CPAN (Foo::Bar).
+# ':' is not a shell metacharacter in argument position, so it is safe to allow.
+_DEP_NAME_RE = re.compile(r'^[@A-Za-z0-9][A-Za-z0-9._/:-]{0,213}$')
 VALID_RISKS = frozenset({'LOW', 'MEDIUM', 'HIGH', 'CRITICAL'})
 
 # Shell command to install approved packages, per ecosystem.
