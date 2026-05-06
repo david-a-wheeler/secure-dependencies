@@ -1543,6 +1543,7 @@ def run_sandboxed(
     shell_cmd: str,
     container_image: str,
     *,
+    cmd: list[str] | None = None,
     container_shell_cmd: str | None = None,
     container_allow_network: bool = False,
     firejail_cwd: Path | None = None,
@@ -1553,36 +1554,59 @@ def run_sandboxed(
 
     Returns None when sandbox == 'none', signalling the caller should emit SKIPPED.
 
-    shell_cmd is a shell command string that may chain multiple commands with &&
-    or ; as needed. Use the literal placeholders {src} and {out} for the
-    source directory (read-only) and output directory respectively.  The
-    function substitutes the correct paths for each sandbox type before
-    execution, so a single shell_cmd works for bwrap, firejail, and containers.
+    Two ways to specify the command for bwrap/firejail sandboxes:
 
-    Example:
+    cmd (preferred for single commands): a list of strings exec'd directly
+    without invoking a shell. Use the literal placeholders '{src}' and '{out}'
+    inside any element; they are substituted with the correct paths before exec.
+    Because no shell is involved, special characters in paths are passed as
+    literal data and cannot inject shell commands. Containers always use
+    shell_cmd/container_shell_cmd regardless of cmd.
+
+    shell_cmd (required for multi-command pipelines): a shell command string
+    passed to 'sh -c'. May chain commands with && or ;. Use '{src}' and '{out}'
+    as placeholders. Needed when the command requires cd, pipes, or shell
+    variable expansion. Required positional argument; pass '' when only cmd is
+    used and containers have their own container_shell_cmd.
+
+    Example using cmd (no shell, safe for attacker-controlled paths):
+        run_sandboxed(
+            sandbox, src, out, '',
+            container_image='ruby:3.2',
+            cmd=['gem', 'build', '{src}/my.gemspec', '--output', '{out}/'],
+            container_shell_cmd='gem build *.gemspec && cp *.gem {out}/',
+        )
+
+    Example using shell_cmd (multi-command pipeline):
         run_sandboxed(
             sandbox, src, out,
-            shell_cmd='cd {src} && npm install && npm test && npm pack --pack-destination {out}',
+            'cd {src} && npm install && npm pack --pack-destination {out}',
             container_image='node:20',
         )
+
+    Windows note: bwrap and firejail are Linux-only, so Windows users must use
+    docker or podman. Docker Desktop on Windows runs Linux containers via a
+    WSL2/Hyper-V backend, and all supported images (ruby, node, python) are
+    Linux-based, so 'sh' is always available inside them. The shell_cmd path
+    therefore works correctly on Windows without any special handling.
 
     Parameters:
         sandbox: 'bwrap', 'firejail', 'docker', 'podman', or 'none'
         src_dir: read-only source tree on the host
         out_dir: writable output directory on the host
-        shell_cmd: shell command with {src} and {out} placeholders; used for
-            bwrap and firejail (substituted with /src//out and real paths resp.)
+        shell_cmd: shell command with {src}/{out} placeholders; used for
+            bwrap/firejail when cmd is None, and for containers when
+            container_shell_cmd is None
         container_image: Docker/Podman image (e.g. 'ruby:3.2', 'node:20')
-        container_shell_cmd: override shell_cmd for Docker/Podman only; useful
-            when the container needs extra setup steps (e.g. pip install build)
-            before the main build command; same {src}/{out} substitution applies
+        cmd: if given, exec this argv list directly for bwrap/firejail (no shell);
+            {src}/{out} placeholders are substituted in each element
+        container_shell_cmd: override shell_cmd for Docker/Podman only
         container_allow_network: allow network in the container (default False)
         firejail_cwd: working directory for firejail (default: src_dir)
         timeout: seconds allowed for bwrap/firejail
         container_timeout: seconds allowed for Docker/Podman
     """
     if sandbox == 'bwrap':
-        script = shell_cmd.format(src='/src', out='/out')
         args = [
             'bwrap',
             '--ro-bind', str(src_dir), '/src',
@@ -1600,18 +1624,23 @@ def run_sandboxed(
         ]
         if Path('/lib64').is_dir():
             args += ['--ro-bind', '/lib64', '/lib64']
-        args += ['/usr/bin/sh', '-c', script]
+        if cmd is not None:
+            args += [a.replace('{src}', '/src').replace('{out}', '/out') for a in cmd]
+        else:
+            args += ['/usr/bin/sh', '-c', shell_cmd.format(src='/src', out='/out')]
         rc, out, err = run_cmd(args, timeout=timeout)
         return rc, out + err
 
     if sandbox == 'firejail':
-        script = shell_cmd.format(src=str(src_dir), out=str(out_dir))
         cwd = firejail_cwd or src_dir
         args = [
             'firejail', '--quiet', '--net=none',
             f'--read-only={src_dir}',
-            'sh', '-c', script,
         ]
+        if cmd is not None:
+            args += [a.replace('{src}', str(src_dir)).replace('{out}', str(out_dir)) for a in cmd]
+        else:
+            args += ['sh', '-c', shell_cmd.format(src=str(src_dir), out=str(out_dir))]
         rc, out, err = run_cmd(args, cwd=cwd, timeout=timeout)
         return rc, out + err
 

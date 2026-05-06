@@ -994,8 +994,8 @@ class Hooks(shared.EcosystemHooks):
         gemspec_candidates = list(clone_dir.rglob('*.gemspec'))
         if not gemspec_candidates:
             return shared.finish_reproducible_build(lines, work, 'SKIPPED (no gemspec in source)')
-        source_gemspec = str(gemspec_candidates[0])
-        lines.append(f'SOURCE_GEMSPEC: {shared.sanitize_line(source_gemspec)}')
+        source_gemspec = gemspec_candidates[0].relative_to(clone_dir)
+        lines.append(f'SOURCE_GEMSPEC: {shared.sanitize_line(str(source_gemspec))}')
 
         build_log_path = work / 'raw-build-output.txt'
 
@@ -1006,8 +1006,10 @@ class Hooks(shared.EcosystemHooks):
 
         result = shared.run_sandboxed(
             sandbox, clone_dir, built_gem_dir,
-            'gem build {src}/' + source_gemspec + ' --output {out}/',
+            '',  # shell_cmd unused for bwrap/firejail; cmd= used instead
             f'ruby:{ruby_img_tag}',
+            # Pass argv list so bwrap/firejail exec gem directly (no shell, no escaping needed).
+            cmd=['gem', 'build', '{src}/' + str(source_gemspec), '--output', '{out}/'],
             container_shell_cmd=(
                 'git config --global --add safe.directory /tmp/src 2>/dev/null; '
                 'cp -r {src} /tmp/src && cd /tmp/src && '
