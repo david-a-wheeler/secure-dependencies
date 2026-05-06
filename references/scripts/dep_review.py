@@ -593,7 +593,7 @@ def write_signals(  # noqa: C901
 
     # ---- SOURCE REPOSITORY ----
     lines.append(sec('SOURCE REPOSITORY'))
-    lines.append(f'URL  : {shared.sanitize(source_url) if source_url else "(not found in manifest)"}')
+    lines.append(f'URL  : {shared.sanitize_line(source_url) if source_url else "(not found in manifest)"}')
     if clone_ok and commit_guessed:
         sha_display = version_tag.removeprefix('GUESSED:')[:12]
         lines.append(f'Clone: GUESSED (no version tag; commit {sha_display} inferred from history)')
@@ -614,7 +614,7 @@ def write_signals(  # noqa: C901
         lines.append('  this pattern is also consistent with a supply chain injection attack.')
         lines.append('  Human review of clone-status.txt and the recent commit list is required.')
     elif clone_ok:
-        tag_str = f'tag: {shared.sanitize(version_tag)}' if version_tag else 'no tag recorded'
+        tag_str = f'tag: {shared.sanitize_line(version_tag)}' if version_tag else 'no tag recorded'
         lines.append(f'Clone: OK ({tag_str})')
         lines.append('Context: Package verified to come from a tagged commit. The tag match does not')
         lines.append('  guarantee the tag itself is trustworthy (tags can be moved), but adds confidence.')
@@ -662,7 +662,7 @@ def write_signals(  # noqa: C901
                 if l.strip() and not l.startswith('EMBEDDED_EXECUTABLES:')
             ]
             for bline in entries[:10]:
-                lines.append(f'  {shared.sanitize(bline)}')
+                lines.append(f'  {shared.sanitize_line(bline)}')
             if len(entries) > 10:
                 lines.append(f'  ... and {len(entries) - 10} more (see binary-files.txt)')
         lines.append('Context: Precompiled executables that have no corresponding source in the')
@@ -1138,8 +1138,8 @@ def write_license_file(
     license_lines = [
         f'=== License: {pkgname} {new_ver} ===',
         '',
-        f'DECLARED: {shared.sanitize(", ".join(license_candidates)) if license_candidates else "MISSING"}',
-        f'SPDX_NORMALIZED: {shared.sanitize(str(license_result.get("spdx", "MISSING")))}',
+        f'DECLARED: {shared.sanitize_line(", ".join(license_candidates)) if license_candidates else "MISSING"}',
+        f'SPDX_NORMALIZED: {shared.sanitize_line(str(license_result.get("spdx", "MISSING")))}',
         f'OSI_APPROVED: {license_result.get("osi", "NO")}',
         f'STATUS: {license_result.get("status", "CRITICAL")}',
         f'NOTE: {license_result.get("note", "")}',
@@ -1260,12 +1260,12 @@ def run_analysis(  # noqa: C901
             source_url = _get_src(pkgname) or ''
             if source_url:
                 manifest['source_url'] = source_url
-                print(f'  Source URL (registry API fallback): {shared.sanitize(source_url)}')
+                print(f'  Source URL (registry API fallback): {shared.sanitize_line(source_url)}')
     print(f'  Extensions: {manifest.get("extensions", "?")}')
     print(f'  Executables: {manifest.get("executables", "?")}')
     print(f'  Post-install message: {manifest.get("post_install_msg", "?")}')
     print(f'  Build hooks / install-time code: {manifest.get("has_build_hooks", "?")}')
-    print(f'  License (manifest): {shared.sanitize(str(manifest.get("manifest_license_raw", ""))) or "(not declared)"}')
+    print(f'  License (manifest): {shared.sanitize_line(str(manifest.get("manifest_license_raw", ""))) or "(not declared)"}')
 
     # 3. Scans
     print()
@@ -1322,7 +1322,7 @@ def run_analysis(  # noqa: C901
     print()
     print('--- Source repository clone ---')
     clone_ok, version_tag, commit_guessed, source_likely_incompatible = shared.clone_source_repo(source_url, pkgname, new_ver, work)
-    print(f'  Source URL: {shared.sanitize(source_url) or "(none)"}')
+    print(f'  Source URL: {shared.sanitize_line(source_url) or "(none)"}')
     if clone_ok and commit_guessed:
         print(f'  Clone: GUESSED (no version tag; commit inferred from history)')
     elif source_likely_incompatible:
@@ -1558,7 +1558,7 @@ def run_analysis(  # noqa: C901
         license_result['current_raw'] = license_candidates[0] if license_candidates else ''
     write_license_file(work, pkgname, new_ver, license_result, license_candidates)
     osi_marker = '[OK]' if license_result['osi'] == 'YES' else '[!]'
-    print(f'  License: {shared.sanitize(str(license_result["spdx"]))}  OSI-approved: {license_result["osi"]}  {osi_marker}')
+    print(f'  License: {shared.sanitize_line(str(license_result["spdx"]))}  OSI-approved: {license_result["osi"]}  {osi_marker}')
     if license_result.get('changed'):
         print('  [!] License changed between versions')
 
@@ -2045,7 +2045,7 @@ def main() -> None:  # noqa: C901 (complexity acceptable for CLI validation)
         )
 
     # --- Warn: --deeper without work dir (will auto-run --basic) ---
-    work = root / 'temp' / 'dep-review' / f'{pkgname}-{new_ver}'
+    work = root / 'temp' / 'dep-review' / shared.safe_dir_component(pkgname, new_ver)
     signals_file = work / 'signals.txt'
     if do_deeper and not do_basic and not signals_file.exists():
         print(
@@ -2159,7 +2159,7 @@ def main() -> None:  # noqa: C901 (complexity acceptable for CLI validation)
 
     # --install-probe requires --basic artifacts; auto-enable if missing
     if do_install_probe and not do_basic:
-        signals_file = root / 'temp' / 'dep-review' / f'{pkgname}-{new_ver}' / 'signals.txt'
+        signals_file = root / 'temp' / 'dep-review' / shared.safe_dir_component(pkgname, new_ver) / 'signals.txt'
         if not signals_file.exists():
             print(
                 f'NOTE: --install-probe requested but no prior --basic run found for {pkgname} {new_ver}.\n'

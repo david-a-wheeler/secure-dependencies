@@ -27,6 +27,9 @@ import hashlib
 import json
 import re
 import shutil
+import sys
+import tarfile
+import unicodedata
 import subprocess
 import urllib.parse
 import urllib.request
@@ -221,7 +224,7 @@ def compute_dep_diff(
     """Compute sorted dep lists and added/removed sets from new and old dep lines.
 
     Returns (dep_lines_new, dep_lines_old, added_deps, removed_deps).
-    All returned lists are sorted. Sanitizes each line with sanitize().
+    All returned lists are sorted. Sanitizes each line with sanitize_line().
 
     >>> new, old, added, removed = compute_dep_diff(['b', 'a'], ['a', 'c'])
     >>> new
@@ -231,8 +234,8 @@ def compute_dep_diff(
     >>> removed
     ['c']
     """
-    dep_lines_new = sorted(sanitize(l) for l in runtime_dep_lines)
-    dep_lines_old = sorted(sanitize(l) for l in old_dep_lines)
+    dep_lines_new = sorted(sanitize_line(l) for l in runtime_dep_lines)
+    dep_lines_old = sorted(sanitize_line(l) for l in old_dep_lines)
     added_deps = sorted(set(dep_lines_new) - set(dep_lines_old))
     removed_deps = sorted(set(dep_lines_old) - set(dep_lines_new))
     return dep_lines_new, dep_lines_old, added_deps, removed_deps
@@ -267,29 +270,100 @@ def levenshtein(a: str, b: str) -> int:
     return prev[-1]
 
 
-def sanitize(text: str) -> str:
-    """Replace C0/C1 control chars with '?'.
+# Sanitization helpers for attacker-controlled text.
+#
+# Our sanitizers only allow specific character classes & replace the rest.
+# Allowed Unicode general categories: letters (L*), numbers (N*),
+# punctuation (P*), symbols (S*), space separator (Zs). Tab is always
+# kept. Newline and carriage return are kept only by sanitize(), not
+# sanitize_line() (where [\n\r]+ become a space).
+# Everything else is replaced with '?'.
+#
+# Implementation: sanitize() uses a pre-compiled regex to identify
+# characters outside the printable-ASCII + tab + LF + CR fast path; only
+# those characters are checked via unicodedata.category(). Real-world
+# package metadata is mostly ASCII, so the callback is seldom invoked.
+# We have to do it this way, instead of a simple pre-compiled regex in all
+# cases, because Python's built-in regex doesn't support Unicode
+# character classes. We're trying to limit external dependencies, so
+# we instead work around this limitation of the built-in regex system.
+#
+# sanitize_line() pre-collapses [\r\n]+ runs to a single space, then
+# delegates to sanitize().
+#
+# This approach counters several classes of attack: C0/C1 control characters
+# (including ESC escapes like hidden terminal escapes),
+# bidi override characters (U+202A-U+202E, U+2066-U+2069, U+200E-U+200F),
+# zero-width characters (U+200B-U+200D, U+2060, U+FEFF, U+00AD), and
+# other Unicode format characters (category Cf). Bidi overrides and most
+# zero-width characters are in category Cf, so they are stripped as a
+# consequence of not being in the allowlist
+# rather than by explicit enumeration of disallowed characters.
+#
+# Limitation: stripping bidi marks causes right-to-left scripts (Arabic,
+# Hebrew) to lose their directional formatting. We accept this tradeoff
+# to reduce the attack surface against the reviewing agent.
+#
+# Limitation: homoglyph attacks (a Cyrillic letter visually identical to
+# a Latin one) are NOT countered here. Homoglyphs are valid Unicode
+# letters and remain in the allowed set. Detecting them requires a
+# separate signal (non-ascii-in-identifiers), not character stripping.
+# This also allows really weird accents, but that would simply
+# be reporting the data as provided.
 
-    Strips bidi controls and zero-width chars used for visual spoofing or
-    prompt injection before any text reaches the AI.
+# Matches chars outside the printable-ASCII + tab + LF + CR fast path.
+_SANITIZE_RE = re.compile(r'[^\x09\x0a\x0d\x20-\x7e]')
+_SANITIZE_NEWLINE_RE = re.compile(r'[\r\n]+')
+
+
+def _sanitize_char(m: re.Match) -> str:
+    """Return char if it's allowed, else return ?"""
+    ch = m.group(0)
+    cat = unicodedata.category(ch)
+    return ch if (cat[0] in ('L', 'N', 'P', 'S') or cat == 'Zs') else '?'
+
+
+def sanitize(text: str) -> str:
+    """Replace disallowed Unicode with '?'; preserve tab, newline, and CR.
+
+    Use for multi-line attacker-controlled content (scripts, long blobs).
+    For single-line fields use sanitize_line().
 
     >>> sanitize('hello')
     'hello'
     >>> sanitize('hel\\x01lo')
     'hel?lo'
     >>> sanitize('tab\\there')
-    'tab?here'
+    'tab\\there'
     >>> sanitize('del\\x7fchar')
     'del?char'
+    >>> sanitize('\\u202ereverse')
+    '?reverse'
     """
-    result = []
-    for ch in text:
-        cp = ord(ch)
-        if (0x00 <= cp <= 0x1F) or (0x7F <= cp <= 0x9F):
-            result.append('?')
-        else:
-            result.append(ch)
-    return ''.join(result)
+    return _SANITIZE_RE.sub(_sanitize_char, text)
+
+
+def sanitize_line(text: str) -> str:
+    """Collapse newline/CR runs to a space, then apply sanitize().
+
+    Use for single-line fields (author, version, URL, license, etc.) where
+    an embedded newline would break structured output. Consecutive \\r and \\n
+    characters (including Windows \\r\\n) are collapsed to a single space so
+    the field remains readable when legitimate data contains a stray newline.
+    Tab is preserved. For multi-line content use sanitize().
+
+    >>> sanitize_line('hello')
+    'hello'
+    >>> sanitize_line('hel\\x01lo')
+    'hel?lo'
+    >>> sanitize_line('line\\nbreak')
+    'line break'
+    >>> sanitize_line('a\\r\\nb')
+    'a b'
+    >>> sanitize_line('\\u202ereverse')
+    '?reverse'
+    """
+    return sanitize(_SANITIZE_NEWLINE_RE.sub(' ', text))
 
 
 def run_cmd(
@@ -347,6 +421,32 @@ def count_source_lines(unpacked_dir: Path) -> int:
     return total
 
 
+def tarfile_extractall_safe(
+    tf: tarfile.TarFile, target_dir: Path, members: list[tarfile.TarInfo],
+) -> None:
+    """Extract tar members, blocking symlink/hardlink attacks.
+
+    On Python 3.12+, delegates to the built-in filter='data' policy.
+    On older Python, drops any member that is not a plain file or directory,
+    or that has a non-empty linkname (symlink or hardlink target).
+    """
+    if sys.version_info >= (3, 12):
+        tf.extractall(str(target_dir), members=members, filter='data')
+    else:
+        safe = [m for m in members if (m.isfile() or m.isdir()) and not m.linkname]
+        tf.extractall(str(target_dir), members=safe)
+
+
+def safe_dir_component(name: str, version: str) -> str:
+    safe_name = name.replace('/', '_').replace('\\', '_')
+    safe_ver = version.replace('/', '_').replace('\\', '_') if version else 'unknown'
+    component = f'{safe_name}-{safe_ver}'
+    if '..' in component:
+        # Replace regardless of how the sequence was assembled
+        component = component.replace('..', '__')
+    return component
+
+
 def blind_scan(
     label: str,
     pattern: str,
@@ -372,7 +472,7 @@ def blind_scan(
 
     if rc > 1:
         # grep error (rc==2+): pattern failure or other error (not a match result)
-        err_msg = sanitize(stderr.strip())
+        err_msg = sanitize_line(stderr.strip())
         raw_file.write_text(f'GREP_ERROR: {stderr}', encoding='utf-8', errors='replace')
         summary_file.write_text(
             f'label={label}\nmatch_count=0\nGREP_ERROR: {err_msg}\n', encoding='utf-8'
@@ -391,13 +491,15 @@ def blind_scan(
                 fname = line.split(':', 1)[0]
                 if fname not in seen:
                     seen.add(fname)
-                    summary_lines.append(sanitize(fname))
+                    summary_lines.append(sanitize_line(fname))
     summary_file.write_text('\n'.join(summary_lines) + '\n', encoding='utf-8')
     return count
 
 
 def http_get(url: str, timeout: int = 15) -> bytes | None:
     """Fetch a URL; return bytes or None on error."""
+    if not url.startswith('https://'):
+        return None
     try:
         with urllib.request.urlopen(url, timeout=timeout) as resp:
             return resp.read()
@@ -407,6 +509,8 @@ def http_get(url: str, timeout: int = 15) -> bytes | None:
 
 def http_post(url: str, data: bytes, content_type: str = 'application/json', timeout: int = 15) -> bytes | None:
     """POST data to url; return response bytes or None on error."""
+    if not url.startswith('https://'):
+        return None
     req = urllib.request.Request(url, data=data, headers={'Content-Type': content_type})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -444,11 +548,22 @@ ADVERSARIAL_PATTERNS: list[tuple[str, str]] = [
     ('zero-width-chars',
      '[\u200b-\u200d\ufeff\u00ad\u2060]'),
     ('non-ascii-in-identifiers',
-     r'[a-zA-Z0-9_][\x80-\xFF]+[a-zA-Z0-9_]'),
+     # [^\x00-\x7F] covers all non-ASCII code points.
+     # [\x80-\xFF] looks equivalent but PCRE in UTF-8 mode
+     # (grep -P with a UTF-8 locale) treats it as the Unicode
+     # range U+0080-U+00FF, leaving Cyrillic (U+0400+) and Greek (U+0370+)
+     # undetected.
+     r'[a-zA-Z0-9_][^\x00-\x7F]+[a-zA-Z0-9_]'),
+    # Heuristic: catches some common injection phrases but misses rephrasing,
+    # base64 payloads, instructions targeting the orchestrator, other phrases,
+    # and the use of other languages.
+    # The real defenses are sub-agent isolation and the "never read raw-*" rule.
     ('prompt-injection',
-     r'(?i)(?:disregard\s+(?:prior|previous|earlier|above)\s+(?:instructions?|rules?|constraints?)'
+     r'(?i)(?:(?:disregard|ignore)\s+(?:all\s+)?(?:prior|previous|earlier|above)\s+(?:instructions?|rules?|constraints?)'
      r'|you\s+(?:must|should|shall|are\s+required\s+to)\s+(?:approve|skip|allow|install|bypass|ignore)'
      r'|new\s+(?:directives?|instructions?)\s*:'
+     r'|system\s+prompt\s*:'
+     r'|<<SYS>>'
      r'|(?:as|being)\s+an?\s+(?:AI|LLM|assistant|language\s+model)\b)'),
     # 1000+ spaces/tabs followed by a non-whitespace character: content hidden
     # after padding that won't be visible in most editors or diff views.
@@ -459,7 +574,9 @@ ADVERSARIAL_PATTERNS: list[tuple[str, str]] = [
 # active attacks with no legitimate use in package code:
 #   - bidi controls can visually reverse or hide code to deceive reviewers
 #   - zero-width chars inject invisible content into identifiers
-#   - prompt-injection text directly targets AI reviewers
+#   - prompt-injection: heuristic; catches common phrases only. Misses
+#     rephrasing, base64 payloads, and orchestrator-targeted instructions.
+#     The primary defenses are sub-agent isolation and never reading raw-* files.
 #   - whitespace-hiding hides content after 1000+ spaces, invisible in editors
 #
 # non-ascii-in-identifiers is NOT in this set: accented characters and
@@ -529,7 +646,7 @@ def clone_source_repo(
                                  to any specific commit and is HIGH RISK. May be
                                  benign (unpinned build tooling) but is suspicious.
     """
-    (work / 'source-url.txt').write_text(sanitize(source_url) + '\n', encoding='utf-8')
+    (work / 'source-url.txt').write_text(sanitize_line(source_url) + '\n', encoding='utf-8')
 
     clone_lines: list[str] = []
     clone_ok = False
@@ -542,8 +659,13 @@ def clone_source_repo(
         (work / 'clone-status.txt').write_text('\n'.join(clone_lines) + '\n', encoding='utf-8')
         return False, '', False, False
 
+    if not source_url.startswith('https://'):
+        clone_lines.append('CLONE_STATUS: SKIPPED (non-https source URL)')
+        (work / 'clone-status.txt').write_text('\n'.join(clone_lines) + '\n', encoding='utf-8')
+        return False, '', False, False
+
     # Find a matching version tag via ls-remote (no clone needed)
-    rc_ls, ls_out, _ = run_cmd(['git', 'ls-remote', '--tags', source_url], timeout=30)
+    rc_ls, ls_out, _ = run_cmd(['git', 'ls-remote', '--tags', '--', source_url], timeout=30)
     tag = ''
     if rc_ls == 0:
         escaped_ver = re.escape(new_ver)
@@ -569,7 +691,7 @@ def clone_source_repo(
     if not tag:
         # No version tag found. Attempt to locate the release commit by scanning
         # recent history for a commit message that mentions the version string.
-        clone_lines.append(f'SOURCE_URL: {sanitize(source_url)}')
+        clone_lines.append(f'SOURCE_URL: {sanitize_line(source_url)}')
         clone_lines.append('NO_TAG: no matching version tag found in repository')
         source_dir = work / 'source'
         guessed_sha = ''
@@ -580,7 +702,7 @@ def clone_source_repo(
         else:
             source_dir.mkdir(parents=True, exist_ok=True)
             rc_shallow, _, clone_err_text = run_cmd(
-                ['git', 'clone', '--depth', '20', source_url, str(source_dir)],
+                ['git', 'clone', '--depth', '20', '--', source_url, str(source_dir)],
                 timeout=120,
             )
             if rc_shallow != 0:
@@ -627,7 +749,7 @@ def clone_source_repo(
                 sha, date, subject = commits[j]
                 marker = '>>>' if j == guessed_idx else '   '
                 nearby.append(
-                    f'  {marker} {sha[:12]}  {date[:19]}  {sanitize(subject)}'
+                    f'  {marker} {sha[:12]}  {date[:19]}  {sanitize_line(subject)}'
                 )
 
             clone_lines.extend([
@@ -654,13 +776,13 @@ def clone_source_repo(
                 clone_lines.append('RECENT_COMMITS (for manual inspection):')
                 for sha, date, subject in commits[:5]:
                     clone_lines.append(
-                        f'  {sha[:12]}  {date[:19]}  {sanitize(subject)}'
+                        f'  {sha[:12]}  {date[:19]}  {sanitize_line(subject)}'
                     )
     else:
         version_tag = tag
         clone_lines.extend([
-            f'VERSION_TAG: {sanitize(tag)}',
-            f'SOURCE_URL: {sanitize(source_url)}',
+            f'VERSION_TAG: {sanitize_line(tag)}',
+            f'SOURCE_URL: {sanitize_line(source_url)}',
         ])
         source_dir = work / 'source'
         if source_dir.exists() and any(source_dir.iterdir()):
@@ -672,7 +794,7 @@ def clone_source_repo(
             clone_ok = True
         else:
             rc_clone, _, clone_err = run_cmd(
-                ['git', 'clone', '--depth', '1', '--branch', tag, source_url, str(source_dir)],
+                ['git', 'clone', '--depth', '1', '--branch', tag, '--', source_url, str(source_dir)],
                 timeout=120,
             )
             (work / 'raw-git-clone-output.txt').write_text(
@@ -743,13 +865,13 @@ def lookup_openssf_badge(
 
     badge_lines = [
         f'=== OpenSSF Best Practices Badge: {pkgname} ===',
-        f'SOURCE_URL_QUERIED: {sanitize(source_url)}',
+        f'SOURCE_URL_QUERIED: {sanitize_line(source_url)}',
         f'BADGE_FOUND: {"yes" if result["found"] else "no"}',
     ]
     if result['found']:
         badge_lines.extend([
-            f'BADGE_PROJECT_ID: {sanitize(str(result["id"]))}',
-            f'BADGE_LEVEL (metal): {sanitize(str(result["level"]))}',
+            f'BADGE_PROJECT_ID: {sanitize_line(str(result["id"]))}',
+            f'BADGE_LEVEL (metal): {sanitize_line(str(result["level"]))}',
         ])
         if result['tiered']:
             badge_lines.append(
@@ -1039,7 +1161,7 @@ def compare_pkg_vs_source(
             '(files in distributed package but absent from source repo)',
             'Expected extras: METADATA, RECORD, PKG-INFO, .gemspec, Gemfile.lock, dist-info/',
             '',
-        ] + [sanitize(p) for p in extra]) + '\n',
+        ] + [sanitize_line(p) for p in extra]) + '\n',
         encoding='utf-8',
     )
     return len(extra)
@@ -1099,7 +1221,7 @@ def detect_binary_files(unpacked_dir: Path, work: Path) -> int:
     for fp in sorted(unpacked_dir.rglob('*')):
         if not fp.is_file() or fp.is_symlink():
             continue
-        rel = sanitize(str(fp.relative_to(unpacked_dir)))
+        rel = sanitize_line(str(fp.relative_to(unpacked_dir)))
         fmt = ''
 
         # Check by file extension first (catches zip-container formats like .jar)
@@ -1184,7 +1306,7 @@ def compute_diff(
             # Last token is the new path; second-to-last is the old path
             old_path = parts[-2] if len(parts) >= 2 else ''
             rel = old_path.removeprefix(old_prefix) if old_path.startswith(old_prefix) else old_path
-            short_names.append(sanitize(rel))
+            short_names.append(sanitize_line(rel))
         elif line.startswith('Only in '):
             # "Only in /path/dir: filename"
             rest = line[len('Only in '):]
@@ -1193,15 +1315,15 @@ def compute_diff(
                 dir_part = dir_part.rstrip('/')
                 full = dir_part + '/' + fname
                 if full.startswith(old_prefix):
-                    short_names.append(sanitize(full.removeprefix(old_prefix)) + ' (removed)')
+                    short_names.append(sanitize_line(full.removeprefix(old_prefix)) + ' (removed)')
                 elif full.startswith(new_prefix):
-                    short_names.append(sanitize(full.removeprefix(new_prefix)) + ' (added)')
+                    short_names.append(sanitize_line(full.removeprefix(new_prefix)) + ' (added)')
                 else:
-                    short_names.append(sanitize(full))
+                    short_names.append(sanitize_line(full))
             else:
-                short_names.append(sanitize(line))
+                short_names.append(sanitize_line(line))
         else:
-            short_names.append(sanitize(line))
+            short_names.append(sanitize_line(line))
 
     changed_files_text = '\n'.join(short_names)
     (work / 'diff-filenames.txt').write_text(
@@ -1234,7 +1356,7 @@ def git_diff_between_tags(
         return 0, ''
 
     # Find old version tag with the same matching logic as clone_source_repo.
-    rc_ls, ls_out, _ = run_cmd(['git', 'ls-remote', '--tags', source_url], timeout=30)
+    rc_ls, ls_out, _ = run_cmd(['git', 'ls-remote', '--tags', '--', source_url], timeout=30)
     old_tag = ''
     if rc_ls == 0:
         escaped_old = re.escape(old_ver)
@@ -1258,7 +1380,7 @@ def git_diff_between_tags(
 
     if not old_tag:
         (work / 'diff-filenames.txt').write_text(
-            f'DIFF: N/A (old version tag for {sanitize(old_ver)} not found in source repo)\n',
+            f'DIFF: N/A (old version tag for {sanitize_line(old_ver)} not found in source repo)\n',
             encoding='utf-8',
         )
         (work / 'raw-diff-full.txt').write_text('', encoding='utf-8')
@@ -1272,7 +1394,7 @@ def git_diff_between_tags(
     )
     if rc_fetch != 0:
         (work / 'diff-filenames.txt').write_text(
-            f'DIFF: N/A (could not fetch old tag {sanitize(old_tag)} into clone)\n',
+            f'DIFF: N/A (could not fetch old tag {sanitize_line(old_tag)} into clone)\n',
             encoding='utf-8',
         )
         (work / 'raw-diff-full.txt').write_text('', encoding='utf-8')
@@ -1296,7 +1418,7 @@ def git_diff_between_tags(
         for line in names_out.splitlines():
             parts = line.split('\t', 1)
             if len(parts) == 2:
-                status, fname = parts[0].strip(), sanitize(parts[1].strip())
+                status, fname = parts[0].strip(), sanitize_line(parts[1].strip())
                 if status == 'D':
                     short_names.append(f'{fname} (removed)')
                 elif status == 'A':
@@ -1308,7 +1430,7 @@ def git_diff_between_tags(
     (work / 'diff-filenames.txt').write_text(
         '\n'.join([
             f'DIFF_TOTAL_LINES: {diff_lines}',
-            f'DIFF_SOURCE: git diff {sanitize(old_tag)}..HEAD (source repo; old gem unavailable)',
+            f'DIFF_SOURCE: git diff {sanitize_line(old_tag)}..HEAD (source repo; old gem unavailable)',
             '',
             'Changed/added/removed files (relative paths):',
         ] + short_names) + '\n',
@@ -1471,6 +1593,7 @@ def run_sandboxed(
     shell_cmd: str,
     container_image: str,
     *,
+    cmd: list[str] | None = None,
     container_shell_cmd: str | None = None,
     container_allow_network: bool = False,
     firejail_cwd: Path | None = None,
@@ -1481,36 +1604,59 @@ def run_sandboxed(
 
     Returns None when sandbox == 'none', signalling the caller should emit SKIPPED.
 
-    shell_cmd is a shell command string that may chain multiple commands with &&
-    or ; as needed. Use the literal placeholders {src} and {out} for the
-    source directory (read-only) and output directory respectively.  The
-    function substitutes the correct paths for each sandbox type before
-    execution, so a single shell_cmd works for bwrap, firejail, and containers.
+    Two ways to specify the command for bwrap/firejail sandboxes:
 
-    Example:
+    cmd (preferred for single commands): a list of strings exec'd directly
+    without invoking a shell. Use the literal placeholders '{src}' and '{out}'
+    inside any element; they are substituted with the correct paths before exec.
+    Because no shell is involved, special characters in paths are passed as
+    literal data and cannot inject shell commands. Containers always use
+    shell_cmd/container_shell_cmd regardless of cmd.
+
+    shell_cmd (required for multi-command pipelines): a shell command string
+    passed to 'sh -c'. May chain commands with && or ;. Use '{src}' and '{out}'
+    as placeholders. Needed when the command requires cd, pipes, or shell
+    variable expansion. Required positional argument; pass '' when only cmd is
+    used and containers have their own container_shell_cmd.
+
+    Example using cmd (no shell, safe for attacker-controlled paths):
+        run_sandboxed(
+            sandbox, src, out, '',
+            container_image='ruby:3.2',
+            cmd=['gem', 'build', '{src}/my.gemspec', '--output', '{out}/'],
+            container_shell_cmd='gem build *.gemspec && cp *.gem {out}/',
+        )
+
+    Example using shell_cmd (multi-command pipeline):
         run_sandboxed(
             sandbox, src, out,
-            shell_cmd='cd {src} && npm install && npm test && npm pack --pack-destination {out}',
+            'cd {src} && npm install && npm pack --pack-destination {out}',
             container_image='node:20',
         )
+
+    Windows note: bwrap and firejail are Linux-only, so Windows users must use
+    docker or podman. Docker Desktop on Windows runs Linux containers via a
+    WSL2/Hyper-V backend, and all supported images (ruby, node, python) are
+    Linux-based, so 'sh' is always available inside them. The shell_cmd path
+    therefore works correctly on Windows without any special handling.
 
     Parameters:
         sandbox: 'bwrap', 'firejail', 'docker', 'podman', or 'none'
         src_dir: read-only source tree on the host
         out_dir: writable output directory on the host
-        shell_cmd: shell command with {src} and {out} placeholders; used for
-            bwrap and firejail (substituted with /src//out and real paths resp.)
+        shell_cmd: shell command with {src}/{out} placeholders; used for
+            bwrap/firejail when cmd is None, and for containers when
+            container_shell_cmd is None
         container_image: Docker/Podman image (e.g. 'ruby:3.2', 'node:20')
-        container_shell_cmd: override shell_cmd for Docker/Podman only; useful
-            when the container needs extra setup steps (e.g. pip install build)
-            before the main build command; same {src}/{out} substitution applies
+        cmd: if given, exec this argv list directly for bwrap/firejail (no shell);
+            {src}/{out} placeholders are substituted in each element
+        container_shell_cmd: override shell_cmd for Docker/Podman only
         container_allow_network: allow network in the container (default False)
         firejail_cwd: working directory for firejail (default: src_dir)
         timeout: seconds allowed for bwrap/firejail
         container_timeout: seconds allowed for Docker/Podman
     """
     if sandbox == 'bwrap':
-        script = shell_cmd.format(src='/src', out='/out')
         args = [
             'bwrap',
             '--ro-bind', str(src_dir), '/src',
@@ -1528,18 +1674,29 @@ def run_sandboxed(
         ]
         if Path('/lib64').is_dir():
             args += ['--ro-bind', '/lib64', '/lib64']
-        args += ['/usr/bin/sh', '-c', script]
+        if cmd is not None:
+            args += [a.replace('{src}', '/src').replace('{out}', '/out') for a in cmd]
+        else:
+            args += ['/usr/bin/sh', '-c', shell_cmd.format(src='/src', out='/out')]
         rc, out, err = run_cmd(args, timeout=timeout)
         return rc, out + err
 
     if sandbox == 'firejail':
-        script = shell_cmd.format(src=str(src_dir), out=str(out_dir))
+        # firejail is materially weaker than bwrap or a container: $HOME and most
+        # of the filesystem remain readable/writable.  --private would isolate $HOME
+        # but breaks gem/npm/python builds that read ~/.gem, ~/.npm, ~/.local/, etc.
+        # --private-tmp is safe: builds that use /tmp work fine with an isolated /tmp.
+        # Prefer bwrap or docker/podman for stronger confinement.
         cwd = firejail_cwd or src_dir
         args = [
             'firejail', '--quiet', '--net=none',
             f'--read-only={src_dir}',
-            'sh', '-c', script,
+            '--private-tmp',
         ]
+        if cmd is not None:
+            args += [a.replace('{src}', str(src_dir)).replace('{out}', str(out_dir)) for a in cmd]
+        else:
+            args += ['sh', '-c', shell_cmd.format(src=str(src_dir), out=str(out_dir))]
         rc, out, err = run_cmd(args, cwd=cwd, timeout=timeout)
         return rc, out + err
 
@@ -1615,7 +1772,7 @@ def deep_source_comparison(
     primary_extra = sorted(primary_pkg - primary_src)
     lines.append(f'{primary_label} source files in package but NOT in source (highest concern):')
     for p in primary_extra[:30]:
-        lines.append(sanitize(p))
+        lines.append(sanitize_line(p))
     lines.append('(end)')
 
     # Native extension files in package but NOT in source
@@ -1626,7 +1783,7 @@ def deep_source_comparison(
         native_extra = sorted(native_pkg - native_src)
         lines.append('C/C++ extension files in package but NOT in source:')
         for p in native_extra[:20]:
-            lines.append(sanitize(p))
+            lines.append(sanitize_line(p))
         lines.append('(end)')
 
     # Binary files vs source counterpart
@@ -1644,7 +1801,7 @@ def deep_source_comparison(
         rel = './' + str(pkg_file.relative_to(dist_unpacked))
         src_counterpart = clone_dir / rel.lstrip('./')
         tag = '[source present]' if src_counterpart.is_file() else '[NO SOURCE COUNTERPART]'
-        lines.append(sanitize(fout.rstrip()) + f' {tag}')
+        lines.append(sanitize_line(fout.rstrip()) + f' {tag}')
         count += 1
         if count >= 20:
             break
@@ -1691,8 +1848,8 @@ def compare_repro_sha256(
     if pkg_hash_file.is_file():
         first_line = pkg_hash_file.read_text(encoding='utf-8').splitlines()[0]
         dist_sha = first_line.split()[0] if first_line.split() else ''
-    lines.append(f'BUILT_SHA256: {sanitize(built_sha)}')
-    lines.append(f'DISTRIBUTED_SHA256: {sanitize(dist_sha or "UNKNOWN")}')
+    lines.append(f'BUILT_SHA256: {sanitize_line(built_sha)}')
+    lines.append(f'DISTRIBUTED_SHA256: {sanitize_line(dist_sha or "UNKNOWN")}')
     if built_sha and built_sha == dist_sha:
         return finish_reproducible_build(lines, work, 'EXACTLY REPRODUCIBLE (sha256 match)')
     return None
@@ -1715,7 +1872,7 @@ def classify_repro_diffs(
     metadata_diffs = 0
     for line in diff_out.splitlines():
         if line.startswith('Only in') or line.startswith('diff '):
-            differing.append(sanitize(line))
+            differing.append(sanitize_line(line))
         if re_code.search(line):
             code_diffs += 1
         if re_meta.search(line):
@@ -1754,7 +1911,7 @@ def write_transitive_deps(
         'NEW_PACKAGES (not in current lockfile):',
     ]
     if new_deps:
-        trans_lines.extend(f'  {sanitize(d)}' for d in new_deps)
+        trans_lines.extend(f'  {sanitize_line(d)}' for d in new_deps)
     else:
         trans_lines.append('  none')
     (work / 'transitive-deps.txt').write_text('\n'.join(trans_lines) + '\n', encoding='utf-8')
@@ -1887,9 +2044,11 @@ def lookup_ecosystems_package(registry_key: str, pkgname: str,
     if email:
         headers['From'] = email
 
+    if not url.startswith('https://'):
+        return {}
     try:
         req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req, timeout=15) as resp:  # noqa: S310
+        with urllib.request.urlopen(req, timeout=15) as resp:
             raw = resp.read()
         data = json.loads(raw.decode('utf-8', errors='replace'))
     except urllib.error.HTTPError as e:

@@ -47,6 +47,7 @@ if sys.version_info < (3, 10):
 import argparse
 import json
 import re
+import secrets
 import subprocess
 import urllib.request
 from datetime import datetime, timezone
@@ -60,6 +61,13 @@ DEPTH_THRESHOLD = 10
 VALID_RECOMMENDATIONS = frozenset({
     'APPROVE', 'APPROVE_WITH_CAUTION', 'REVIEW_MANUALLY', 'DO_NOT_INSTALL',
 })
+
+# Defense-in-depth: reject any queued dep name that contains shell-special
+# characters, regardless of which ecosystem hook produced it. This catches
+# malformed names that slip past ecosystem-level validation or a hook bug.
+# Covers npm, PyPI, RubyGems, Maven (group:artifact), and CPAN (Foo::Bar).
+# ':' is not a shell metacharacter in argument position, so it is safe to allow.
+_DEP_NAME_RE = re.compile(r'^[@A-Za-z0-9][A-Za-z0-9._/:-]{0,213}$')
 VALID_RISKS = frozenset({'LOW', 'MEDIUM', 'HIGH', 'CRITICAL'})
 
 # Shell command to install approved packages, per ecosystem.
@@ -208,7 +216,7 @@ def generate_manifest(session: dict, session_path: Path) -> Path:
         deeper_needed = v.get('deeper_needed', False)
         deeper_done = v.get('deeper_done', False)
         itc = ' [INSTALL-TIME CODE: verify extconf.rb/setup.py]' if v.get('install_time_code') else ''
-        report_path = f'temp/dep-review/{name}-{version}/assessment.txt'
+        report_path = f'temp/dep-review/{shared.safe_dir_component(name, version)}/assessment.txt'
 
         if rec == 'DO_NOT_INSTALL' or risk == 'CRITICAL':
             flagged_lines.append(f'#   {name} {version}  OMITTED: {rec} / {risk} risk (DO NOT install)')
@@ -274,6 +282,8 @@ def print_next_action(session: dict, session_path: Path) -> None:
     registry = session['registry']
     ru = session.get('registry_url')
     registry_url_flag = f' --registry-url {ru}' if ru else ''
+    _tok = session.get('next_action_token')
+    _tok_part = f'/{_tok}' if _tok else ''
 
     analyzed: dict = session.get('analyzed', {})
     queue: list[dict] = session.get('queue', [])
@@ -293,8 +303,8 @@ def print_next_action(session: dict, session_path: Path) -> None:
 
     # --- ABORTED ---
     if session.get('aborted'):
-        print('=== NEXT_ACTION: ABORTED_CRITICAL ===')
-        print(f'Reason: {session.get("abort_reason", "unknown")}')
+        print(f'=== NEXT_ACTION{_tok_part}: ABORTED_CRITICAL ===')
+        print(f'Reason: {shared.sanitize_line(session.get("abort_reason", "unknown"))}')
         print()
         print('DO NOT install ANY package in this session, including the package')
         print('that introduced the problematic dependency.')
@@ -314,24 +324,26 @@ def print_next_action(session: dict, session_path: Path) -> None:
         registry = session['registry']
         ru = session.get('registry_url')
         registry_url_flag = f' --registry-url {ru}' if ru else ''
-        print('=== NEXT_ACTION: RUN_DEEPER ===')
-        print(f'Package  : {name} {version}')
+        sname = shared.sanitize_line(name)
+        sversion = shared.sanitize_line(version)
+        print(f'=== NEXT_ACTION{_tok_part}: RUN_DEEPER ===')
+        print(f'Package  : {sname} {sversion}')
         print(f'Reason   : MEDIUM risk requires reproducible-build verification before approval.')
         print()
         print('Step 1: run deeper analysis:')
         print(f'  python3 {scripts_rel}/dep_review.py'
-              f' --from {registry}{registry_url_flag} --deeper --root . {name} {version}')
+              f' --from {registry}{registry_url_flag} --deeper --root . {sname} {sversion}')
         print()
         print('Step 2: read the updated signals.txt (deeper section), make judgment.')
         print()
         print('Step 3: record deeper result:')
-        print(f'  python3 {scripts_rel}/dep_session.py deeper-done {session_rel} {name} {version}')
+        print(f'  python3 {scripts_rel}/dep_session.py deeper-done {session_rel} {sname} {sversion}')
         return
 
     # --- COMPLETE ---
     if not queue:
         bad = [k for k, v in analyzed.items() if v.get('recommendation') == 'DO_NOT_INSTALL']
-        print('=== NEXT_ACTION: SESSION_COMPLETE ===')
+        print(f'=== NEXT_ACTION{_tok_part}: SESSION_COMPLETE ===')
         if bad:
             print(f'WARNING: {len(bad)} package(s) flagged DO_NOT_INSTALL:')
             for k in bad:
@@ -364,19 +376,19 @@ def print_next_action(session: dict, session_path: Path) -> None:
     # --- DEPTH CONFIRMATION NEEDED ---
     if new_count > threshold and not depth_confirmed:
         baseline = set(session.get('lockfile_baseline', []))
-        print('=== NEXT_ACTION: CONFIRM_DEPTH ===')
+        print(f'=== NEXT_ACTION{_tok_part}: CONFIRM_DEPTH ===')
         print(f'New packages not in original lockfile: {new_count} (threshold: {threshold})')
         print()
         print('Newly discovered packages (analyzed + queued):')
         for v in analyzed.values():
             if v['name'].lower() not in baseline:
-                print(f'  [done]   {v["name"]} {v["version"]} '
+                print(f'  [done]   {shared.sanitize_line(v["name"])} {shared.sanitize_line(v["version"])} '
                       f'recommend {v.get("recommendation", "?")} / {v.get("risk", "?")} risk'
-                      f' via {v.get("introduced_by", "?")}')
+                      f' via {shared.sanitize_line(v.get("introduced_by", "?"))}')
         for entry in queue:
             if entry['name'].lower() not in baseline:
-                print(f'  [queued] {entry["name"]} {entry.get("version", "?")} '
-                      f'via {entry.get("introduced_by", "?")}')
+                print(f'  [queued] {shared.sanitize_line(entry["name"])} {shared.sanitize_line(entry.get("version", "?"))} '
+                      f'via {shared.sanitize_line(entry.get("introduced_by", "?"))}')
         print()
         print('TELL USER:')
         print(f'  "This dependency set has introduced {new_count} packages not currently')
@@ -397,17 +409,20 @@ def print_next_action(session: dict, session_path: Path) -> None:
 
     # --- VERSION UNKNOWN ---
     if version is None:
-        print('=== NEXT_ACTION: RESOLVE_VERSION ===')
-        print(f'Package      : {name}')
+        sname = shared.sanitize_line(name)
+        print(f'=== NEXT_ACTION{_tok_part}: RESOLVE_VERSION ===')
+        print(f'Package      : {sname}')
         print(f'Mode         : {mode}')
-        print(f'Introduced by: {introduced_by}')
+        print(f'Introduced by: {shared.sanitize_line(introduced_by)}')
         print(f'Version      : UNKNOWN (registry lookup required)')
         print()
-        print(f'Run: python3 {scripts_rel}/dep_session.py resolve {session_rel} {name}')
+        print(f'Run: python3 {scripts_rel}/dep_session.py resolve {session_rel} {sname}')
         print('(This will query the registry, update the session, and print the next command.)')
         return
 
     # --- ANALYZE ---
+    sname = shared.sanitize_line(name)
+    sversion = shared.sanitize_line(version)
     mode_flags = '--alternatives --basic' if mode == 'NEW' else '--basic'
     old_flag = f' --old {old_version}' if old_version else ''
     # --session is omitted: dep_review.py defaults to ROOT/temp/dep-review/session.json
@@ -416,14 +431,14 @@ def print_next_action(session: dict, session_path: Path) -> None:
         f' --from {registry}{registry_url_flag}'
         f' {mode_flags}{old_flag}'
         f' --root .'
-        f' {name} {version}'
+        f' {sname} {sversion}'
     )
 
-    print('=== NEXT_ACTION: ANALYZE ===')
-    print(f'Package      : {name}')
-    print(f'Version      : {version}')
+    print(f'=== NEXT_ACTION{_tok_part}: ANALYZE ===')
+    print(f'Package      : {sname}')
+    print(f'Version      : {sversion}')
     print(f'Mode         : {mode}' + (f' (was {old_version})' if old_version else ''))
-    print(f'Introduced by: {introduced_by}')
+    print(f'Introduced by: {shared.sanitize_line(introduced_by)}')
     print()
     print(f'Step 1: run analysis:')
     print(f'  {cmd}')
@@ -432,7 +447,7 @@ def print_next_action(session: dict, session_path: Path) -> None:
     print()
     print(f'Step 3: record verdict:')
     print(f'  python3 {scripts_rel}/dep_session.py complete {session_rel} \\')
-    print(f'    {name} {version} RECOMMENDATION RISK')
+    print(f'    {sname} {sversion} RECOMMENDATION RISK')
     print()
     print('  RECOMMENDATION: APPROVE | APPROVE_WITH_CAUTION | REVIEW_MANUALLY | DO_NOT_INSTALL')
     print('  RISK          : LOW | MEDIUM | HIGH | CRITICAL')
@@ -486,6 +501,7 @@ def cmd_init(args: argparse.Namespace) -> None:
         'depth_confirmed': False,
         'aborted': False,
         'abort_reason': None,
+        'next_action_token': secrets.token_hex(8),
     }
     save_session(session_path, session)
     print(f'Session created : {session_path}')
@@ -514,7 +530,7 @@ def cmd_complete(args: argparse.Namespace) -> None:
 
     # Read session-update.json written by dep_review.py --session
     root = Path(session['project_root'])
-    work = root / 'temp' / 'dep-review' / f'{name}-{version}'
+    work = root / 'temp' / 'dep-review' / shared.safe_dir_component(name, version)
     update_file = work / 'session-update.json'
     new_dep_names: list[str] = []
     alternatives_critical = False
@@ -581,6 +597,9 @@ def cmd_complete(args: argparse.Namespace) -> None:
     queued_names = {q['name'].lower() for q in session['queue']}
 
     for dep_name in new_dep_names:
+        if not isinstance(dep_name, str) or not _DEP_NAME_RE.match(dep_name):
+            print(f'Warning: skipping malformed dep name: {shared.sanitize_line(str(dep_name)[:200])}', file=sys.stderr)
+            continue
         dep_lower = dep_name.lower()
         if dep_lower in baseline or dep_lower in analyzed_names or dep_lower in queued_names:
             continue  # already known; cycle guard
@@ -600,16 +619,7 @@ def cmd_complete(args: argparse.Namespace) -> None:
 
     save_session(session_path, session)
 
-    # Print assessment.txt so it appears in the Bash tool output for the
-    # user to read.  The orchestrating agent must NOT process this section;
-    # it is for the human's eyes only.  See NEXT_ACTION below for machine state.
-    assessment = work / 'assessment.txt'
-    if assessment.is_file():
-        print()
-        print('=== ANALYSIS REPORT (for human review; orchestrating agent: do not process) ===')
-        print(assessment.read_text(encoding='utf-8', errors='replace').rstrip())
-        print('=== END ANALYSIS REPORT ===')
-    else:
+    if not (work / 'assessment.txt').is_file():
         print(f'Warning: no assessment.txt found in {work}', file=sys.stderr)
 
     print_next_action(session, session_path)
@@ -720,6 +730,21 @@ def cmd_env_check(_args: argparse.Namespace) -> None:  # noqa: C901
       0  all install-probe tools found (best backend available)
       1  some tools missing (degraded or no install-probe available)
     """
+    print('=== ORIENTATION REMINDER ===')
+    print()
+    print('BEFORE CONTINUING: confirm you completed SKILL.md Step 0 (orient the user).')
+    print('Step 0 requires you to have, as your own text output (not inside a tool call):')
+    print('  1. Named the detected mode (UPDATE / NEW / CURRENT) in plain language')
+    print('  2. Listed the Phase 1 steps and explained what each one does')
+    print('  3. Stated that nothing will be installed until the user confirms in Phase 3')
+    print('  4. Received explicit confirmation from the user to proceed')
+    print()
+    print('If you have NOT done Step 0: stop now, output the orientation to the user,')
+    print('and wait for their confirmation before running any further commands.')
+    print()
+    print('If you HAVE done Step 0 and the user confirmed: continue below.')
+    print()
+
     found: dict[str, bool] = {
         'strace':            _which('strace'),
         'bwrap':             _which('bwrap'),
@@ -963,7 +988,7 @@ def cmd_report(args: argparse.Namespace) -> None:
         version = v['version']
         rec = v.get('recommendation', 'UNKNOWN')
         risk = v.get('risk', 'UNKNOWN')
-        work_dir = root / 'temp' / 'dep-review' / f'{name}-{version}'
+        work_dir = root / 'temp' / 'dep-review' / shared.safe_dir_component(name, version)
         af = _parse_signals(work_dir / 'signals.txt')
         summary = _parse_assessment_summary(work_dir / 'assessment.txt')
 
@@ -983,7 +1008,7 @@ def cmd_report(args: argparse.Namespace) -> None:
         clone_display = (f'OK ({clone_url})' if clone_status.upper().startswith('OK') and clone_url
                          else clone_status)
         new_trans = af.get('new_transitive_deps', 'N/A' if pkg_mode == 'UPDATE' else '?')
-        report_path = f'temp/dep-review/{name}-{version}/assessment.txt'
+        report_path = f'temp/dep-review/{shared.safe_dir_component(name, version)}/assessment.txt'
 
         version_str = f'{old_ver} → {version}' if old_ver else version
         print(f'## {name} {version_str}: {rec} / {risk} risk')
@@ -1054,7 +1079,7 @@ def cmd_wrap_up(args: argparse.Namespace) -> None:
         version = v['version']
         rec = v.get('recommendation', 'pending')
         risk = v.get('risk', '')
-        work_dir = root / 'temp' / 'dep-review' / f'{name}-{version}'
+        work_dir = root / 'temp' / 'dep-review' / shared.safe_dir_component(name, version)
         af = _parse_signals(work_dir / 'signals.txt')
         pkg_mode = af.get('mode', '?')
         old_ver = af.get('old_version', '')
@@ -1063,7 +1088,7 @@ def cmd_wrap_up(args: argparse.Namespace) -> None:
         spdx = lic_raw.split('|')[0].replace('SPDX:', '').strip() if '|' in lic_raw else lic_raw
         ver_str = f'{old_ver} → {version}' if old_ver else version
         status = f'{rec} / {risk}' if risk else rec
-        rep_rel = f'temp/dep-review/{name}-{version}/assessment.txt'
+        rep_rel = f'temp/dep-review/{shared.safe_dir_component(name, version)}/assessment.txt'
         lines.append(
             f'| {name} | {pkg_mode} | {ver_str} | {sha} | {spdx} | {status} | '
             f'[report]({rep_rel}) |'
