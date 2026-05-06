@@ -730,6 +730,21 @@ def cmd_env_check(_args: argparse.Namespace) -> None:  # noqa: C901
       0  all install-probe tools found (best backend available)
       1  some tools missing (degraded or no install-probe available)
     """
+    print('=== ORIENTATION REMINDER ===')
+    print()
+    print('BEFORE CONTINUING: confirm you completed SKILL.md Step 0 (orient the user).')
+    print('Step 0 requires you to have, as your own text output (not inside a tool call):')
+    print('  1. Named the detected mode (UPDATE / NEW / CURRENT) in plain language')
+    print('  2. Listed the Phase 1 steps and explained what each one does')
+    print('  3. Stated that nothing will be installed until the user confirms in Phase 3')
+    print('  4. Received explicit confirmation from the user to proceed')
+    print()
+    print('If you have NOT done Step 0: stop now, output the orientation to the user,')
+    print('and wait for their confirmation before running any further commands.')
+    print()
+    print('If you HAVE done Step 0 and the user confirmed: continue below.')
+    print()
+
     found: dict[str, bool] = {
         'strace':            _which('strace'),
         'bwrap':             _which('bwrap'),
