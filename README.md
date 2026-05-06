@@ -285,13 +285,20 @@ each step before taking action.
 
 ## Current status
 
-This is *not* yet production-ready. We hope you'll work with us to
+This is an early-stage technology demonstration.
+It is *not* yet production-ready. We hope you'll work with us to
 make it that way.
+
+In particular, this code it *not* ready for malicious packages.
+There's been some security analysis of it (thank you to Andrew Nesbitt)
+and known problems have been addressed, but it will require effort to
+make it more ready for that.
 
 Most of the code is currently vibe-coded. That's not as bad as you might
 think in this case, because most of the code involves "download data from X"
 or "do trivial analysis of downloaded data and provide the various summaries
-to an AI sub-agent". The point of the deterministic code is to provide
+to an AI sub-agent". There's also not a lot of code in the first place.
+The point of the deterministic code is to provide
 a rich source of data for the AI sub-agent to review
 and heuristically summarize. So for a vibe-coding task this is a
 relatively easy task. That doesn't mean we can just trust the vibe-coded
