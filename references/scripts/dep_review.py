@@ -1300,6 +1300,11 @@ def run_analysis(  # noqa: C901
             ]) + '\n',
             encoding='utf-8',
         )
+        # Tombstone read by dep_session.py complete to enforce the gate at the
+        # script level, independent of what the sub-agent reports.
+        (work / 'adversarial-abort.flag').write_text(
+            'ADVERSARIAL_GATE: ABORT\n', encoding='utf-8'
+        )
         (work / 'source-url.txt').write_text('', encoding='utf-8')
         (work / 'clone-status.txt').write_text(
             'CLONE_STATUS: SKIPPED (adversarial gate triggered)\n', encoding='utf-8'
@@ -2078,6 +2083,9 @@ def main() -> None:  # noqa: C901 (complexity acceptable for CLI validation)
         do_basic = True
 
     work.mkdir(parents=True, exist_ok=True)
+    # Clear any stale adversarial-abort tombstone from a prior run so a
+    # legitimate re-review of the same version is not permanently blocked.
+    (work / 'adversarial-abort.flag').unlink(missing_ok=True)
     diff_mode = old_ver is not None
     if session_arg:
         session_file = Path(session_arg).resolve()
