@@ -14,6 +14,7 @@ import hooks_ruby
 
 
 def load_tests(loader, tests, ignore):
-    for mod in (analysis_shared, fetch_json, dep_review, dep_session, hooks_ruby):
+    for mod in (analysis_shared, fetch_json, dep_review,
+                dep_session, hooks_ruby):
         tests.addTests(doctest.DocTestSuite(mod))
     return tests

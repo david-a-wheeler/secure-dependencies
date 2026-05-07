@@ -39,18 +39,21 @@ class TestParseAutoFindings(unittest.TestCase):
         self.assertEqual(f['clone_status'], 'OK')
 
     def test_missing_file_returns_empty_dict(self):
-        self.assertEqual(dep_session._parse_signals(Path('/no/such/file.txt')), {})
+        self.assertEqual(
+            dep_session._parse_signals(Path('/no/such/file.txt')), {})
 
 
 class TestParseReportSummary(unittest.TestCase):
 
     def test_extracts_summary_text(self):
-        summary = dep_session._parse_assessment_summary(FIXTURES / 'assessment.txt')
+        summary = dep_session._parse_assessment_summary(
+            FIXTURES / 'assessment.txt')
         self.assertIn('good', summary)
         self.assertIn('well-maintained', summary)
 
     def test_missing_file_returns_fallback(self):
-        result = dep_session._parse_assessment_summary(Path('/no/such/file.txt'))
+        result = dep_session._parse_assessment_summary(
+            Path('/no/such/file.txt'))
         self.assertEqual(result, '(assessment.txt not found)')
 
 
@@ -72,4 +75,6 @@ class TestReadLockfileBaseline(unittest.TestCase):
     def test_non_rubygems_returns_empty(self):
         for registry in ('pypi', 'npm'):
             with self.subTest(registry=registry):
-                self.assertEqual(dep_session._read_lockfile_baseline(FIXTURES, registry), [])
+                self.assertEqual(
+                    dep_session._read_lockfile_baseline(FIXTURES, registry),
+                    [])
