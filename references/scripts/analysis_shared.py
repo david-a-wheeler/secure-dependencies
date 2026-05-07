@@ -24,6 +24,7 @@
 
 import base64
 import hashlib
+import io
 import json
 import re
 import shutil
@@ -312,22 +313,47 @@ def levenshtein(a: str, b: str) -> int:
 # be reporting the data as provided.
 
 # Matches chars outside the printable-ASCII + tab + LF + CR fast path.
-_SANITIZE_RE = re.compile(r'[^\x09\x0a\x0d\x20-\x7e]')
+# \x1b (ESC) is already caught by [^\x09\x0a\x0d\x20-\x7e] since it is
+# below \x20; listed explicitly so the intent is clear to readers.
+_SANITIZE_RE = re.compile(r'[^\x09\x0a\x0d\x20-\x7e]|\x1b')
 _SANITIZE_NEWLINE_RE = re.compile(r'[\r\n]+')
+
+# Strips complete ECMA-48 terminal escape sequences before character-level
+# sanitization runs, so sequences are removed cleanly rather than leaving
+# '?' + tail characters.
+#
+# 1. CSI (ESC [): parameter bytes, optional intermediate bytes, final byte.
+# 2. String-type sequences (SOS=X, DCS=P, OSC=], PM=^, APC=_): content up to
+#    ST (ESC \) or BEL (\x07), terminator optional to catch unterminated ones.
+#    Covers OSC hyperlinks, window titles, device control strings, etc.
+# 3. Two-character Fe sequences (ESC + 0x40-0x7E): SS2, SS3, NEL, RI, RIS,
+#    keypad modes, etc. Each is a single byte after ESC.
+_TERMINAL_ESCAPE_RE = re.compile(
+    r'\x1b(?:'
+    r'\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]'            # CSI sequences
+    r'|[\x50\x58\x5d\x5e\x5f][^\x1b\x07]*(?:\x1b\\|\x07)?'  # SOS, DCS, OSC, PM, APC
+    r'|[\x40-\x7e]'                                        # two-char Fe sequences
+    r')'
+)
 
 
 def _sanitize_char(m: re.Match) -> str:
-    """Return char if it's allowed, else return ?"""
     ch = m.group(0)
+    if ch == '\x1b':  # naked or malformed ESC not consumed by _TERMINAL_ESCAPE_RE
+        return '?'
     cat = unicodedata.category(ch)
-    return ch if (cat[0] in ('L', 'N', 'P', 'S') or cat == 'Zs') else '?'
+    # Allow letters, numbers, punctuation, symbols, combining marks, and space
+    # separators. This preserves international text including diacritics.
+    return ch if (cat[0] in ('L', 'N', 'P', 'S', 'M') or cat == 'Zs') else '?'
 
 
 def sanitize(text: str) -> str:
-    """Replace disallowed Unicode with '?'; preserve tab, newline, and CR.
+    """Strip terminal escape sequences; replace disallowed chars with '?'.
 
-    Use for multi-line attacker-controlled content (scripts, long blobs).
-    For single-line fields use sanitize_line().
+    Preserves tab, newline, CR, printable ASCII, and valid Unicode (letters,
+    numbers, punctuation, symbols, combining marks, space separators).
+    Use for multi-line attacker-controlled content. For single-line fields
+    use sanitize_line().
 
     >>> sanitize('hello')
     'hello'
@@ -339,18 +365,31 @@ def sanitize(text: str) -> str:
     'del?char'
     >>> sanitize('\\u202ereverse')
     '?reverse'
+    >>> sanitize('ni\\u0303o')
+    'ni\\u0303o'
+    >>> sanitize('\\x1b[31mError\\x1b[0m')
+    'Error'
+    >>> sanitize('\\x1b]8;;http://example.com\\x1b\\\\Anchor\\x1b]8;;\\x1b\\\\')
+    'Anchor'
     """
+    text = _TERMINAL_ESCAPE_RE.sub('', text)
     return _SANITIZE_RE.sub(_sanitize_char, text)
 
 
 def sanitize_line(text: str) -> str:
-    """Collapse newline/CR runs to a space, then apply sanitize().
+    """Collapse newline/CR runs to a space AND apply sanitize(); safe anywhere.
 
     Use for single-line fields (author, version, URL, license, etc.) where
     an embedded newline would break structured output. Consecutive \\r and \\n
     characters (including Windows \\r\\n) are collapsed to a single space so
     the field remains readable when legitimate data contains a stray newline.
     Tab is preserved. For multi-line content use sanitize().
+
+    The internal sanitize() call is intentional: this function is used both
+    inside Printer (where sanitize() would run again anyway) and in plain
+    write_text() and print() paths that have no other sanitization. Keeping
+    it self-contained means callers need not track whether their output goes
+    through Printer or not.
 
     >>> sanitize_line('hello')
     'hello'
@@ -364,6 +403,51 @@ def sanitize_line(text: str) -> str:
     '?reverse'
     """
     return sanitize(_SANITIZE_NEWLINE_RE.sub(' ', text))
+
+
+class Printer:
+    """Write-through, auto-sanitizing printer. Call like print().
+
+    Pass a Path (opens and owns the file), a file object such as sys.stdout
+    or io.StringIO() (does not close it), or nothing (defaults to sys.stdout).
+
+    Every call sanitizes all output via sanitize(), which strips adversarial
+    characters (bidi overrides, zero-width chars, C0/C1 controls) while
+    preserving newlines within multi-line blocks.
+
+    Use as a context manager to ensure owned files are closed:
+        with Printer(work / 'out.txt') as p:
+            p('line one')
+            p(f'value: {external_data}')
+
+    >>> import io
+    >>> p = Printer(io.StringIO())
+    >>> p('hello \\u202e world')
+    >>> p.getvalue()
+    'hello ? world\\n'
+    """
+
+    def __init__(self, dest: 'Path | io.IOBase' = sys.stdout) -> None:
+        if isinstance(dest, Path):
+            self._f: io.IOBase = dest.open('w', encoding='utf-8')
+            self._owned = True
+        else:
+            self._f = dest
+            self._owned = False
+
+    def __call__(self, *args: object, sep: str = ' ', end: str = '\n') -> None:
+        self._f.write(sanitize(sep.join(str(a) for a in args)) + end)  # type: ignore[attr-defined]
+
+    def getvalue(self) -> str:
+        """Return accumulated output; only valid for StringIO-backed Printers."""
+        return self._f.getvalue()  # type: ignore[attr-defined]
+
+    def close(self) -> None:
+        if self._owned:
+            self._f.close()
+
+    def __enter__(self) -> 'Printer': return self
+    def __exit__(self, *_: object) -> None: self.close()
 
 
 def run_cmd(
@@ -452,6 +536,7 @@ def blind_scan(
     pattern: str,
     target: Path,
     work: Path,
+    p: 'Printer',
     include_globs: list[str] | None = None,
 ) -> int:
     """Run grep; save raw matches (DO NOT read); write sanitized summary.
@@ -462,7 +547,6 @@ def blind_scan(
     Returns number of matching lines.
     """
     raw_file = work / f'raw-scan-{label}.txt'
-    summary_file = work / f'summary-scan-{label}.txt'
 
     cmd = ['grep', '-rnP', pattern]
     for glob in (include_globs or []):
@@ -472,27 +556,26 @@ def blind_scan(
 
     if rc > 1:
         # grep error (rc==2+): pattern failure or other error (not a match result)
-        err_msg = sanitize_line(stderr.strip())
         raw_file.write_text(f'GREP_ERROR: {stderr}', encoding='utf-8', errors='replace')
-        summary_file.write_text(
-            f'label={label}\nmatch_count=0\nGREP_ERROR: {err_msg}\n', encoding='utf-8'
-        )
+        p(f'label={label}')
+        p('match_count=0')
+        p(f'GREP_ERROR: {stderr.strip()}')
         return 0
 
     # rc==0 means matches found; rc==1 means no matches; both are normal grep exits
     raw_file.write_text(stdout, encoding='utf-8', errors='replace')
     count = len([line for line in stdout.splitlines() if line])
-    summary_lines = [f'label={label}', f'match_count={count}']
+    p(f'label={label}')
+    p(f'match_count={count}')
     if count > 0:
-        summary_lines.append('files_with_matches:')
+        p('files_with_matches:')
         seen: set[str] = set()
         for line in stdout.splitlines():
             if ':' in line:
                 fname = line.split(':', 1)[0]
                 if fname not in seen:
                     seen.add(fname)
-                    summary_lines.append(sanitize_line(fname))
-    summary_file.write_text('\n'.join(summary_lines) + '\n', encoding='utf-8')
+                    p(fname)
     return count
 
 
@@ -632,10 +715,11 @@ def clone_source_repo(
     pkgname: str,
     new_ver: str,
     work: Path,
+    p: 'Printer',
 ) -> tuple[bool, str, bool, bool]:
     """Shallow-clone the upstream source at the version tag.
 
-    Writes: source-url.txt, clone-status.txt, raw-git-clone-output.txt.
+    Writes: source-url.txt, clone-status.txt (via p), raw-git-clone-output.txt.
     Returns: (clone_ok, version_tag, commit_guessed, source_likely_incompatible).
       clone_ok:                  True if a usable clone exists in work/source/
       version_tag:               matched tag string, or 'GUESSED:<sha>', or ''
@@ -646,22 +730,20 @@ def clone_source_repo(
                                  to any specific commit and is HIGH RISK. May be
                                  benign (unpinned build tooling) but is suspicious.
     """
-    (work / 'source-url.txt').write_text(sanitize_line(source_url) + '\n', encoding='utf-8')
+    with Printer(work / 'source-url.txt') as _p:
+        _p(sanitize_line(source_url))
 
-    clone_lines: list[str] = []
     clone_ok = False
     version_tag = ''
     commit_guessed = False
     source_likely_incompatible = False
 
     if not source_url:
-        clone_lines.append('CLONE_STATUS: SKIPPED (no source URL)')
-        (work / 'clone-status.txt').write_text('\n'.join(clone_lines) + '\n', encoding='utf-8')
+        p('CLONE_STATUS: SKIPPED (no source URL)')
         return False, '', False, False
 
     if not source_url.startswith('https://'):
-        clone_lines.append('CLONE_STATUS: SKIPPED (non-https source URL)')
-        (work / 'clone-status.txt').write_text('\n'.join(clone_lines) + '\n', encoding='utf-8')
+        p('CLONE_STATUS: SKIPPED (non-https source URL)')
         return False, '', False, False
 
     # Find a matching version tag via ls-remote (no clone needed)
@@ -691,8 +773,8 @@ def clone_source_repo(
     if not tag:
         # No version tag found. Attempt to locate the release commit by scanning
         # recent history for a commit message that mentions the version string.
-        clone_lines.append(f'SOURCE_URL: {sanitize_line(source_url)}')
-        clone_lines.append('NO_TAG: no matching version tag found in repository')
+        p(f'SOURCE_URL: {sanitize_line(source_url)}')
+        p('NO_TAG: no matching version tag found in repository')
         source_dir = work / 'source'
         guessed_sha = ''
         commits: list[tuple[str, str, str]] = []  # (sha, date, subject)
@@ -741,7 +823,7 @@ def clone_source_repo(
             clone_ok = True
             version_tag = f'GUESSED:{guessed_sha}'
 
-            # Show ±2 commits around the guessed one so the AI can see context
+            # Show +-2 commits around the guessed one so the AI can see context
             start = max(0, guessed_idx - 2)
             end = min(len(commits), guessed_idx + 3)
             nearby: list[str] = []
@@ -752,45 +834,38 @@ def clone_source_repo(
                     f'  {marker} {sha[:12]}  {date[:19]}  {sanitize_line(subject)}'
                 )
 
-            clone_lines.extend([
-                f'CLONE_STATUS: GUESSED (commit inferred from history, no version tag)',
-                f'GUESSED_COMMIT: {guessed_sha}',
-                'NEARBY_COMMITS (>>> = guessed commit):',
-            ] + nearby + [
-                'WARNING: Commit was inferred by matching commit message text, not a',
-                '  cryptographically-anchored version tag. The AI reviewer MUST explicitly',
-                '  flag this uncertainty in the analysis report and ask the human to verify.',
-            ])
+            p('CLONE_STATUS: GUESSED (commit inferred from history, no version tag)')
+            p(f'GUESSED_COMMIT: {guessed_sha}')
+            p('NEARBY_COMMITS (>>> = guessed commit):')
+            for nearby_line in nearby:
+                p(nearby_line)
+            p('WARNING: Commit was inferred by matching commit message text, not a')
+            p('  cryptographically-anchored version tag. The AI reviewer MUST explicitly')
+            p('  flag this uncertainty in the analysis report and ask the human to verify.')
         else:
-            clone_lines.append('CLONE_STATUS: SKIPPED (no matching tag or commit message found)')
-            clone_lines.extend([
-                'HIGH_RISK: Source repository identified but published version cannot be matched',
-                '  to any commit or tag. The distributed package may not correspond to the',
-                '  listed source repository at all.',
-                'NOTE: This may be benign (e.g., the project does not use tags, or build tooling',
-                '  was updated and is not pinned), but it is suspicious and warrants explicit',
-                '  human review before installation.',
-            ])
+            p('CLONE_STATUS: SKIPPED (no matching tag or commit message found)')
+            p('HIGH_RISK: Source repository identified but published version cannot be matched')
+            p('  to any commit or tag. The distributed package may not correspond to the')
+            p('  listed source repository at all.')
+            p('NOTE: This may be benign (e.g., the project does not use tags, or build tooling')
+            p('  was updated and is not pinned), but it is suspicious and warrants explicit')
+            p('  human review before installation.')
             source_likely_incompatible = True
             if commits:
-                clone_lines.append('RECENT_COMMITS (for manual inspection):')
+                p('RECENT_COMMITS (for manual inspection):')
                 for sha, date, subject in commits[:5]:
-                    clone_lines.append(
-                        f'  {sha[:12]}  {date[:19]}  {sanitize_line(subject)}'
-                    )
+                    p(f'  {sha[:12]}  {date[:19]}  {sanitize_line(subject)}')
     else:
         version_tag = tag
-        clone_lines.extend([
-            f'VERSION_TAG: {sanitize_line(tag)}',
-            f'SOURCE_URL: {sanitize_line(source_url)}',
-        ])
+        p(f'VERSION_TAG: {sanitize_line(tag)}')
+        p(f'SOURCE_URL: {sanitize_line(source_url)}')
         source_dir = work / 'source'
         if source_dir.exists() and any(source_dir.iterdir()):
             # Already cloned in a previous run; reuse existing checkout
             (work / 'raw-git-clone-output.txt').write_text(
                 'Reused existing clone from previous run.\n', encoding='utf-8'
             )
-            clone_lines.append('CLONE_STATUS: OK (reused)')
+            p('CLONE_STATUS: OK (reused)')
             clone_ok = True
         else:
             rc_clone, _, clone_err = run_cmd(
@@ -801,12 +876,11 @@ def clone_source_repo(
                 clone_err, encoding='utf-8', errors='replace'
             )
             if rc_clone == 0:
-                clone_lines.append('CLONE_STATUS: OK')
+                p('CLONE_STATUS: OK')
                 clone_ok = True
             else:
-                clone_lines.append('CLONE_STATUS: FAILED')
+                p('CLONE_STATUS: FAILED')
 
-    (work / 'clone-status.txt').write_text('\n'.join(clone_lines) + '\n', encoding='utf-8')
     return clone_ok, version_tag, commit_guessed, source_likely_incompatible
 
 
@@ -818,10 +892,11 @@ def lookup_openssf_badge(
     source_url: str,
     pkgname: str,
     work: Path,
+    p: 'Printer',
 ) -> dict[str, object]:
     """Query bestpractices.dev for a badge given the package's source URL.
 
-    Writes: badge-status.txt, raw-badge-search.json, raw-badge-data.json.
+    Writes: badge-status.txt (via p), raw-badge-search.json, raw-badge-data.json.
     Returns dict with keys: found (bool), id (str), level (str),
     tiered (str), baseline_tiered (str).
     """
@@ -863,27 +938,16 @@ def lookup_openssf_badge(
                 except (ValueError, KeyError, TypeError):
                     result['found'] = False
 
-    badge_lines = [
-        f'=== OpenSSF Best Practices Badge: {pkgname} ===',
-        f'SOURCE_URL_QUERIED: {sanitize_line(source_url)}',
-        f'BADGE_FOUND: {"yes" if result["found"] else "no"}',
-    ]
+    p(f'=== OpenSSF Best Practices Badge: {pkgname} ===')
+    p(f'SOURCE_URL_QUERIED: {sanitize_line(source_url)}')
+    p(f'BADGE_FOUND: {"yes" if result["found"] else "no"}')
     if result['found']:
-        badge_lines.extend([
-            f'BADGE_PROJECT_ID: {sanitize_line(str(result["id"]))}',
-            f'BADGE_LEVEL (metal): {sanitize_line(str(result["level"]))}',
-        ])
+        p(f'BADGE_PROJECT_ID: {sanitize_line(str(result["id"]))}')
+        p(f'BADGE_LEVEL (metal): {sanitize_line(str(result["level"]))}')
         if result['tiered']:
-            badge_lines.append(
-                f'METAL_TIERED_PERCENTAGE: {result["tiered"]}'
-                ' (passing=100, silver=200, gold=300)'
-            )
+            p(f'METAL_TIERED_PERCENTAGE: {result["tiered"]} (passing=100, silver=200, gold=300)')
         if result['baseline_tiered']:
-            badge_lines.append(
-                f'BASELINE_TIERED_PERCENTAGE: {result["baseline_tiered"]}'
-                ' (baseline_1=100, baseline_2=200, baseline_3=300)'
-            )
-    (work / 'badge-status.txt').write_text('\n'.join(badge_lines) + '\n', encoding='utf-8')
+            p(f'BASELINE_TIERED_PERCENTAGE: {result["baseline_tiered"]} (baseline_1=100, baseline_2=200, baseline_3=300)')
     return result
 
 
@@ -951,7 +1015,7 @@ def parse_scorecard_checks(work: Path) -> dict[str, float]:
 # Commit activity
 # ---------------------------------------------------------------------------
 
-def count_recent_commits(source_dir: Path, work: Path) -> dict | None:
+def count_recent_commits(source_dir: Path, p: 'Printer') -> dict | None:
     """Collect commit-activity statistics for the cloned source repo.
 
     Fetches all commit timestamps from the last 12 months in a single git
@@ -967,7 +1031,7 @@ def count_recent_commits(source_dir: Path, work: Path) -> dict | None:
                      'recently_started', 'recently_stopped', 'inactive',
                      or 'insufficient_data' (fewer than 3 months of data)
 
-    Writes: recent-commits.txt
+    Writes: recent-commits.txt (via p)
     """
     import time as _time
 
@@ -1024,16 +1088,16 @@ def count_recent_commits(source_dir: Path, work: Path) -> dict | None:
         trend = 'stable'
 
     # Write human-readable summary.
-    lines = ['=== Commit activity (last 12 months) ===', '']
-    lines.append(f'TOTAL_12MO: {total}')
-    lines.append(f'TREND: {trend}')
-    lines.append('')
-    lines.append('Monthly buckets (most recent first):')
+    p('=== Commit activity (last 12 months) ===')
+    p('')
+    p(f'TOTAL_12MO: {total}')
+    p(f'TREND: {trend}')
+    p('')
+    p('Monthly buckets (most recent first):')
     for i, count in enumerate(buckets):
         start_days = i * 30
         end_days = start_days + 29
-        lines.append(f'  {start_days:3d}-{end_days:3d} days ago: {count:4d} commits')
-    (work / 'recent-commits.txt').write_text('\n'.join(lines) + '\n', encoding='utf-8')
+        p(f'  {start_days:3d}-{end_days:3d} days ago: {count:4d} commits')
 
     return {'total': total, 'buckets': buckets, 'trend': trend}
 
@@ -1042,10 +1106,10 @@ def count_recent_commits(source_dir: Path, work: Path) -> dict | None:
 # Known vulnerability lookup (OSV)
 # ---------------------------------------------------------------------------
 
-def lookup_vulnerabilities(pkgname: str, version: str, osv_ecosystem: str, work: Path) -> dict:
+def lookup_vulnerabilities(pkgname: str, version: str, osv_ecosystem: str, p: 'Printer') -> dict:
     """Query the OSV database for known vulnerabilities affecting pkgname version.
 
-    Writes: vulnerabilities.txt
+    Writes: vulnerabilities.txt (via p)
     Returns dict with:
       count (int): total number of matching vulnerabilities
       vulns (list[dict]): each entry has 'id', 'summary', 'severity'
@@ -1055,7 +1119,8 @@ def lookup_vulnerabilities(pkgname: str, version: str, osv_ecosystem: str, work:
         'version': version,
     }).encode()
     raw = http_post('https://api.osv.dev/v1/query', body)
-    lines = [f'=== Known vulnerabilities: {pkgname} {version} ===', '']
+    p(f'=== Known vulnerabilities: {pkgname} {version} ===')
+    p('')
     vulns: list[dict] = []
     if raw:
         try:
@@ -1072,16 +1137,15 @@ def lookup_vulnerabilities(pkgname: str, version: str, osv_ecosystem: str, work:
         except (ValueError, KeyError):
             pass
     if vulns:
-        lines.append(f'VULNERABILITY_COUNT: {len(vulns)}')
-        lines.append('')
+        p(f'VULNERABILITY_COUNT: {len(vulns)}')
+        p('')
         for v in vulns:
-            lines.append(f'  {v["id"]}  severity={v["severity"] or "unknown"}')
+            p(f'  {v["id"]}  severity={v["severity"] or "unknown"}')
             if v['summary']:
-                lines.append(f'    {v["summary"]}')
+                p(f'    {v["summary"]}')
     else:
-        lines.append('VULNERABILITY_COUNT: 0')
-        lines.append('No known vulnerabilities found in OSV database.')
-    (work / 'vulnerabilities.txt').write_text('\n'.join(lines) + '\n', encoding='utf-8')
+        p('VULNERABILITY_COUNT: 0')
+        p('No known vulnerabilities found in OSV database.')
     return {'count': len(vulns), 'vulns': vulns}
 
 
@@ -1089,11 +1153,11 @@ def lookup_vulnerabilities(pkgname: str, version: str, osv_ecosystem: str, work:
 # Security policy (SECURITY.md)
 # ---------------------------------------------------------------------------
 
-def check_security_policy(source_dir: Path, work: Path) -> bool:
+def check_security_policy(source_dir: Path, p: 'Printer') -> bool:
     """Check whether the source repo contains a SECURITY.md file.
 
     Checks: SECURITY.md, .github/SECURITY.md, docs/SECURITY.md
-    Writes: security-policy.txt
+    Writes: security-policy.txt (via p)
     Returns True if found.
     """
     candidates = [
@@ -1101,16 +1165,16 @@ def check_security_policy(source_dir: Path, work: Path) -> bool:
         source_dir / '.github' / 'SECURITY.md',
         source_dir / 'docs' / 'SECURITY.md',
     ]
-    found_path = next((p for p in candidates if p.is_file()), None)
-    lines = ['=== Security policy ===', '']
+    found_path = next((fp for fp in candidates if fp.is_file()), None)
+    p('=== Security policy ===')
+    p('')
     if found_path:
         rel = found_path.relative_to(source_dir)
-        lines.append(f'SECURITY_POLICY_FOUND: YES ({rel})')
-        lines.append('Context: Project has a SECURITY.md vulnerability disclosure policy.')
+        p(f'SECURITY_POLICY_FOUND: YES ({rel})')
+        p('Context: Project has a SECURITY.md vulnerability disclosure policy.')
     else:
-        lines.append('SECURITY_POLICY_FOUND: NO')
-        lines.append('Context: No SECURITY.md found. Vulnerability reporting process is unclear.')
-    (work / 'security-policy.txt').write_text('\n'.join(lines) + '\n', encoding='utf-8')
+        p('SECURITY_POLICY_FOUND: NO')
+        p('Context: No SECURITY.md found. Vulnerability reporting process is unclear.')
     return found_path is not None
 
 
@@ -1124,17 +1188,16 @@ def compare_pkg_vs_source(
     work: Path,
     pkg_excludes: re.Pattern[str],
     src_excludes: re.Pattern[str],
+    p: 'Printer',
 ) -> int:
     """Compare distributed package file tree vs source repo.
 
-    Writes: extra-in-package.txt, raw-pkg-paths.txt, raw-src-paths.txt,
+    Writes: extra-in-package.txt (via p), raw-pkg-paths.txt, raw-src-paths.txt,
             raw-extra-in-package.txt.
     Returns: number of extra files (in package but not in source).
     """
     if not unpacked_dir.is_dir() or not source_dir.is_dir():
-        (work / 'extra-in-package.txt').write_text(
-            'EXTRA_FILES_IN_PACKAGE: N/A (no clone)\n', encoding='utf-8'
-        )
+        p('EXTRA_FILES_IN_PACKAGE: N/A (no clone)')
         return 0
 
     def collect_paths(base: Path, excludes: re.Pattern[str]) -> list[str]:
@@ -1155,15 +1218,12 @@ def compare_pkg_vs_source(
     (work / 'raw-src-paths.txt').write_text('\n'.join(src_paths) + '\n', encoding='utf-8')
     (work / 'raw-extra-in-package.txt').write_text('\n'.join(extra) + '\n', encoding='utf-8')
 
-    (work / 'extra-in-package.txt').write_text(
-        '\n'.join([
-            f'EXTRA_FILES_IN_PACKAGE: {len(extra)}',
-            '(files in distributed package but absent from source repo)',
-            'Expected extras: METADATA, RECORD, PKG-INFO, .gemspec, Gemfile.lock, dist-info/',
-            '',
-        ] + [sanitize_line(p) for p in extra]) + '\n',
-        encoding='utf-8',
-    )
+    p(f'EXTRA_FILES_IN_PACKAGE: {len(extra)}')
+    p('(files in distributed package but absent from source repo)')
+    p('Expected extras: METADATA, RECORD, PKG-INFO, .gemspec, Gemfile.lock, dist-info/')
+    p('')
+    for ep in extra:
+        p(sanitize_line(ep))
     return len(extra)
 
 
@@ -1199,7 +1259,7 @@ _EXEC_EXTENSIONS: dict[str, str] = {
 }
 
 
-def detect_binary_files(unpacked_dir: Path, work: Path) -> int:
+def detect_binary_files(unpacked_dir: Path, work: Path, p: 'Printer') -> int:
     """Find precompiled executable files in the unpacked package.
 
     Detection uses file extension first (for zip-container formats like .jar
@@ -1208,13 +1268,11 @@ def detect_binary_files(unpacked_dir: Path, work: Path) -> int:
     .class files, and Java archives (.jar/.war/.ear/.aar). PNG, JPEG, zip,
     gzip, and other non-executable binaries are intentionally NOT flagged.
 
-    Writes: binary-files.txt, raw-binary-in-package.txt.
+    Writes: binary-files.txt (via p), raw-binary-in-package.txt.
     Returns: count of embedded executables found.
     """
     if not unpacked_dir.is_dir():
-        (work / 'binary-files.txt').write_text(
-            'EMBEDDED_EXECUTABLES: N/A\n', encoding='utf-8'
-        )
+        p('EMBEDDED_EXECUTABLES: N/A')
         return 0
 
     hits: list[str] = []
@@ -1245,13 +1303,10 @@ def detect_binary_files(unpacked_dir: Path, work: Path) -> int:
     (work / 'raw-binary-in-package.txt').write_text(
         '\n'.join(hits) + '\n', encoding='utf-8'
     )
-    (work / 'binary-files.txt').write_text(
-        '\n'.join(
-            [f'EMBEDDED_EXECUTABLES: {len(hits)}', '']
-            + hits
-        ) + '\n',
-        encoding='utf-8',
-    )
+    p(f'EMBEDDED_EXECUTABLES: {len(hits)}')
+    p('')
+    for hit in hits:
+        p(hit)
     return len(hits)
 
 
@@ -1273,9 +1328,8 @@ def compute_diff(
     """
     if not old_dir.is_dir() or not new_dir.is_dir():
         (work / 'raw-diff-full.txt').write_text('', encoding='utf-8')
-        (work / 'diff-filenames.txt').write_text(
-            'DIFF: N/A (old or new directory missing)\n', encoding='utf-8'
-        )
+        with Printer(work / 'diff-filenames.txt') as _p:
+            _p('DIFF: N/A (old or new directory missing)')
         return 0, ''
 
     exclude_args: list[str] = []
@@ -1326,13 +1380,12 @@ def compute_diff(
             short_names.append(sanitize_line(line))
 
     changed_files_text = '\n'.join(short_names)
-    (work / 'diff-filenames.txt').write_text(
-        '\n'.join([
-            f'DIFF_TOTAL_LINES: {diff_lines}', '',
-            'Changed/added/removed files (relative paths):',
-        ] + short_names) + '\n',
-        encoding='utf-8',
-    )
+    with Printer(work / 'diff-filenames.txt') as _p:
+        _p(f'DIFF_TOTAL_LINES: {diff_lines}')
+        _p('')
+        _p('Changed/added/removed files (relative paths):')
+        for name in short_names:
+            _p(name)
     return diff_lines, changed_files_text
 
 
@@ -1379,10 +1432,8 @@ def git_diff_between_tags(
                     break
 
     if not old_tag:
-        (work / 'diff-filenames.txt').write_text(
-            f'DIFF: N/A (old version tag for {sanitize_line(old_ver)} not found in source repo)\n',
-            encoding='utf-8',
-        )
+        with Printer(work / 'diff-filenames.txt') as _p:
+            _p(f'DIFF: N/A (old version tag for {sanitize_line(old_ver)} not found in source repo)')
         (work / 'raw-diff-full.txt').write_text('', encoding='utf-8')
         return 0, ''
 
@@ -1393,10 +1444,8 @@ def git_diff_between_tags(
         timeout=60,
     )
     if rc_fetch != 0:
-        (work / 'diff-filenames.txt').write_text(
-            f'DIFF: N/A (could not fetch old tag {sanitize_line(old_tag)} into clone)\n',
-            encoding='utf-8',
-        )
+        with Printer(work / 'diff-filenames.txt') as _p:
+            _p(f'DIFF: N/A (could not fetch old tag {sanitize_line(old_tag)} into clone)')
         (work / 'raw-diff-full.txt').write_text('', encoding='utf-8')
         return 0, ''
 
@@ -1427,15 +1476,13 @@ def git_diff_between_tags(
                     short_names.append(fname)
 
     changed_files_text = '\n'.join(short_names)
-    (work / 'diff-filenames.txt').write_text(
-        '\n'.join([
-            f'DIFF_TOTAL_LINES: {diff_lines}',
-            f'DIFF_SOURCE: git diff {sanitize_line(old_tag)}..HEAD (source repo; old gem unavailable)',
-            '',
-            'Changed/added/removed files (relative paths):',
-        ] + short_names) + '\n',
-        encoding='utf-8',
-    )
+    with Printer(work / 'diff-filenames.txt') as _p:
+        _p(f'DIFF_TOTAL_LINES: {diff_lines}')
+        _p(f'DIFF_SOURCE: git diff {sanitize_line(old_tag)}..HEAD (source repo; old gem unavailable)')
+        _p('')
+        _p('Changed/added/removed files (relative paths):')
+        for name in short_names:
+            _p(name)
     return diff_lines, changed_files_text
 
 
@@ -1516,13 +1563,13 @@ def compute_health_concerns(
 # Sandbox detection (used by deeper-analysis scripts)
 # ---------------------------------------------------------------------------
 
-def detect_sandbox(work: Path) -> str:
-    """Probe available sandbox tools; write sandbox-detection.txt.
+def detect_sandbox(p: 'Printer') -> str:
+    """Probe available sandbox tools; write sandbox-detection.txt (via p).
 
     Returns the name of the selected sandbox tool ('bwrap', 'firejail',
     'nsjail', 'docker', 'podman'), or 'none'.
     """
-    lines: list[str] = ['=== Sandbox availability ===']
+    p('=== Sandbox availability ===')
     selected = 'none'
 
     if cmd_available('bwrap'):
@@ -1538,11 +1585,11 @@ def detect_sandbox(work: Path) -> str:
             timeout=10,
         )
         if rc_probe == 0:
-            lines.append(f'AVAILABLE: bwrap ({ver})')
+            p(f'AVAILABLE: bwrap ({ver})')
             if selected == 'none':
                 selected = 'bwrap'
         else:
-            lines.append(
+            p(
                 f'UNAVAILABLE: bwrap ({ver}): probe failed'
                 ' (unprivileged userns likely disabled)'
             )
@@ -1550,35 +1597,35 @@ def detect_sandbox(work: Path) -> str:
     if cmd_available('firejail'):
         rc_ver, ver_out, _ = run_cmd(['firejail', '--version'], timeout=5)
         ver = ver_out.splitlines()[0] if ver_out.strip() else 'version unknown'
-        lines.append(f'AVAILABLE: firejail ({ver})')
+        p(f'AVAILABLE: firejail ({ver})')
         if selected == 'none':
             selected = 'firejail'
 
     if cmd_available('nsjail'):
-        lines.append('AVAILABLE: nsjail')
+        p('AVAILABLE: nsjail')
         if selected == 'none':
             selected = 'nsjail'
 
     if cmd_available('docker'):
         rc_info, _, _ = run_cmd(['docker', 'info'], timeout=15)
         if rc_info == 0:
-            lines.append('AVAILABLE: docker')
+            p('AVAILABLE: docker')
             if selected == 'none':
                 selected = 'docker'
 
     if cmd_available('podman'):
-        lines.append('AVAILABLE: podman')
+        p('AVAILABLE: podman')
         if selected == 'none':
             selected = 'podman'
 
     if selected == 'none':
-        lines.append(
+        p(
             'AVAILABLE: none -- reproducible build SKIPPED (no sandbox tool found; '
             'install bwrap, firejail, docker, or podman to enable)'
         )
 
-    lines.extend(['', f'SELECTED_SANDBOX: {selected}'])
-    (work / 'sandbox-detection.txt').write_text('\n'.join(lines) + '\n', encoding='utf-8')
+    p('')
+    p(f'SELECTED_SANDBOX: {selected}')
     return selected
 
 
@@ -1726,6 +1773,7 @@ def deep_source_comparison(
     pkgname: str,
     new_ver: str,
     work: Path,
+    p: 'Printer',
     primary_label: str,
     primary_pattern: str,
     native_pattern: str = r'\.(c|h|cpp)$',
@@ -1736,6 +1784,7 @@ def deep_source_comparison(
         pkgname: package name (for header lines).
         new_ver: version being analysed.
         work: working directory (must contain unpacked/ and source/).
+        p: Printer for source-deep-diff.txt output.
         primary_label: human-readable name for the primary code language,
                        e.g. 'Ruby', 'Python', 'JavaScript'.
         primary_pattern: regex matching primary-language source files,
@@ -1746,22 +1795,19 @@ def deep_source_comparison(
     clone_dir = work / 'source'
     dist_unpacked = work / 'unpacked' / f'{pkgname}-{new_ver}'
 
-    lines: list[str] = [
-        f'=== Deep source vs. package: {pkgname} {new_ver} ===',
-        '',
-    ]
+    p(f'=== Deep source vs. package: {pkgname} {new_ver} ===')
+    p('')
 
     if not clone_dir.is_dir() or not dist_unpacked.is_dir():
-        lines.append('DEEP_COMPARISON: SKIPPED (source or unpacked dir missing)')
-        (work / 'source-deep-diff.txt').write_text('\n'.join(lines) + '\n', encoding='utf-8')
+        p('DEEP_COMPARISON: SKIPPED (source or unpacked dir missing)')
         return
 
     def relative_files(base: Path, pattern: str) -> set[str]:
         results: set[str] = set()
         pat = re.compile(pattern)
-        for p in base.rglob('*'):
-            if p.is_file():
-                rel = './' + str(p.relative_to(base))
+        for f in base.rglob('*'):
+            if f.is_file():
+                rel = './' + str(f.relative_to(base))
                 if pat.search(rel):
                     results.add(rel)
         return results
@@ -1770,24 +1816,25 @@ def deep_source_comparison(
     primary_pkg = relative_files(dist_unpacked, primary_pattern)
     primary_src = relative_files(clone_dir, primary_pattern)
     primary_extra = sorted(primary_pkg - primary_src)
-    lines.append(f'{primary_label} source files in package but NOT in source (highest concern):')
-    for p in primary_extra[:30]:
-        lines.append(sanitize_line(p))
-    lines.append('(end)')
+    p(f'{primary_label} source files in package but NOT in source (highest concern):')
+    for f in primary_extra[:30]:
+        p(f)
+    p('(end)')
 
     # Native extension files in package but NOT in source
     if native_pattern:
-        lines.append('')
+        p('')
         native_pkg = relative_files(dist_unpacked, native_pattern)
         native_src = relative_files(clone_dir, native_pattern)
         native_extra = sorted(native_pkg - native_src)
-        lines.append('C/C++ extension files in package but NOT in source:')
-        for p in native_extra[:20]:
-            lines.append(sanitize_line(p))
-        lines.append('(end)')
+        p('C/C++ extension files in package but NOT in source:')
+        for f in native_extra[:20]:
+            p(f)
+        p('(end)')
 
     # Binary files vs source counterpart
-    lines.extend(['', 'Binary files in package vs source counterpart:'])
+    p('')
+    p('Binary files in package vs source counterpart:')
     text_indicators = re.compile(
         r'ASCII|UTF|JSON|XML|text|script|empty|directory'
     )
@@ -1801,14 +1848,14 @@ def deep_source_comparison(
         rel = './' + str(pkg_file.relative_to(dist_unpacked))
         src_counterpart = clone_dir / rel.lstrip('./')
         tag = '[source present]' if src_counterpart.is_file() else '[NO SOURCE COUNTERPART]'
-        lines.append(sanitize_line(fout.rstrip()) + f' {tag}')
+        p(fout.rstrip() + f' {tag}')
         count += 1
         if count >= 20:
             break
-    lines.append('(end)')
+    p('(end)')
 
-    lines.extend(['', 'DEEP_COMPARISON: COMPLETE'])
-    (work / 'source-deep-diff.txt').write_text('\n'.join(lines) + '\n', encoding='utf-8')
+    p('')
+    p('DEEP_COMPARISON: COMPLETE')
 
 
 # ---------------------------------------------------------------------------
@@ -1816,29 +1863,29 @@ def deep_source_comparison(
 # ---------------------------------------------------------------------------
 
 def finish_reproducible_build(
-    lines: list,
+    p: 'Printer',
     work: Path,
     result: str,
     extra: list | None = None,
 ) -> tuple:
-    """Append result, write reproducible-build.txt, return (result, 0, 0).
+    """Write result to p, close p to flush reproducible-build.txt, return (result, 0, 0).
 
     The trailing zeros are placeholder diff counts for early-exit paths where
     no diff was performed. Use classify_repro_diffs for paths that do a diff.
     """
-    lines.append(f'REPRODUCIBLE_BUILD: {result}')
+    p(f'REPRODUCIBLE_BUILD: {result}')
     if extra:
-        lines.extend(extra)
-    (work / 'reproducible-build.txt').write_text('\n'.join(lines) + '\n', encoding='utf-8')
+        for line in extra:
+            p(line)
     return result, 0, 0
 
 
 def compare_repro_sha256(
     built_sha: str,
     work: Path,
-    lines: list,
+    p: 'Printer',
 ) -> tuple | None:
-    """Read package-hash.txt, append SHA256 lines, and check for an exact match.
+    """Read package-hash.txt, write SHA256 lines to p, and check for an exact match.
 
     Returns a finished result tuple if the built and distributed hashes match,
     or None if they differ (caller should proceed to content comparison).
@@ -1848,16 +1895,16 @@ def compare_repro_sha256(
     if pkg_hash_file.is_file():
         first_line = pkg_hash_file.read_text(encoding='utf-8').splitlines()[0]
         dist_sha = first_line.split()[0] if first_line.split() else ''
-    lines.append(f'BUILT_SHA256: {sanitize_line(built_sha)}')
-    lines.append(f'DISTRIBUTED_SHA256: {sanitize_line(dist_sha or "UNKNOWN")}')
+    p(f'BUILT_SHA256: {sanitize_line(built_sha)}')
+    p(f'DISTRIBUTED_SHA256: {sanitize_line(dist_sha or "UNKNOWN")}')
     if built_sha and built_sha == dist_sha:
-        return finish_reproducible_build(lines, work, 'EXACTLY REPRODUCIBLE (sha256 match)')
+        return finish_reproducible_build(p, work, 'EXACTLY REPRODUCIBLE (sha256 match)')
     return None
 
 
 def classify_repro_diffs(
     diff_out: str,
-    lines: list,
+    p: 'Printer',
     work: Path,
     re_code: 're.Pattern',
     re_meta: 're.Pattern',
@@ -1877,17 +1924,18 @@ def classify_repro_diffs(
             code_diffs += 1
         if re_meta.search(line):
             metadata_diffs += 1
-    lines.append('DIFFERING_FILES (sanitized):')
-    lines.extend(differing[:50])
-    lines.append(f'CODE_FILE_DIFFS: {code_diffs}')
-    lines.append(f'METADATA_FILE_DIFFS: {metadata_diffs}')
+    p('DIFFERING_FILES (sanitized):')
+    for df in differing[:50]:
+        p(df)
+    p(f'CODE_FILE_DIFFS: {code_diffs}')
+    p(f'METADATA_FILE_DIFFS: {metadata_diffs}')
     if code_diffs > 0:
         result = 'UNEXPECTED DIFFERENCES'
         extra: list | None = ['WARNING: code files differ (possible injected code; human review required)']
     else:
         result = 'FUNCTIONALLY EQUIVALENT (metadata-only diffs)'
         extra = None
-    return finish_reproducible_build(lines, work, result, extra)
+    return finish_reproducible_build(p, work, result, extra)
 
 
 def write_transitive_deps(
@@ -1896,62 +1944,60 @@ def write_transitive_deps(
     version: str,
     total: int,
     new_deps: list,
+    p: 'Printer',
     *,
     total_label: str = 'TOTAL_TRANSITIVE_DEPS',
     note: str = '',
 ) -> dict:
-    """Write transitive-deps.txt and return the standard result dict."""
-    trans_lines = [f'=== Transitive dependency footprint: {pkgname} {version} ===']
+    """Write transitive-deps.txt (via p) and return the standard result dict."""
+    (work / 'raw-transitive-deps.txt')  # raw file written by caller; not touched here
+    p(f'=== Transitive dependency footprint: {pkgname} {version} ===')
     if note:
-        trans_lines.append(f'NOTE: {note}')
-    trans_lines += [
-        f'{total_label}: {total}',
-        f'NEW_NOT_IN_LOCKFILE: {len(new_deps)}',
-        '',
-        'NEW_PACKAGES (not in current lockfile):',
-    ]
+        p(f'NOTE: {note}')
+    p(f'{total_label}: {total}')
+    p(f'NEW_NOT_IN_LOCKFILE: {len(new_deps)}')
+    p('')
+    p('NEW_PACKAGES (not in current lockfile):')
     if new_deps:
-        trans_lines.extend(f'  {sanitize_line(d)}' for d in new_deps)
+        for d in new_deps:
+            p(f'  {sanitize_line(d)}')
     else:
-        trans_lines.append('  none')
-    (work / 'transitive-deps.txt').write_text('\n'.join(trans_lines) + '\n', encoding='utf-8')
+        p('  none')
     return {'total': total, 'not_in_lockfile': new_deps}
 
 
 def write_alternatives(
-    work: Path,
+    p: 'Printer',
     pkgname: str,
     version: str,
     section_labels: dict,
     concerns: list,
     notes: list,
 ) -> dict:
-    """Write alternatives.txt and return the standard result dict.
+    """Write alternatives.txt (via p) and return the standard result dict.
 
     section_labels maps a human-readable label to its count, e.g.:
         {'Installed gems checked': 45, 'Lockfile deps checked': 12}
     These lines appear verbatim in the report header.
     pkg_count in the return dict is the sum of all non-lockfile section counts.
     """
-    lines = [f'=== Alternatives check: {pkgname} {version} ===']
+    p(f'=== Alternatives check: {pkgname} {version} ===')
     for label, count in section_labels.items():
-        lines.append(f'{label}: {count}')
-    lines.append('')
+        p(f'{label}: {count}')
+    p('')
     if concerns:
-        lines.append(f'CONCERNS ({len(concerns)}):')
+        p(f'CONCERNS ({len(concerns)}):')
         for c in concerns:
-            lines.append(f'  [!] {c}')
+            p(f'  [!] {c}')
     else:
-        lines.append('CONCERNS: none')
-    lines.append('')
+        p('CONCERNS: none')
+    p('')
     if notes:
-        lines.append(f'NOTES ({len(notes)}):')
+        p(f'NOTES ({len(notes)}):')
         for n in notes:
-            lines.append(f'  [-] {n}')
+            p(f'  [-] {n}')
     else:
-        lines.append('NOTES: none')
-    work.mkdir(parents=True, exist_ok=True)
-    (work / 'alternatives.txt').write_text('\n'.join(lines) + '\n', encoding='utf-8')
+        p('NOTES: none')
     lockfile_count = sum(
         v for k, v in section_labels.items() if 'lockfile' in k.lower()
     )
@@ -2340,6 +2386,7 @@ def lookup_oss_rebuild(
     pkgname: str,
     version: str,
     work: Path | None = None,
+    p: 'Printer | None' = None,
 ) -> dict:
     """Query OSS Rebuild for reproducibility data on pkgname@version.
 
@@ -2352,8 +2399,9 @@ def lookup_oss_rebuild(
 
     work: directory for output files.  If None, a temporary directory is used
     and oss-rebuild.txt is printed to stdout on return.
+    p: Printer to write oss-rebuild.txt.  If None, one is created from work.
 
-    Writes: oss-rebuild.txt
+    Writes: oss-rebuild.txt (via p)
 
     Returns dict with keys:
         available     (bool): any data exists for this package
@@ -2378,9 +2426,13 @@ def lookup_oss_rebuild(
     """
     import tempfile as _tempfile
     _tmpdir = None
+    _owned_p = False
     if work is None:
         _tmpdir = _tempfile.TemporaryDirectory()
         work = Path(_tmpdir.name)
+    if p is None:
+        p = Printer(work / 'oss-rebuild.txt')
+        _owned_p = True
     result: dict = {
         'available': False,
         'exact_found': False,
@@ -2391,40 +2443,46 @@ def lookup_oss_rebuild(
         'signal': 'No OSS Rebuild data for this ecosystem/package.',
         'signal_level': 'NONE',
     }
-    lines: list[str] = [
-        f'=== OSS Rebuild reproducibility: {pkgname} {version} ===',
-        '',
-        'OSS Rebuild independently rebuilds packages and checks whether the',
-        'result matches the artifact published to the registry.  See docs/oss-rebuild.md.',
-        '',
-    ]
+    p(f'=== OSS Rebuild reproducibility: {pkgname} {version} ===')
+    p('')
+    p('OSS Rebuild independently rebuilds packages and checks whether the')
+    p('result matches the artifact published to the registry.  See docs/oss-rebuild.md.')
+    p('')
 
     if not oss_rebuild_ecosystem:
-        lines.append('OSS_REBUILD: SKIPPED (no ecosystem identifier)')
-        (work / 'oss-rebuild.txt').write_text('\n'.join(lines) + '\n', encoding='utf-8')
+        p('OSS_REBUILD: SKIPPED (no ecosystem identifier)')
+        if _owned_p:
+            p.close()
+        if _tmpdir is not None:
+            print((work / 'oss-rebuild.txt').read_text(encoding='utf-8'), end='')
+            _tmpdir.cleanup()
         return result
 
     pkg_key = _oss_rebuild_pkg_key(oss_rebuild_ecosystem, pkgname)
-    lines.append(f'ECOSYSTEM  : {oss_rebuild_ecosystem}')
-    lines.append(f'PACKAGE_KEY: {pkg_key}')
-    lines.append(f'VERSION    : {version}')
-    lines.append('')
+    p(f'ECOSYSTEM  : {oss_rebuild_ecosystem}')
+    p(f'PACKAGE_KEY: {pkg_key}')
+    p(f'VERSION    : {version}')
+    p('')
 
     # Step 1: list all versions in the bucket for this package.
     all_versions = _oss_rebuild_list_versions(oss_rebuild_ecosystem, pkg_key)
-    lines.append(f'VERSIONS_IN_BUCKET: {len(all_versions)}')
+    p(f'VERSIONS_IN_BUCKET: {len(all_versions)}')
     if all_versions:
         shown = all_versions[:20]
-        lines.append('  ' + '  '.join(shown) + ('  ...' if len(all_versions) > 20 else ''))
-    lines.append('')
+        p('  ' + '  '.join(shown) + ('  ...' if len(all_versions) > 20 else ''))
+    p('')
 
     if not all_versions:
-        lines.append('OSS_REBUILD: NO_DATA')
-        lines.append(
+        p('OSS_REBUILD: NO_DATA')
+        p(
             'No data for this package.  Either the ecosystem is not yet covered or '
             'this package was not included in the bulk run.'
         )
-        (work / 'oss-rebuild.txt').write_text('\n'.join(lines) + '\n', encoding='utf-8')
+        if _owned_p:
+            p.close()
+        if _tmpdir is not None:
+            print((work / 'oss-rebuild.txt').read_text(encoding='utf-8'), end='')
+            _tmpdir.cleanup()
         return result
 
     result['available'] = True
@@ -2436,9 +2494,9 @@ def lookup_oss_rebuild(
     if exact_found:
         exact_verdict = _oss_rebuild_version_verdict(oss_rebuild_ecosystem, pkg_key, version)
         result['exact_verdict'] = exact_verdict
-        lines.append(f'EXACT_VERSION_VERDICT: {exact_verdict or "UNDETERMINED"}')
+        p(f'EXACT_VERSION_VERDICT: {exact_verdict or "UNDETERMINED"}')
     else:
-        lines.append('EXACT_VERSION_VERDICT: NOT_IN_BUCKET (absent = unknown, not failed)')
+        p('EXACT_VERSION_VERDICT: NOT_IN_BUCKET (absent = unknown, not failed)')
 
     # Step 3: sample other versions for track record / regression check.
     if result['older_found']:
@@ -2452,8 +2510,8 @@ def lookup_oss_rebuild(
             track.append('some pass')
         if older_any_fail:
             track.append('some fail')
-        lines.append(f'OTHER_VERSIONS_SAMPLE: {", ".join(track) or "all undetermined"}')
-    lines.append('')
+        p(f'OTHER_VERSIONS_SAMPLE: {", ".join(track) or "all undetermined"}')
+    p('')
 
     # Step 4: determine signal.
     ev = result['exact_verdict']
@@ -2494,12 +2552,12 @@ def lookup_oss_rebuild(
         )
     # else: data exists but all verdicts undetermined -> leave NONE
 
-    lines.append(f'SIGNAL_LEVEL: {result["signal_level"]}')
-    lines.append(f'SIGNAL: {result["signal"]}')
-    txt = '\n'.join(lines) + '\n'
-    (work / 'oss-rebuild.txt').write_text(txt, encoding='utf-8')
+    p(f'SIGNAL_LEVEL: {result["signal_level"]}')
+    p(f'SIGNAL: {result["signal"]}')
+    if _owned_p:
+        p.close()
     if _tmpdir is not None:
-        print(txt, end='')
+        print((work / 'oss-rebuild.txt').read_text(encoding='utf-8'), end='')
         _tmpdir.cleanup()
     return result
 
@@ -2547,7 +2605,7 @@ class EcosystemHooks(ABC):
     @abstractmethod
     def read_manifest(
         self, pkgname: str, version: str, unpacked_dir: Path,
-        work: Path, failures: list[str],
+        work: Path, failures: list[str], p: 'Printer',
     ) -> dict: ...
 
     @abstractmethod
@@ -2567,7 +2625,7 @@ class EcosystemHooks(ABC):
 
     @abstractmethod
     def fetch_all_registry_data(
-        self, pkgname: str, version: str, work: Path,
+        self, pkgname: str, version: str, work: Path, p: 'Printer',
     ) -> dict: ...
 
     @abstractmethod
@@ -2581,7 +2639,7 @@ class EcosystemHooks(ABC):
 
     @abstractmethod
     def get_transitive_deps(
-        self, pkgname: str, version: str, lockfile_path: Path, work: Path,
+        self, pkgname: str, version: str, lockfile_path: Path, work: Path, p: 'Printer',
     ) -> dict: ...
 
     @abstractmethod
@@ -2603,7 +2661,7 @@ class EcosystemHooks(ABC):
 
     @abstractmethod
     def reproducible_build(
-        self, pkgname: str, version: str, work: Path, sandbox: str,
+        self, pkgname: str, version: str, work: Path, sandbox: str, p: 'Printer',
     ) -> tuple[str, int, int]: ...
 
 

@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-# hooks_js.py: JavaScript/Node.js language operations for the dependency analysis driver.
+# hooks_js.py: JavaScript/Node.js language operations for the
+# dependency analysis driver.
 #
 # Handles the npm package format (download with npm pack, unpack tarball) and
 # the npm registry API. Used for --from npm; can be reused for other
-# npm-compatible registries (GitHub Packages, Verdaccio, Nexus, Artifactory, etc.)
+# npm-compatible registries (GitHub Packages, Verdaccio, Nexus,
+# Artifactory, etc.)
 # with a different registry entry in REGISTRY_TO_HOOKS pointing here.
 #
 # Called by dep_review.py; do not invoke directly.
@@ -25,7 +27,8 @@ import analysis_shared as shared
 
 # Pre-compiled patterns for reproducible-build diff classification.
 _RE_REPRO_CODE = re.compile(r'^diff.*\.(js|mjs|cjs|ts|jsx|tsx)\b')
-_RE_REPRO_META = re.compile(r'^diff.*(package\.json|package-lock\.json|\.npmignore|\.gitignore)')
+_RE_REPRO_META = re.compile(
+    r'^diff.*(package\.json|package-lock\.json|\.npmignore|\.gitignore)')
 
 # npm package name allowlist: letters, digits, '.', '-', '_', '/', '@'.
 # Scoped names start with '@' (e.g. @scope/name). Max 214 chars (npm spec).
@@ -80,17 +83,24 @@ def _extract_source_url(pkg_json: dict) -> str:
 
 
 def _load_package_json(unpacked_dir: Path) -> dict:
-    """Load and parse package.json from the unpacked directory; return {} on failure."""
+    """Load and parse package.json from the unpacked directory.
+
+    Returns {} on failure.
+    """
     pkg_json_path = unpacked_dir / 'package.json'
     if not pkg_json_path.is_file():
         return {}
     try:
-        return json.loads(pkg_json_path.read_text(encoding='utf-8', errors='replace'))
+        return json.loads(
+            pkg_json_path.read_text(encoding='utf-8', errors='replace'))
     except (ValueError, OSError):
         return {}
 
 
-def _unpack_tgz(tgz_file: Path, target_dir: Path, failures: list[str], key: str) -> bool:
+def _unpack_tgz(
+    tgz_file: Path, target_dir: Path,
+    failures: list[str], key: str,
+) -> bool:
     """Unpack a .tgz, stripping the top-level 'package/' directory.
 
     npm tarballs always place files under a 'package/' top-level directory.
@@ -128,7 +138,8 @@ class Hooks(shared.EcosystemHooks):
     OSS_REBUILD_ECOSYSTEM = 'npm'
 
     # Multiple lockfile formats; LOCKFILE_NAME is None so the driver skips the
-    # single-lockfile warning. LOCKFILE_NAMES lists candidates in priority order.
+    # single-lockfile warning. LOCKFILE_NAMES lists candidates in
+    # priority order.
     LOCKFILE_NAME: str | None = None
     LOCKFILE_NAMES: list[str] = [
         'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'bun.lockb',
@@ -140,8 +151,10 @@ class Hooks(shared.EcosystemHooks):
         'eval/new Function/vm execution, child_process execution, '
         'obfuscated execution (Buffer.from base64+eval, hex decode+eval), '
         'network calls at module load scope, credential env-var access '
-        '(AWS/GitHub/cloud keys at load time), dynamic require on external input, '
-        'prototype pollution (Object.prototype assignment, __proto__ assignment)'
+        '(AWS/GitHub/cloud keys at load time), '
+        'dynamic require on external input, '
+        'prototype pollution '
+        '(Object.prototype assignment, __proto__ assignment)'
     )
 
     DANGEROUS_PATTERNS: list[tuple[str, str]] = [
@@ -190,7 +203,8 @@ class Hooks(shared.EcosystemHooks):
     def get_lockfile_path(self, project_root: Path) -> Path:
         """Return the path to the first existing JavaScript lockfile.
 
-        Tries package-lock.json, yarn.lock, pnpm-lock.yaml, bun.lockb in order.
+        Tries package-lock.json, yarn.lock, pnpm-lock.yaml,
+        bun.lockb in order.
         Falls back to package-lock.json if none found (path may not exist).
         """
         for name in self.LOCKFILE_NAMES:
@@ -206,16 +220,20 @@ class Hooks(shared.EcosystemHooks):
         work: Path,
         failures: list[str],
     ) -> dict:
-        """npm pack PKGNAME@VERSION into work/, then unpack into work/unpacked/.
+        """npm pack PKGNAME@VERSION into work/, then unpack into
+        work/unpacked/.
 
-        Uses npm pack which downloads the tarball without executing any install
-        scripts or lifecycle hooks. Returns dict with keys: unpacked_dir (Path),
-        sha256 (str), pkg_file (Path | None).
+        Uses npm pack which downloads the tarball without executing
+        any install scripts or lifecycle hooks. Returns dict with
+        keys: unpacked_dir (Path), sha256 (str), pkg_file (Path | None).
         """
         unpacked_dir = work / 'unpacked'
         unpacked_dir.mkdir(parents=True, exist_ok=True)
 
-        pack_cmd = ['npm', 'pack', f'{pkgname}@{version}', '--pack-destination', str(work)]
+        pack_cmd = [
+            'npm', 'pack', f'{pkgname}@{version}',
+            '--pack-destination', str(work),
+        ]
         if self.registry_url:
             pack_cmd += ['--registry', self.registry_url]
 
@@ -226,16 +244,19 @@ class Hooks(shared.EcosystemHooks):
         if rc == 0:
             tgz_candidates = list(work.glob('*.tgz'))
             if tgz_candidates:
-                tgz_file = max(tgz_candidates, key=lambda p: p.stat().st_mtime)
+                tgz_file = max(
+                    tgz_candidates, key=lambda p: p.stat().st_mtime)
                 sha256 = shared.sha256_file(tgz_file)
                 (work / 'package-hash.txt').write_text(
                     f'{sha256}  {tgz_file.name}\n', encoding='utf-8'
                 )
-                if not _unpack_tgz(tgz_file, unpacked_dir, failures, 'unpack-new'):
+                if not _unpack_tgz(
+                        tgz_file, unpacked_dir, failures, 'unpack-new'):
                     failures.append('unpack-new-failed')
             else:
                 failures.append('npm-pack-no-tgz')
-                (work / 'package-hash.txt').write_text('ERROR: no .tgz produced\n', encoding='utf-8')
+                (work / 'package-hash.txt').write_text(
+                    'ERROR: no .tgz produced\n', encoding='utf-8')
         else:
             failures.append('npm-pack-new')
             sanitized_err = shared.sanitize(err[:500]) if err else ''
@@ -256,13 +277,15 @@ class Hooks(shared.EcosystemHooks):
         unpacked_dir: Path,
         work: Path,
         failures: list[str],
+        p: 'shared.Printer',
     ) -> dict:
-        """Parse package.json from the unpacked tarball; write manifest-analysis.txt.
+        """Parse package.json from the unpacked tarball; write
+        manifest-analysis.txt.
 
         Returns dict with keys: source_url, extensions, executables,
-        executables_list, post_install_msg, has_build_hooks, has_install_scripts,
-        runtime_dep_lines, manifest_license_raw, manifest_text,
-        manifest_extra_file, install_hook_context.
+        executables_list, post_install_msg, has_build_hooks,
+        has_install_scripts, runtime_dep_lines, manifest_license_raw,
+        manifest_text, manifest_extra_file, install_hook_context.
         """
         source_url = ''
         extensions = 'NO'
@@ -275,7 +298,8 @@ class Hooks(shared.EcosystemHooks):
         runtime_dep_lines: list[str] = []
         install_hook_context: list[str] = []
 
-        manifest_lines: list[str] = [f'=== Manifest analysis: {pkgname} {version} ===', '']
+        p(f'=== Manifest analysis: {pkgname} {version} ===')
+        p('')
         pkg_json: dict = {}
 
         if unpacked_dir.is_dir():
@@ -283,110 +307,119 @@ class Hooks(shared.EcosystemHooks):
 
         if pkg_json:
             manifest_text = json.dumps(pkg_json, indent=2, ensure_ascii=False)
-            (work / 'package-json.txt').write_text(manifest_text, encoding='utf-8', errors='replace')
+            (work / 'package-json.txt').write_text(
+                manifest_text, encoding='utf-8', errors='replace')
 
-            # Native addons: binding.gyp present, or install script calls node-gyp/prebuild-install
+            # Native addons: binding.gyp present, or install script
+            # calls node-gyp/prebuild-install
             binding_gyp = (unpacked_dir / 'binding.gyp').is_file()
             scripts = pkg_json.get('scripts', {}) or {}
             preinstall_val = str(scripts.get('preinstall', '') or '').strip()
             install_val = str(scripts.get('install', '') or '').strip()
-            postinstall_val = str(scripts.get('postinstall', '') or '').strip()
+            postinstall_val = str(
+                scripts.get('postinstall', '') or '').strip()
 
             is_native = binding_gyp or bool(
                 re.search(r'node-gyp\s+rebuild|prebuild-install', install_val)
             )
             if is_native:
                 extensions = 'YES'
-                manifest_lines.append('HAS_EXTENSIONS: YES (native addon)')
+                p('HAS_EXTENSIONS: YES (native addon)')
             else:
-                manifest_lines.append('HAS_EXTENSIONS: NO')
+                p('HAS_EXTENSIONS: NO')
 
             # Executables (bin field)
             bin_field = pkg_json.get('bin', None)
             if bin_field:
                 executables = 'YES'
                 if isinstance(bin_field, dict):
-                    executables_list = shared.sanitize_line(', '.join(list(bin_field.keys())[:10]))
+                    executables_list = shared.sanitize_line(
+                        ', '.join(list(bin_field.keys())[:10]))
                 elif isinstance(bin_field, str):
                     executables_list = shared.sanitize_line(bin_field)
-                manifest_lines.extend([
-                    'HAS_EXECUTABLES: YES',
-                    f'EXECUTABLES: {executables_list}',
-                ])
+                p('HAS_EXECUTABLES: YES')
+                p(f'EXECUTABLES: {executables_list}')
             else:
-                manifest_lines.append('HAS_EXECUTABLES: NO')
+                p('HAS_EXECUTABLES: NO')
 
             # Lifecycle scripts: preinstall, install, postinstall
             install_script_content: list[tuple[str, str]] = []
             if preinstall_val:
                 has_build_hooks = 'YES'
-                manifest_lines.extend([
-                    'HAS_PREINSTALL: YES',
-                    f'  preinstall: {shared.sanitize_line(preinstall_val[:300])}',
-                ])
+                p('HAS_PREINSTALL: YES')
+                p(f'  preinstall: '
+                  f'{shared.sanitize_line(preinstall_val[:300])}')
                 install_script_content.append(('preinstall', preinstall_val))
                 post_install_msg = 'YES'
             if install_val and not is_native:
                 has_build_hooks = 'YES'
-                manifest_lines.extend([
-                    'HAS_INSTALL_SCRIPT: YES',
-                    f'  install: {shared.sanitize_line(install_val[:300])}',
-                ])
+                p('HAS_INSTALL_SCRIPT: YES')
+                p(f'  install: {shared.sanitize_line(install_val[:300])}')
                 install_script_content.append(('install', install_val))
             elif is_native and install_val:
-                manifest_lines.append(f'NATIVE_INSTALL_SCRIPT: {shared.sanitize_line(install_val[:300])}')
+                p(f'NATIVE_INSTALL_SCRIPT: '
+                  f'{shared.sanitize_line(install_val[:300])}')
             if postinstall_val:
                 has_build_hooks = 'YES'
-                manifest_lines.extend([
-                    'HAS_POSTINSTALL: YES',
-                    f'  postinstall: {shared.sanitize_line(postinstall_val[:300])}',
-                ])
-                install_script_content.append(('postinstall', postinstall_val))
+                p('HAS_POSTINSTALL: YES')
+                p(f'  postinstall: '
+                  f'{shared.sanitize_line(postinstall_val[:300])}')
+                install_script_content.append(
+                    ('postinstall', postinstall_val))
                 post_install_msg = 'YES'
             if not (preinstall_val or install_val or postinstall_val):
-                manifest_lines.append('HAS_BUILD_HOOKS: NO')
+                p('HAS_BUILD_HOOKS: NO')
 
             # Runtime dependencies
-            manifest_lines.extend(['', 'RUNTIME_DEPS:'])
+            p('')
+            p('RUNTIME_DEPS:')
             deps = pkg_json.get('dependencies', {}) or {}
             opt_deps = pkg_json.get('optionalDependencies', {}) or {}
             all_runtime = dict(deps)
             all_runtime.update(opt_deps)
             if all_runtime:
                 for dep_name, dep_range in list(all_runtime.items())[:50]:
-                    line = f'{dep_name}@{dep_range}'
-                    runtime_dep_lines.append(line)
-                    manifest_lines.append(f'  {shared.sanitize_line(line)}')
+                    dep_line = f'{dep_name}@{dep_range}'
+                    runtime_dep_lines.append(dep_line)
+                    p(f'  {shared.sanitize_line(dep_line)}')
                 if len(all_runtime) > 50:
-                    manifest_lines.append(f'  ... and {len(all_runtime) - 50} more')
+                    p(f'  ... and {len(all_runtime) - 50} more')
             else:
-                manifest_lines.append('  (none)')
+                p('  (none)')
 
             source_url = _extract_source_url(pkg_json)
-            hp_display = shared.sanitize_line(source_url) if source_url else '(not found)'
-            manifest_lines.extend(['', f'HOMEPAGE: {hp_display}'])
+            hp_display = (
+                shared.sanitize_line(source_url) if source_url
+                else '(not found)')
+            p('')
+            p(f'HOMEPAGE: {hp_display}')
 
             author = pkg_json.get('author', '') or ''
             if isinstance(author, dict):
                 author = author.get('name', '') or ''
-            manifest_lines.append(f'AUTHOR: {shared.sanitize_line(str(author)[:200])}')
+            p(f'AUTHOR: {shared.sanitize_line(str(author)[:200])}')
 
             manifest_license_raw = _extract_license(pkg_json)
-            manifest_lines.extend([
-                '',
-                f'LICENSE_DECLARED: {shared.sanitize_line(manifest_license_raw) or "(not declared)"}',
-            ])
+            p('')
+            lic_str = (
+                shared.sanitize_line(manifest_license_raw)
+                or '(not declared)')
+            p(f'LICENSE_DECLARED: {lic_str}')
 
             desc = str(pkg_json.get('description', '') or '')[:300]
             if desc:
-                manifest_lines.append(f'DESCRIPTION: {shared.sanitize_line(desc)}')
+                p(f'DESCRIPTION: {shared.sanitize_line(desc)}')
 
-            main_field = pkg_json.get('main', '') or pkg_json.get('exports', '')
+            main_field = (
+                pkg_json.get('main', '') or pkg_json.get('exports', ''))
             if main_field:
-                main_str = str(main_field) if not isinstance(main_field, dict) else '(exports map)'
-                manifest_lines.append(f'MAIN: {shared.sanitize_line(main_str[:200])}')
+                main_str = (
+                    str(main_field)
+                    if not isinstance(main_field, dict)
+                    else '(exports map)')
+                p(f'MAIN: {shared.sanitize_line(main_str[:200])}')
 
-            manifest_lines.append('')
+            p('')
 
             # Write install-time scripts for AI review
             if install_script_content:
@@ -407,27 +440,30 @@ class Hooks(shared.EcosystemHooks):
 
             if preinstall_val:
                 install_hook_context.append(
-                    'Context: preinstall script present. This runs BEFORE the package is '
-                    'installed and can execute arbitrary code. Review install-scripts.txt carefully.'
+                    'Context: preinstall script present. This runs '
+                    'BEFORE the package is '
+                    'installed and can execute arbitrary code. '
+                    'Review install-scripts.txt carefully.'
                 )
             if postinstall_val:
                 install_hook_context.append(
-                    'Context: postinstall script is present. This is the most common attack '
-                    'vector for npm supply-chain attacks. Review install-scripts.txt carefully.'
+                    'Context: postinstall script is present. '
+                    'This is the most common attack '
+                    'vector for npm supply-chain attacks. '
+                    'Review install-scripts.txt carefully.'
                 )
             if is_native and not (preinstall_val or postinstall_val):
                 install_hook_context.append(
-                    'Context: native addon (binding.gyp). The install script compiles C/C++ '
-                    'at install time. This is expected for native addons (node-gyp rebuild).'
+                    'Context: native addon (binding.gyp). '
+                    'The install script compiles C/C++ '
+                    'at install time. This is expected for '
+                    'native addons (node-gyp rebuild).'
                 )
 
         else:
             failures.append('package-json-missing')
-            manifest_lines.append('ERROR: package.json not found in unpacked directory')
+            p('ERROR: package.json not found in unpacked directory')
 
-        (work / 'manifest-analysis.txt').write_text(
-            '\n'.join(manifest_lines) + '\n', encoding='utf-8'
-        )
         has_install_scripts = (work / 'install-scripts.txt').is_file()
 
         return {
@@ -461,7 +497,10 @@ class Hooks(shared.EcosystemHooks):
         raw_old = work / 'raw-old-pkg'
         raw_old.mkdir(exist_ok=True)
 
-        pack_cmd = ['npm', 'pack', f'{pkgname}@{old_ver}', '--pack-destination', str(raw_old)]
+        pack_cmd = [
+            'npm', 'pack', f'{pkgname}@{old_ver}',
+            '--pack-destination', str(raw_old),
+        ]
         if self.registry_url:
             pack_cmd += ['--registry', self.registry_url]
 
@@ -472,7 +511,8 @@ class Hooks(shared.EcosystemHooks):
         if rc == 0:
             tgz_candidates = list(raw_old.glob('*.tgz'))
             if tgz_candidates:
-                tgz_file = max(tgz_candidates, key=lambda p: p.stat().st_mtime)
+                tgz_file = max(
+                    tgz_candidates, key=lambda p: p.stat().st_mtime)
                 if _unpack_tgz(tgz_file, old_dir, failures, 'unpack-old'):
                     ok = True
                     source = 'fetched'
@@ -484,7 +524,8 @@ class Hooks(shared.EcosystemHooks):
             failures.append('npm-pack-old')
 
         (work / 'old-version-status.txt').write_text(
-            f'OLD_VERSION_SOURCE: {source or "unavailable"}\n', encoding='utf-8'
+            f'OLD_VERSION_SOURCE: {source or "unavailable"}\n',
+            encoding='utf-8',
         )
         return {'ok': ok, 'source': source, 'unpacked_dir': old_dir}
 
@@ -506,7 +547,8 @@ class Hooks(shared.EcosystemHooks):
         old_ver: str,
         old_result: dict,
     ) -> list[str]:
-        """Extract runtime dependency lines from the old version's package.json."""
+        """Extract runtime dependency lines from the old version's
+        package.json."""
         if not old_result.get('ok'):
             return []
         old_unpacked = old_result.get('unpacked_dir')
@@ -524,20 +566,26 @@ class Hooks(shared.EcosystemHooks):
         pkgname: str,
         version: str,
         work: Path,
+        p: 'shared.Printer',
     ) -> dict:
-        """Fetch npm registry API: full package metadata and version-specific data.
+        """Fetch npm registry API: full package metadata and
+        version-specific data.
 
         Endpoint: registry.npmjs.org/{pkgname} (full doc) and
                   registry.npmjs.org/{pkgname}/{version} (version-specific).
 
-        Writes: provenance.txt.
-        Returns dict with keys: mfa_status, age_years_float, last_release_days,
-        owner_count_int, version_stability, license_from_registry, ver_info_lines.
+        Writes: provenance.txt (via p).
+        Returns dict with keys: mfa_status, age_years_float,
+        last_release_days, owner_count_int, version_stability,
+        license_from_registry, ver_info_lines.
         """
         api_base = (
-            self.registry_url.rstrip('/') if self.registry_url else 'https://registry.npmjs.org'
+            self.registry_url.rstrip('/')
+            if self.registry_url
+            else 'https://registry.npmjs.org'
         )
-        mfa_status = 'unknown'  # npm has no per-package MFA status via registry API
+        # npm has no per-package MFA status via registry API
+        mfa_status = 'unknown'
         age_years_float: float | None = None
         last_release_days: int | None = None
         owner_count_int: int | None = None
@@ -545,7 +593,8 @@ class Hooks(shared.EcosystemHooks):
         license_from_registry: list[str] = []
         ver_info_lines: list[str] = []
 
-        prov_lines: list[str] = [f'=== Provenance: {pkgname} {version} ===', '']
+        p(f'=== Provenance: {pkgname} {version} ===')
+        p('')
 
         # Scoped packages (@scope/name) must be percent-encoded in the URL
         encoded_name = urllib.parse.quote(pkgname, safe='')
@@ -554,7 +603,8 @@ class Hooks(shared.EcosystemHooks):
         pkg_data = shared.http_get(f'{api_base}/{encoded_name}')
         if pkg_data:
             try:
-                pkg_json = json.loads(pkg_data.decode('utf-8', errors='replace'))
+                pkg_json = json.loads(
+                    pkg_data.decode('utf-8', errors='replace'))
                 time_obj = pkg_json.get('time', {}) or {}
 
                 created_str = str(time_obj.get('created', ''))
@@ -567,10 +617,13 @@ class Hooks(shared.EcosystemHooks):
                     if k not in ('created', 'modified') and re.match(r'\d', k)
                 }
                 if ver_times:
-                    last_release_days = shared.days_since(max(ver_times.values()))
+                    last_release_days = shared.days_since(
+                        max(ver_times.values()))
 
-                if re.search(r'(?i)(alpha|beta|rc|pre|dev|canary|next)', version) or \
-                   version.startswith('0.'):
+                if (re.search(
+                        r'(?i)(alpha|beta|rc|pre|dev|canary|next)',
+                        version)
+                        or version.startswith('0.')):
                     version_stability = 'pre-release'
                 else:
                     version_stability = 'stable'
@@ -580,17 +633,17 @@ class Hooks(shared.EcosystemHooks):
                     owner_count_int = len(maintainers)
                     maint_names = [
                         shared.sanitize_line(
-                            m.get('name', '') if isinstance(m, dict) else str(m)
+                            m.get('name', '')
+                            if isinstance(m, dict) else str(m)
                         )[:80]
                         for m in maintainers[:20]
                     ]
-                    prov_lines.extend([
-                        f'MAINTAINER_COUNT: {owner_count_int}',
-                        f'MAINTAINERS: {", ".join(maint_names)}',
-                        '',
-                    ])
+                    p(f'MAINTAINER_COUNT: {owner_count_int}')
+                    p(f'MAINTAINERS: {", ".join(maint_names)}')
+                    p('')
 
-                # License from the specific version's entry in the versions object
+                # License from the specific version's entry in the
+                # versions object
                 versions_obj = pkg_json.get('versions', {}) or {}
                 target_ver = versions_obj.get(version, {}) or {}
                 lic = target_ver.get('license', '') or ''
@@ -601,50 +654,62 @@ class Hooks(shared.EcosystemHooks):
 
                 deprecated = target_ver.get('deprecated', '') or ''
                 if deprecated:
-                    prov_lines.extend([
-                        'DEPRECATED: YES',
-                        f'DEPRECATED_REASON: {shared.sanitize_line(str(deprecated)[:300])}',
-                        '',
-                    ])
+                    p('DEPRECATED: YES')
+                    p(f'DEPRECATED_REASON: '
+                      f'{shared.sanitize_line(str(deprecated)[:300])}')
+                    p('')
                 else:
-                    prov_lines.extend(['DEPRECATED: NO', ''])
+                    p('DEPRECATED: NO')
+                    p('')
 
             except (ValueError, KeyError, TypeError):
-                prov_lines.append('REGISTRY_DATA: parse error')
+                p('REGISTRY_DATA: parse error')
 
-        # Version-specific endpoint: dist.integrity, dist.tarball, Sigstore signatures
+        # Version-specific endpoint: dist.integrity, dist.tarball,
+        # Sigstore signatures
         ver_data = shared.http_get(f'{api_base}/{encoded_name}/{version}')
         if ver_data:
             try:
-                ver_json = json.loads(ver_data.decode('utf-8', errors='replace'))
+                ver_json = json.loads(
+                    ver_data.decode('utf-8', errors='replace'))
                 ver_info_lines.append('VERSION_INFO (selected fields):')
                 dist = ver_json.get('dist', {}) or {}
                 for key in ('version', '_npmUser', 'gitHead'):
                     val = ver_json.get(key, '')
                     if val:
-                        ver_info_lines.append(f'  {key}: {shared.sanitize_line(str(val))[:200]}')
-                for dist_key in ('integrity', 'shasum', 'tarball', 'fileCount', 'unpackedSize'):
+                        ver_info_lines.append(
+                            f'  {key}: '
+                            f'{shared.sanitize_line(str(val))[:200]}')
+                for dist_key in (
+                        'integrity', 'shasum', 'tarball',
+                        'fileCount', 'unpackedSize'):
                     val = dist.get(dist_key, '')
                     if val:
-                        ver_info_lines.append(f'  dist.{dist_key}: {shared.sanitize_line(str(val))[:200]}')
+                        ver_info_lines.append(
+                            f'  dist.{dist_key}: '
+                            f'{shared.sanitize_line(str(val))[:200]}')
                 sigs = dist.get('signatures', [])
                 if sigs:
                     ver_info_lines.append(
-                        f'  dist.signatures: {len(sigs)} signature(s) present (Sigstore)'
+                        f'  dist.signatures: {len(sigs)}'
+                        f' signature(s) present (Sigstore)'
                     )
                 else:
-                    ver_info_lines.append('  dist.signatures: none (not signed with Sigstore)')
+                    ver_info_lines.append(
+                        '  dist.signatures: none (not signed with Sigstore)')
             except (ValueError, KeyError, TypeError):
                 ver_info_lines.append('VERSION_INFO: (parse error)')
         else:
             ver_info_lines.append('VERSION_INFO: (unavailable)')
 
-        prov_lines.append('NOTE: npm does not expose per-package MFA status via the registry API.')
-        prov_lines.append('      MFA_REQUIRED is always "unknown" for npm packages.')
-        prov_lines.append('      Check dist.signatures above for Sigstore provenance attestation.')
-        prov_lines.extend(['', *ver_info_lines])
-
-        (work / 'provenance.txt').write_text('\n'.join(prov_lines) + '\n', encoding='utf-8')
+        p('NOTE: npm does not expose per-package MFA status '
+          'via the registry API.')
+        p('      MFA_REQUIRED is always "unknown" for npm packages.')
+        p('      Check dist.signatures above for Sigstore '
+          'provenance attestation.')
+        p('')
+        for vline in ver_info_lines:
+            p(vline)
 
         return {
             'mfa_status': mfa_status,
@@ -669,7 +734,8 @@ class Hooks(shared.EcosystemHooks):
         not_in_lockfile, and private keys _lockfile_lines, _dep_lines_new,
         _dep_lines_old used by write_dep_files() in the driver.
         """
-        dep_lines_new, dep_lines_old, added_deps, removed_deps = shared.compute_dep_diff(
+        (dep_lines_new, dep_lines_old,
+         added_deps, removed_deps) = shared.compute_dep_diff(
             runtime_dep_lines, old_dep_lines
         )
         not_in_lockfile: list[str] = []
@@ -680,10 +746,12 @@ class Hooks(shared.EcosystemHooks):
         if lockfile.is_file() and dep_lines_new:
             lf_text = lockfile.read_text(encoding='utf-8', errors='replace')
             lockfile_format = self._detect_lockfile_format(lockfile.name)
-            lockfile_lines.append(f'LOCKFILE: {lockfile.name} (format: {lockfile_format})')
+            lockfile_lines.append(
+                f'LOCKFILE: {lockfile.name} (format: {lockfile_format})')
 
             for dep_line in dep_lines_new:
-                # Extract name from "pkgname@^version" or "@scope/name@version"
+                # Extract name from "pkgname@^version"
+                # or "@scope/name@version"
                 m = re.match(r'^(@[^@]+|[^@]+)@', dep_line.strip())
                 dep_name = m.group(1) if m else dep_line.strip()
                 if not dep_name or not _NPM_NAME_RE.match(dep_name):
@@ -718,8 +786,11 @@ class Hooks(shared.EcosystemHooks):
             return 'bun'
         return 'unknown'
 
-    def _dep_in_lockfile(self, dep_name: str, lf_text: str, fmt: str) -> bool:
-        """Return True if dep_name appears in the lockfile for the given format."""
+    def _dep_in_lockfile(
+        self, dep_name: str, lf_text: str, fmt: str,
+    ) -> bool:
+        """Return True if dep_name appears in the lockfile for
+        the given format."""
         safe = re.escape(dep_name)
         if fmt == 'npm':
             # package-lock.json v2/v3: "node_modules/pkgname": { ...
@@ -744,7 +815,9 @@ class Hooks(shared.EcosystemHooks):
         Returns dict with keys: downloads, first_seen, homepage.
         """
         api_base = (
-            self.registry_url.rstrip('/') if self.registry_url else 'https://registry.npmjs.org'
+            self.registry_url.rstrip('/')
+            if self.registry_url
+            else 'https://registry.npmjs.org'
         )
         encoded = urllib.parse.quote(dep_name, safe='')
         api_data = shared.http_get(f'{api_base}/{encoded}')
@@ -761,12 +834,17 @@ class Hooks(shared.EcosystemHooks):
                         homepage = repo.get('url', '') or ''
                 return {
                     'downloads': f'see npmjs.com/package/{dep_name}',
-                    'first_seen': shared.sanitize_line(date_m.group() if date_m else 'unknown'),
+                    'first_seen': shared.sanitize_line(
+                        date_m.group() if date_m else 'unknown'),
                     'homepage': shared.sanitize_line(str(homepage))[:200],
                 }
             except (ValueError, KeyError, TypeError):
                 pass
-        return {'downloads': 'unavailable', 'first_seen': 'unavailable', 'homepage': 'unavailable'}
+        return {
+            'downloads': 'unavailable',
+            'first_seen': 'unavailable',
+            'homepage': 'unavailable',
+        }
 
     def get_transitive_deps(
         self,
@@ -774,8 +852,10 @@ class Hooks(shared.EcosystemHooks):
         version: str,
         lockfile_path: Path,
         work: Path,
+        p: 'shared.Printer',
     ) -> dict:
-        """Fetch direct runtime deps from the npm registry; compare against lockfile.
+        """Fetch direct runtime deps from the npm registry; compare
+        against lockfile.
 
         Uses the registry API to get the package's dependencies object.
         Like the Python hook, this shows direct (level-1) deps only; full
@@ -785,7 +865,9 @@ class Hooks(shared.EcosystemHooks):
         Returns dict with keys: total (int), not_in_lockfile (list[str]).
         """
         api_base = (
-            self.registry_url.rstrip('/') if self.registry_url else 'https://registry.npmjs.org'
+            self.registry_url.rstrip('/')
+            if self.registry_url
+            else 'https://registry.npmjs.org'
         )
         encoded = urllib.parse.quote(pkgname, safe='')
         deps: list[str] = []
@@ -794,25 +876,32 @@ class Hooks(shared.EcosystemHooks):
         ver_data = shared.http_get(f'{api_base}/{encoded}/{version}')
         if ver_data:
             try:
-                ver_json = json.loads(ver_data.decode('utf-8', errors='replace'))
+                ver_json = json.loads(
+                    ver_data.decode('utf-8', errors='replace'))
                 all_deps = dict(ver_json.get('dependencies', {}) or {})
-                all_deps.update(ver_json.get('optionalDependencies', {}) or {})
+                all_deps.update(
+                    ver_json.get('optionalDependencies', {}) or {})
                 for dep_name, dep_range in all_deps.items():
-                    if not isinstance(dep_name, str) or not _NPM_NAME_RE.match(dep_name):
-                        raw_lines.append(f'REJECTED: {shared.sanitize_line(str(dep_name)[:200])}')
+                    if (not isinstance(dep_name, str)
+                            or not _NPM_NAME_RE.match(dep_name)):
+                        raw_lines.append(
+                            f'REJECTED: '
+                            f'{shared.sanitize_line(str(dep_name)[:200])}')
                         continue
                     deps.append(dep_name)
                     raw_lines.append(f'{dep_name}@{dep_range}')
             except (ValueError, KeyError, TypeError):
                 pass
 
-        (work / 'raw-transitive-deps.txt').write_text('\n'.join(raw_lines), encoding='utf-8')
+        (work / 'raw-transitive-deps.txt').write_text(
+            '\n'.join(raw_lines), encoding='utf-8')
 
         total = len(deps)
         lf_text = ''
         lf_format = 'unknown'
         if lockfile_path.is_file():
-            lf_text = lockfile_path.read_text(encoding='utf-8', errors='replace')
+            lf_text = lockfile_path.read_text(
+                encoding='utf-8', errors='replace')
             lf_format = self._detect_lockfile_format(lockfile_path.name)
 
         transitive_new: list[str] = []
@@ -821,9 +910,11 @@ class Hooks(shared.EcosystemHooks):
                 transitive_new.append(dep_name)
 
         return shared.write_transitive_deps(
-            work, pkgname, version, total, transitive_new,
+            work, pkgname, version, total, transitive_new, p,
             total_label='TOTAL_DIRECT_DEPS',
-            note='shows direct (level-1) runtime deps from the npm registry only.',
+            note=(
+                'shows direct (level-1) runtime deps '
+                'from the npm registry only.'),
         )
 
     def check_alternatives(
@@ -833,11 +924,12 @@ class Hooks(shared.EcosystemHooks):
         work: Path,
         project_root: Path,
     ) -> dict:
-        """Check for typosquat, slopsquat, and Node.js built-in overlap signals.
+        """Check for typosquat, slopsquat, and Node.js built-in
+        overlap signals.
 
         Three checks:
-        A: Node.js built-in module names; flag exact matches (dependency confusion)
-           and near-matches (typosquat).
+        A: Node.js built-in module names; flag exact matches
+           (dependency confusion) and near-matches (typosquat).
         B: Project lockfile dependencies; flag near-matches.
         C: Structural heuristics: scope stripping, common JS wrapper
            prefix/suffix stripping.
@@ -849,7 +941,9 @@ class Hooks(shared.EcosystemHooks):
         notes: list[str] = []
         pkg_lower = pkgname.lower()
         # For scoped packages like @scope/name, compare the 'name' part too
-        bare_name = pkg_lower.lstrip('@').split('/')[-1] if '/' in pkg_lower else pkg_lower
+        bare_name = (
+            pkg_lower.lstrip('@').split('/')[-1]
+            if '/' in pkg_lower else pkg_lower)
 
         # --- A: Node.js built-in module names ---
         builtin_names = self._get_node_builtin_names()
@@ -859,21 +953,26 @@ class Hooks(shared.EcosystemHooks):
             mod_lower = mod.lower()
             if mod_lower == bare_name or mod_lower == pkg_lower:
                 concerns.append(
-                    f'EXACT_BUILTIN_MATCH: "{pkgname}" matches Node.js built-in "{mod}". '
-                    'Installing an external package with the same name as a built-in is a '
-                    'strong dependency-confusion signal: the built-in will shadow the '
+                    f'EXACT_BUILTIN_MATCH: "{pkgname}" matches '
+                    f'Node.js built-in "{mod}". '
+                    'Installing an external package with the same '
+                    'name as a built-in is a '
+                    'strong dependency-confusion signal: '
+                    'the built-in will shadow the '
                     'external package in most Node.js contexts.'
                 )
             else:
                 dist = shared.levenshtein(bare_name, mod_lower)
                 if dist == 1:
                     concerns.append(
-                        f'NEAR_MATCH(dist=1): "{pkgname}" is one edit from built-in "{mod}". '
+                        f'NEAR_MATCH(dist=1): "{pkgname}" is one edit'
+                        f' from built-in "{mod}". '
                         'Classic typosquat pattern.'
                     )
                 elif dist == 2:
                     notes.append(
-                        f'NEAR_MATCH(dist=2): "{pkgname}" is two edits from built-in "{mod}".'
+                        f'NEAR_MATCH(dist=2): "{pkgname}" is two edits'
+                        f' from built-in "{mod}".'
                     )
 
         # --- B: Project lockfile deps ---
@@ -886,10 +985,14 @@ class Hooks(shared.EcosystemHooks):
                 for m in re.finditer(r'"node_modules/([^"]+)"', lf_text):
                     lockfile_names.append(m.group(1))
             elif lf_fmt == 'yarn':
-                for m in re.finditer(r'^["\s]*([A-Za-z@][A-Za-z0-9@._/-]*)@', lf_text, re.MULTILINE):
+                for m in re.finditer(
+                        r'^["\s]*([A-Za-z@][A-Za-z0-9@._/-]*)@',
+                        lf_text, re.MULTILINE):
                     lockfile_names.append(m.group(1).strip('"'))
             elif lf_fmt == 'pnpm':
-                for m in re.finditer(r'^\s+/?([A-Za-z@][A-Za-z0-9@._/-]*)[@/]', lf_text, re.MULTILINE):
+                for m in re.finditer(
+                        r'^\s+/?([A-Za-z@][A-Za-z0-9@._/-]*)[@/]',
+                        lf_text, re.MULTILINE):
                     lockfile_names.append(m.group(1))
 
         # Deduplicate lockfile names while preserving order
@@ -904,24 +1007,29 @@ class Hooks(shared.EcosystemHooks):
 
         for dep in lockfile_names:
             dep_lower = dep.lower()
-            dep_bare = dep_lower.lstrip('@').split('/')[-1] if '/' in dep_lower else dep_lower
+            dep_bare = (
+                dep_lower.lstrip('@').split('/')[-1]
+                if '/' in dep_lower else dep_lower)
             if dep_lower in builtin_lower or dep_bare in builtin_lower:
                 continue  # already checked in A
             if dep_lower == pkg_lower or dep_bare == bare_name:
                 concerns.append(
-                    f'EXACT_LOCKFILE_MATCH: "{pkgname}" matches existing lockfile dep "{dep}". '
+                    f'EXACT_LOCKFILE_MATCH: "{pkgname}" matches '
+                    f'existing lockfile dep "{dep}". '
                     'This name is already in use in this project.'
                 )
             else:
                 dist = shared.levenshtein(bare_name, dep_bare)
                 if dist == 1:
                     concerns.append(
-                        f'NEAR_LOCKFILE_MATCH(dist=1): "{pkgname}" is one edit from '
+                        f'NEAR_LOCKFILE_MATCH(dist=1): "{pkgname}" is'
+                        f' one edit from '
                         f'lockfile dep "{dep}". Possible targeted typosquat.'
                     )
                 elif dist == 2:
                     notes.append(
-                        f'NEAR_LOCKFILE_MATCH(dist=2): "{pkgname}" is two edits from '
+                        f'NEAR_LOCKFILE_MATCH(dist=2): "{pkgname}" is'
+                        f' two edits from '
                         f'lockfile dep "{dep}".'
                     )
 
@@ -935,8 +1043,10 @@ class Hooks(shared.EcosystemHooks):
             bare = pkgname.lstrip('@').split('/', 1)[1].lower()
             if bare in all_known_bare:
                 concerns.append(
-                    f'SCOPE_SHADOW: "{pkgname}" bare name "{bare}" matches an existing '
-                    'package or built-in. A scoped package wrapping an unscoped one may '
+                    f'SCOPE_SHADOW: "{pkgname}" bare name "{bare}" '
+                    'matches an existing '
+                    'package or built-in. A scoped package '
+                    'wrapping an unscoped one may '
                     'be a supply-chain attack or unnecessary indirection.'
                 )
 
@@ -948,7 +1058,8 @@ class Hooks(shared.EcosystemHooks):
                 base = bare_name[len(prefix):]
                 if base in all_known_bare:
                     concerns.append(
-                        f'PREFIX_SHADOW: "{pkgname}" appears to wrap existing module/package '
+                        f'PREFIX_SHADOW: "{pkgname}" appears to wrap '
+                        f'existing module/package '
                         f'"{base}" (stripped prefix "{prefix}"). '
                         'Verify this external wrapper is intentional.'
                     )
@@ -957,22 +1068,25 @@ class Hooks(shared.EcosystemHooks):
                 base = bare_name[: -len(suffix)]
                 if base in all_known_bare:
                     concerns.append(
-                        f'SUFFIX_SHADOW: "{pkgname}" appears to wrap existing module/package '
+                        f'SUFFIX_SHADOW: "{pkgname}" appears to wrap '
+                        f'existing module/package '
                         f'"{base}" (stripped suffix "{suffix}"). '
                         'Verify this external wrapper is intentional.'
                     )
 
-        return shared.write_alternatives(
-            work, pkgname, version,
-            {
-                'Node.js built-ins checked': len(builtin_names),
-                'Lockfile deps checked': len(lockfile_names),
-            },
-            concerns, notes,
-        )
+        with shared.Printer(work / 'alternatives.txt') as _p_alt:
+            return shared.write_alternatives(
+                _p_alt, pkgname, version,
+                {
+                    'Node.js built-ins checked': len(builtin_names),
+                    'Lockfile deps checked': len(lockfile_names),
+                },
+                concerns, notes,
+            )
 
     def _get_node_builtin_names(self) -> list[str]:
-        """Return a list of Node.js built-in module names (without 'node:' prefix).
+        """Return a list of Node.js built-in module names
+        (without 'node:' prefix).
 
         These are available without installation in any Node.js project.
         """
@@ -982,13 +1096,18 @@ class Hooks(shared.EcosystemHooks):
             'dns', 'domain', 'events', 'fs', 'http', 'http2', 'https',
             'inspector', 'module', 'net', 'os', 'path', 'perf_hooks',
             'process', 'punycode', 'querystring', 'readline', 'repl',
-            'stream', 'string_decoder', 'sys', 'timers', 'tls', 'trace_events',
-            'tty', 'url', 'util', 'v8', 'vm', 'wasi', 'worker_threads', 'zlib',
+            'stream', 'string_decoder', 'sys', 'timers', 'tls',
+            'trace_events',
+            'tty', 'url', 'util', 'v8', 'vm', 'wasi',
+            'worker_threads', 'zlib',
         ]
 
     def get_diff_excludes(self) -> list[str]:
-        """Return glob patterns to exclude from diff (JS packaging artifacts)."""
-        return ['*.map', 'node_modules', '.yarn', '.pnp.cjs', '.pnp.loader.mjs']
+        """Return glob patterns to exclude from diff (JS packaging
+        artifacts)."""
+        return [
+            '*.map', 'node_modules', '.yarn', '.pnp.cjs', '.pnp.loader.mjs',
+        ]
 
     def get_pkg_src_excludes(self) -> tuple[re.Pattern, re.Pattern]:
         """Return (pkg_excludes, src_excludes) compiled regex patterns."""
@@ -1011,7 +1130,8 @@ class Hooks(shared.EcosystemHooks):
         return pkg_ex, src_ex
 
     def find_source_root(self, source_dir: Path) -> Path:
-        """Return the subdirectory of source_dir containing the package source.
+        """Return the subdirectory of source_dir containing the
+        package source.
 
         For npm packages, publishable content is usually at the repo root.
         Some monorepos put packages one level deep under packages/ or apps/.
@@ -1036,13 +1156,15 @@ class Hooks(shared.EcosystemHooks):
         version: str,
         work: Path,
         sandbox: str,
+        p: 'shared.Printer',
     ) -> tuple[str, int, int]:
         """Attempt to reproduce the npm pack output from the source clone.
 
-        Runs 'npm pack' in the cloned source and compares the resulting tarball
-        contents against the distributed package. Note: npm tarballs are not
-        bitwise-reproducible across machines due to embedded timestamps; this
-        check therefore compares unpacked file contents rather than SHA256 hashes.
+        Runs 'npm pack' in the cloned source and compares the resulting
+        tarball contents against the distributed package. Note: npm tarballs
+        are not bitwise-reproducible across machines due to embedded
+        timestamps; this check therefore compares unpacked file contents
+        rather than SHA256 hashes.
 
         Returns (repro_result, code_diffs, metadata_diffs).
         repro_result is one of:
@@ -1057,20 +1179,22 @@ class Hooks(shared.EcosystemHooks):
         built_tgz_dir = work / 'raw-built-tgz'
         built_tgz_dir.mkdir(exist_ok=True)
 
-        lines: list[str] = [
-            f'=== Reproducible build: {pkgname} {version} ===',
-            f'Sandbox: {sandbox}',
-            '',
-        ]
+        p(f'=== Reproducible build: {pkgname} {version} ===')
+        p(f'Sandbox: {sandbox}')
+        p('')
 
         if not clone_dir.is_dir():
-            return shared.finish_reproducible_build(lines, work, 'SKIPPED (no source clone)')
+            return shared.finish_reproducible_build(
+                p, work, 'SKIPPED (no source clone)')
 
         rc_nv, nv_out, _ = shared.run_cmd(['npm', '--version'], timeout=10)
-        npm_ver = shared.sanitize_line(nv_out.strip()) if rc_nv == 0 else 'unknown'
-        lines.append(f'NPM_VERSION: {npm_ver}')
+        npm_ver = (
+            shared.sanitize_line(nv_out.strip()) if rc_nv == 0
+            else 'unknown')
+        p(f'NPM_VERSION: {npm_ver}')
 
-        # Find package.json in the source clone; check one level deep for monorepos
+        # Find package.json in the source clone; check one level deep
+        # for monorepos
         pkg_json_path = clone_dir / 'package.json'
         if not pkg_json_path.is_file():
             for child in clone_dir.iterdir():
@@ -1079,9 +1203,10 @@ class Hooks(shared.EcosystemHooks):
                     pkg_json_path = clone_dir / 'package.json'
                     break
         if not pkg_json_path.is_file():
-            return shared.finish_reproducible_build(lines, work, 'SKIPPED (no package.json in source)')
+            return shared.finish_reproducible_build(
+                p, work, 'SKIPPED (no package.json in source)')
 
-        lines.append(f'BUILD_ROOT: {shared.sanitize_line(str(clone_dir))}')
+        p(f'BUILD_ROOT: {shared.sanitize_line(str(clone_dir))}')
         build_log_path = work / 'raw-build-output.txt'
 
         rc_nv2, nv2_out, _ = shared.run_cmd(['node', '--version'], timeout=5)
@@ -1091,34 +1216,41 @@ class Hooks(shared.EcosystemHooks):
             if m:
                 node_tag = m.group(1)
 
-        result = shared.run_sandboxed(
+        build_result = shared.run_sandboxed(
             sandbox, clone_dir, built_tgz_dir,
             'cd {src} && npm pack --pack-destination {out}',
             f'node:{node_tag}',
-            container_shell_cmd='cp -r {src} /tmp/src && cd /tmp/src && npm pack --pack-destination {out}',
+            container_shell_cmd=(
+                'cp -r {src} /tmp/src && cd /tmp/src'
+                ' && npm pack --pack-destination {out}'
+            ),
             firejail_cwd=clone_dir,
         )
-        if result is None:
+        if build_result is None:
             return shared.finish_reproducible_build(
-                lines, work,
-                'SKIPPED (no sandbox available: install bwrap, firejail, docker, or podman)',
+                p, work,
+                'SKIPPED (no sandbox available: install bwrap, '
+                'firejail, docker, or podman)',
             )
-        rc_b, combined = result
-        build_log_path.write_text(combined, encoding='utf-8', errors='replace')
+        rc_b, combined = build_result
+        build_log_path.write_text(
+            combined, encoding='utf-8', errors='replace')
         build_ok = (rc_b == 0)
 
-        lines.append(f'BUILD_STATUS: {"yes" if build_ok else "no"}')
+        p(f'BUILD_STATUS: {"yes" if build_ok else "no"}')
 
         if not build_ok:
-            return shared.finish_reproducible_build(lines, work, 'INCONCLUSIVE (build failed)')
+            return shared.finish_reproducible_build(
+                p, work, 'INCONCLUSIVE (build failed)')
 
         built_tgzs = list(built_tgz_dir.glob('*.tgz'))
         if not built_tgzs:
-            return shared.finish_reproducible_build(lines, work, 'INCONCLUSIVE (no .tgz produced)')
-        built_tgz = max(built_tgzs, key=lambda p: p.stat().st_mtime)
+            return shared.finish_reproducible_build(
+                p, work, 'INCONCLUSIVE (no .tgz produced)')
+        built_tgz = max(built_tgzs, key=lambda tgz: tgz.stat().st_mtime)
 
         built_sha = shared.sha256_file(built_tgz)
-        if (repro := shared.compare_repro_sha256(built_sha, work, lines)) is not None:
+        if (repro := shared.compare_repro_sha256(built_sha, work, p)) is not None:
             return repro
 
         # Hashes will nearly always differ (timestamps); compare unpacked contents
@@ -1128,7 +1260,7 @@ class Hooks(shared.EcosystemHooks):
 
         dist_unpacked = work / 'unpacked'
         if not dist_unpacked.is_dir():
-            return shared.finish_reproducible_build(lines, work, 'INCONCLUSIVE (hashes differ, no dist unpacked dir)')
+            return shared.finish_reproducible_build(p, work, 'INCONCLUSIVE (hashes differ, no dist unpacked dir)')
 
         rc_diff, diff_out, _ = shared.run_cmd(
             ['diff', '-r', str(built_unpacked), str(dist_unpacked), '--exclude=*.map'],
@@ -1137,9 +1269,9 @@ class Hooks(shared.EcosystemHooks):
         (work / 'raw-repro-diff.txt').write_text(diff_out, encoding='utf-8', errors='replace')
 
         diff_line_count = len(diff_out.splitlines())
-        lines.append(f'CONTENT_DIFF_LINES: {diff_line_count}')
+        p(f'CONTENT_DIFF_LINES: {diff_line_count}')
 
         if diff_line_count == 0:
-            return shared.finish_reproducible_build(lines, work, 'EXACTLY REPRODUCIBLE (content match)')
+            return shared.finish_reproducible_build(p, work, 'EXACTLY REPRODUCIBLE (content match)')
 
-        return shared.classify_repro_diffs(diff_out, lines, work, _RE_REPRO_CODE, _RE_REPRO_META)
+        return shared.classify_repro_diffs(diff_out, p, work, _RE_REPRO_CODE, _RE_REPRO_META)
