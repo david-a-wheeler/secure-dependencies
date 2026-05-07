@@ -313,22 +313,46 @@ def levenshtein(a: str, b: str) -> int:
 # be reporting the data as provided.
 
 # Matches chars outside the printable-ASCII + tab + LF + CR fast path.
-_SANITIZE_RE = re.compile(r'[^\x09\x0a\x0d\x20-\x7e]')
+# \x1b (ESC) is already caught by [^\x09\x0a\x0d\x20-\x7e] since it is
+# below \x20; listed explicitly so the intent is clear to readers.
+_SANITIZE_RE = re.compile(r'[^\x09\x0a\x0d\x20-\x7e]|\x1b')
 _SANITIZE_NEWLINE_RE = re.compile(r'[\r\n]+')
+
+# Strips complete ECMA-48 terminal escape sequences before character-level
+# sanitization runs, so sequences are removed cleanly rather than leaving
+# '?' + tail characters.
+#
+# 1. CSI (ESC [): parameter bytes, optional intermediate bytes, final byte.
+# 2. String-type sequences (DCS=P, OSC=], PM=^, APC=_): content up to
+#    ST (ESC \) or BEL (\x07). Covers OSC hyperlinks, window titles, etc.
+# 3. Two-character Fe sequences (ESC + 0x40-0x7E): SS2, SS3, NEL, RI, RIS,
+#    keypad modes, etc. Each is a single byte after ESC.
+_TERMINAL_ESCAPE_RE = re.compile(
+    r'\x1b(?:'
+    r'\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]'          # CSI sequences
+    r'|[\x50\x5d\x5e\x5f][^\x1b\x07]*(?:\x1b\\|\x07)'  # DCS, OSC, PM, APC
+    r'|[\x40-\x7e]'                                      # two-char Fe sequences
+    r')'
+)
 
 
 def _sanitize_char(m: re.Match) -> str:
-    """Return char if it's allowed, else return ?"""
     ch = m.group(0)
+    if ch == '\x1b':  # naked or malformed ESC not consumed by _TERMINAL_ESCAPE_RE
+        return '?'
     cat = unicodedata.category(ch)
-    return ch if (cat[0] in ('L', 'N', 'P', 'S') or cat == 'Zs') else '?'
+    # Allow letters, numbers, punctuation, symbols, combining marks, and space
+    # separators. This preserves international text including diacritics.
+    return ch if (cat[0] in ('L', 'N', 'P', 'S', 'M') or cat == 'Zs') else '?'
 
 
 def sanitize(text: str) -> str:
-    """Replace disallowed Unicode with '?'; preserve tab, newline, and CR.
+    """Strip terminal escape sequences; replace disallowed chars with '?'.
 
-    Use for multi-line attacker-controlled content (scripts, long blobs).
-    For single-line fields use sanitize_line().
+    Preserves tab, newline, CR, printable ASCII, and valid Unicode (letters,
+    numbers, punctuation, symbols, combining marks, space separators).
+    Use for multi-line attacker-controlled content. For single-line fields
+    use sanitize_line().
 
     >>> sanitize('hello')
     'hello'
@@ -340,7 +364,14 @@ def sanitize(text: str) -> str:
     'del?char'
     >>> sanitize('\\u202ereverse')
     '?reverse'
+    >>> sanitize('ni\\u0303o')
+    'ni\\u0303o'
+    >>> sanitize('\\x1b[31mError\\x1b[0m')
+    'Error'
+    >>> sanitize('\\x1b]8;;http://example.com\\x1b\\\\Anchor\\x1b]8;;\\x1b\\\\')
+    'Anchor'
     """
+    text = _TERMINAL_ESCAPE_RE.sub('', text)
     return _SANITIZE_RE.sub(_sanitize_char, text)
 
 
