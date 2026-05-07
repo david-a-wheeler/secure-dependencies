@@ -256,6 +256,7 @@ class Hooks(shared.EcosystemHooks):
         unpacked_dir: Path,
         work: Path,
         failures: list[str],
+        p: 'shared.Printer',
     ) -> dict:
         """Parse package.json from the unpacked tarball; write manifest-analysis.txt.
 
@@ -275,7 +276,8 @@ class Hooks(shared.EcosystemHooks):
         runtime_dep_lines: list[str] = []
         install_hook_context: list[str] = []
 
-        manifest_lines: list[str] = [f'=== Manifest analysis: {pkgname} {version} ===', '']
+        p(f'=== Manifest analysis: {pkgname} {version} ===')
+        p('')
         pkg_json: dict = {}
 
         if unpacked_dir.is_dir():
@@ -297,9 +299,9 @@ class Hooks(shared.EcosystemHooks):
             )
             if is_native:
                 extensions = 'YES'
-                manifest_lines.append('HAS_EXTENSIONS: YES (native addon)')
+                p('HAS_EXTENSIONS: YES (native addon)')
             else:
-                manifest_lines.append('HAS_EXTENSIONS: NO')
+                p('HAS_EXTENSIONS: NO')
 
             # Executables (bin field)
             bin_field = pkg_json.get('bin', None)
@@ -309,84 +311,76 @@ class Hooks(shared.EcosystemHooks):
                     executables_list = shared.sanitize_line(', '.join(list(bin_field.keys())[:10]))
                 elif isinstance(bin_field, str):
                     executables_list = shared.sanitize_line(bin_field)
-                manifest_lines.extend([
-                    'HAS_EXECUTABLES: YES',
-                    f'EXECUTABLES: {executables_list}',
-                ])
+                p('HAS_EXECUTABLES: YES')
+                p(f'EXECUTABLES: {executables_list}')
             else:
-                manifest_lines.append('HAS_EXECUTABLES: NO')
+                p('HAS_EXECUTABLES: NO')
 
             # Lifecycle scripts: preinstall, install, postinstall
             install_script_content: list[tuple[str, str]] = []
             if preinstall_val:
                 has_build_hooks = 'YES'
-                manifest_lines.extend([
-                    'HAS_PREINSTALL: YES',
-                    f'  preinstall: {shared.sanitize_line(preinstall_val[:300])}',
-                ])
+                p('HAS_PREINSTALL: YES')
+                p(f'  preinstall: {shared.sanitize_line(preinstall_val[:300])}')
                 install_script_content.append(('preinstall', preinstall_val))
                 post_install_msg = 'YES'
             if install_val and not is_native:
                 has_build_hooks = 'YES'
-                manifest_lines.extend([
-                    'HAS_INSTALL_SCRIPT: YES',
-                    f'  install: {shared.sanitize_line(install_val[:300])}',
-                ])
+                p('HAS_INSTALL_SCRIPT: YES')
+                p(f'  install: {shared.sanitize_line(install_val[:300])}')
                 install_script_content.append(('install', install_val))
             elif is_native and install_val:
-                manifest_lines.append(f'NATIVE_INSTALL_SCRIPT: {shared.sanitize_line(install_val[:300])}')
+                p(f'NATIVE_INSTALL_SCRIPT: {shared.sanitize_line(install_val[:300])}')
             if postinstall_val:
                 has_build_hooks = 'YES'
-                manifest_lines.extend([
-                    'HAS_POSTINSTALL: YES',
-                    f'  postinstall: {shared.sanitize_line(postinstall_val[:300])}',
-                ])
+                p('HAS_POSTINSTALL: YES')
+                p(f'  postinstall: {shared.sanitize_line(postinstall_val[:300])}')
                 install_script_content.append(('postinstall', postinstall_val))
                 post_install_msg = 'YES'
             if not (preinstall_val or install_val or postinstall_val):
-                manifest_lines.append('HAS_BUILD_HOOKS: NO')
+                p('HAS_BUILD_HOOKS: NO')
 
             # Runtime dependencies
-            manifest_lines.extend(['', 'RUNTIME_DEPS:'])
+            p('')
+            p('RUNTIME_DEPS:')
             deps = pkg_json.get('dependencies', {}) or {}
             opt_deps = pkg_json.get('optionalDependencies', {}) or {}
             all_runtime = dict(deps)
             all_runtime.update(opt_deps)
             if all_runtime:
                 for dep_name, dep_range in list(all_runtime.items())[:50]:
-                    line = f'{dep_name}@{dep_range}'
-                    runtime_dep_lines.append(line)
-                    manifest_lines.append(f'  {shared.sanitize_line(line)}')
+                    dep_line = f'{dep_name}@{dep_range}'
+                    runtime_dep_lines.append(dep_line)
+                    p(f'  {shared.sanitize_line(dep_line)}')
                 if len(all_runtime) > 50:
-                    manifest_lines.append(f'  ... and {len(all_runtime) - 50} more')
+                    p(f'  ... and {len(all_runtime) - 50} more')
             else:
-                manifest_lines.append('  (none)')
+                p('  (none)')
 
             source_url = _extract_source_url(pkg_json)
             hp_display = shared.sanitize_line(source_url) if source_url else '(not found)'
-            manifest_lines.extend(['', f'HOMEPAGE: {hp_display}'])
+            p('')
+            p(f'HOMEPAGE: {hp_display}')
 
             author = pkg_json.get('author', '') or ''
             if isinstance(author, dict):
                 author = author.get('name', '') or ''
-            manifest_lines.append(f'AUTHOR: {shared.sanitize_line(str(author)[:200])}')
+            p(f'AUTHOR: {shared.sanitize_line(str(author)[:200])}')
 
             manifest_license_raw = _extract_license(pkg_json)
-            manifest_lines.extend([
-                '',
-                f'LICENSE_DECLARED: {shared.sanitize_line(manifest_license_raw) or "(not declared)"}',
-            ])
+            p('')
+            p(f'LICENSE_DECLARED: {shared.sanitize_line(manifest_license_raw) or "(not declared)"}')
 
             desc = str(pkg_json.get('description', '') or '')[:300]
             if desc:
-                manifest_lines.append(f'DESCRIPTION: {shared.sanitize_line(desc)}')
+                p(f'DESCRIPTION: {shared.sanitize_line(desc)}')
 
             main_field = pkg_json.get('main', '') or pkg_json.get('exports', '')
             if main_field:
                 main_str = str(main_field) if not isinstance(main_field, dict) else '(exports map)'
-                manifest_lines.append(f'MAIN: {shared.sanitize_line(main_str[:200])}')
+                p(f'MAIN: {shared.sanitize_line(main_str[:200])}')
 
-            manifest_lines.append('')
+            p('')
 
             # Write install-time scripts for AI review
             if install_script_content:
@@ -423,11 +417,8 @@ class Hooks(shared.EcosystemHooks):
 
         else:
             failures.append('package-json-missing')
-            manifest_lines.append('ERROR: package.json not found in unpacked directory')
+            p('ERROR: package.json not found in unpacked directory')
 
-        (work / 'manifest-analysis.txt').write_text(
-            '\n'.join(manifest_lines) + '\n', encoding='utf-8'
-        )
         has_install_scripts = (work / 'install-scripts.txt').is_file()
 
         return {
@@ -524,13 +515,14 @@ class Hooks(shared.EcosystemHooks):
         pkgname: str,
         version: str,
         work: Path,
+        p: 'shared.Printer',
     ) -> dict:
         """Fetch npm registry API: full package metadata and version-specific data.
 
         Endpoint: registry.npmjs.org/{pkgname} (full doc) and
                   registry.npmjs.org/{pkgname}/{version} (version-specific).
 
-        Writes: provenance.txt.
+        Writes: provenance.txt (via p).
         Returns dict with keys: mfa_status, age_years_float, last_release_days,
         owner_count_int, version_stability, license_from_registry, ver_info_lines.
         """
@@ -545,7 +537,8 @@ class Hooks(shared.EcosystemHooks):
         license_from_registry: list[str] = []
         ver_info_lines: list[str] = []
 
-        prov_lines: list[str] = [f'=== Provenance: {pkgname} {version} ===', '']
+        p(f'=== Provenance: {pkgname} {version} ===')
+        p('')
 
         # Scoped packages (@scope/name) must be percent-encoded in the URL
         encoded_name = urllib.parse.quote(pkgname, safe='')
@@ -584,11 +577,9 @@ class Hooks(shared.EcosystemHooks):
                         )[:80]
                         for m in maintainers[:20]
                     ]
-                    prov_lines.extend([
-                        f'MAINTAINER_COUNT: {owner_count_int}',
-                        f'MAINTAINERS: {", ".join(maint_names)}',
-                        '',
-                    ])
+                    p(f'MAINTAINER_COUNT: {owner_count_int}')
+                    p(f'MAINTAINERS: {", ".join(maint_names)}')
+                    p('')
 
                 # License from the specific version's entry in the versions object
                 versions_obj = pkg_json.get('versions', {}) or {}
@@ -601,16 +592,15 @@ class Hooks(shared.EcosystemHooks):
 
                 deprecated = target_ver.get('deprecated', '') or ''
                 if deprecated:
-                    prov_lines.extend([
-                        'DEPRECATED: YES',
-                        f'DEPRECATED_REASON: {shared.sanitize_line(str(deprecated)[:300])}',
-                        '',
-                    ])
+                    p('DEPRECATED: YES')
+                    p(f'DEPRECATED_REASON: {shared.sanitize_line(str(deprecated)[:300])}')
+                    p('')
                 else:
-                    prov_lines.extend(['DEPRECATED: NO', ''])
+                    p('DEPRECATED: NO')
+                    p('')
 
             except (ValueError, KeyError, TypeError):
-                prov_lines.append('REGISTRY_DATA: parse error')
+                p('REGISTRY_DATA: parse error')
 
         # Version-specific endpoint: dist.integrity, dist.tarball, Sigstore signatures
         ver_data = shared.http_get(f'{api_base}/{encoded_name}/{version}')
@@ -639,12 +629,12 @@ class Hooks(shared.EcosystemHooks):
         else:
             ver_info_lines.append('VERSION_INFO: (unavailable)')
 
-        prov_lines.append('NOTE: npm does not expose per-package MFA status via the registry API.')
-        prov_lines.append('      MFA_REQUIRED is always "unknown" for npm packages.')
-        prov_lines.append('      Check dist.signatures above for Sigstore provenance attestation.')
-        prov_lines.extend(['', *ver_info_lines])
-
-        (work / 'provenance.txt').write_text('\n'.join(prov_lines) + '\n', encoding='utf-8')
+        p('NOTE: npm does not expose per-package MFA status via the registry API.')
+        p('      MFA_REQUIRED is always "unknown" for npm packages.')
+        p('      Check dist.signatures above for Sigstore provenance attestation.')
+        p('')
+        for vline in ver_info_lines:
+            p(vline)
 
         return {
             'mfa_status': mfa_status,
@@ -774,6 +764,7 @@ class Hooks(shared.EcosystemHooks):
         version: str,
         lockfile_path: Path,
         work: Path,
+        p: 'shared.Printer',
     ) -> dict:
         """Fetch direct runtime deps from the npm registry; compare against lockfile.
 
@@ -821,7 +812,7 @@ class Hooks(shared.EcosystemHooks):
                 transitive_new.append(dep_name)
 
         return shared.write_transitive_deps(
-            work, pkgname, version, total, transitive_new,
+            work, pkgname, version, total, transitive_new, p,
             total_label='TOTAL_DIRECT_DEPS',
             note='shows direct (level-1) runtime deps from the npm registry only.',
         )
@@ -962,14 +953,15 @@ class Hooks(shared.EcosystemHooks):
                         'Verify this external wrapper is intentional.'
                     )
 
-        return shared.write_alternatives(
-            work, pkgname, version,
-            {
-                'Node.js built-ins checked': len(builtin_names),
-                'Lockfile deps checked': len(lockfile_names),
-            },
-            concerns, notes,
-        )
+        with shared.Printer(work / 'alternatives.txt') as _p_alt:
+            return shared.write_alternatives(
+                _p_alt, pkgname, version,
+                {
+                    'Node.js built-ins checked': len(builtin_names),
+                    'Lockfile deps checked': len(lockfile_names),
+                },
+                concerns, notes,
+            )
 
     def _get_node_builtin_names(self) -> list[str]:
         """Return a list of Node.js built-in module names (without 'node:' prefix).
@@ -1036,6 +1028,7 @@ class Hooks(shared.EcosystemHooks):
         version: str,
         work: Path,
         sandbox: str,
+        p: 'shared.Printer',
     ) -> tuple[str, int, int]:
         """Attempt to reproduce the npm pack output from the source clone.
 
@@ -1057,18 +1050,16 @@ class Hooks(shared.EcosystemHooks):
         built_tgz_dir = work / 'raw-built-tgz'
         built_tgz_dir.mkdir(exist_ok=True)
 
-        lines: list[str] = [
-            f'=== Reproducible build: {pkgname} {version} ===',
-            f'Sandbox: {sandbox}',
-            '',
-        ]
+        p(f'=== Reproducible build: {pkgname} {version} ===')
+        p(f'Sandbox: {sandbox}')
+        p('')
 
         if not clone_dir.is_dir():
-            return shared.finish_reproducible_build(lines, work, 'SKIPPED (no source clone)')
+            return shared.finish_reproducible_build(p, work, 'SKIPPED (no source clone)')
 
         rc_nv, nv_out, _ = shared.run_cmd(['npm', '--version'], timeout=10)
         npm_ver = shared.sanitize_line(nv_out.strip()) if rc_nv == 0 else 'unknown'
-        lines.append(f'NPM_VERSION: {npm_ver}')
+        p(f'NPM_VERSION: {npm_ver}')
 
         # Find package.json in the source clone; check one level deep for monorepos
         pkg_json_path = clone_dir / 'package.json'
@@ -1079,9 +1070,9 @@ class Hooks(shared.EcosystemHooks):
                     pkg_json_path = clone_dir / 'package.json'
                     break
         if not pkg_json_path.is_file():
-            return shared.finish_reproducible_build(lines, work, 'SKIPPED (no package.json in source)')
+            return shared.finish_reproducible_build(p, work, 'SKIPPED (no package.json in source)')
 
-        lines.append(f'BUILD_ROOT: {shared.sanitize_line(str(clone_dir))}')
+        p(f'BUILD_ROOT: {shared.sanitize_line(str(clone_dir))}')
         build_log_path = work / 'raw-build-output.txt'
 
         rc_nv2, nv2_out, _ = shared.run_cmd(['node', '--version'], timeout=5)
@@ -1091,34 +1082,34 @@ class Hooks(shared.EcosystemHooks):
             if m:
                 node_tag = m.group(1)
 
-        result = shared.run_sandboxed(
+        build_result = shared.run_sandboxed(
             sandbox, clone_dir, built_tgz_dir,
             'cd {src} && npm pack --pack-destination {out}',
             f'node:{node_tag}',
             container_shell_cmd='cp -r {src} /tmp/src && cd /tmp/src && npm pack --pack-destination {out}',
             firejail_cwd=clone_dir,
         )
-        if result is None:
+        if build_result is None:
             return shared.finish_reproducible_build(
-                lines, work,
+                p, work,
                 'SKIPPED (no sandbox available: install bwrap, firejail, docker, or podman)',
             )
-        rc_b, combined = result
+        rc_b, combined = build_result
         build_log_path.write_text(combined, encoding='utf-8', errors='replace')
         build_ok = (rc_b == 0)
 
-        lines.append(f'BUILD_STATUS: {"yes" if build_ok else "no"}')
+        p(f'BUILD_STATUS: {"yes" if build_ok else "no"}')
 
         if not build_ok:
-            return shared.finish_reproducible_build(lines, work, 'INCONCLUSIVE (build failed)')
+            return shared.finish_reproducible_build(p, work, 'INCONCLUSIVE (build failed)')
 
         built_tgzs = list(built_tgz_dir.glob('*.tgz'))
         if not built_tgzs:
-            return shared.finish_reproducible_build(lines, work, 'INCONCLUSIVE (no .tgz produced)')
-        built_tgz = max(built_tgzs, key=lambda p: p.stat().st_mtime)
+            return shared.finish_reproducible_build(p, work, 'INCONCLUSIVE (no .tgz produced)')
+        built_tgz = max(built_tgzs, key=lambda tgz: tgz.stat().st_mtime)
 
         built_sha = shared.sha256_file(built_tgz)
-        if (repro := shared.compare_repro_sha256(built_sha, work, lines)) is not None:
+        if (repro := shared.compare_repro_sha256(built_sha, work, p)) is not None:
             return repro
 
         # Hashes will nearly always differ (timestamps); compare unpacked contents
@@ -1128,7 +1119,7 @@ class Hooks(shared.EcosystemHooks):
 
         dist_unpacked = work / 'unpacked'
         if not dist_unpacked.is_dir():
-            return shared.finish_reproducible_build(lines, work, 'INCONCLUSIVE (hashes differ, no dist unpacked dir)')
+            return shared.finish_reproducible_build(p, work, 'INCONCLUSIVE (hashes differ, no dist unpacked dir)')
 
         rc_diff, diff_out, _ = shared.run_cmd(
             ['diff', '-r', str(built_unpacked), str(dist_unpacked), '--exclude=*.map'],
@@ -1137,9 +1128,9 @@ class Hooks(shared.EcosystemHooks):
         (work / 'raw-repro-diff.txt').write_text(diff_out, encoding='utf-8', errors='replace')
 
         diff_line_count = len(diff_out.splitlines())
-        lines.append(f'CONTENT_DIFF_LINES: {diff_line_count}')
+        p(f'CONTENT_DIFF_LINES: {diff_line_count}')
 
         if diff_line_count == 0:
-            return shared.finish_reproducible_build(lines, work, 'EXACTLY REPRODUCIBLE (content match)')
+            return shared.finish_reproducible_build(p, work, 'EXACTLY REPRODUCIBLE (content match)')
 
-        return shared.classify_repro_diffs(diff_out, lines, work, _RE_REPRO_CODE, _RE_REPRO_META)
+        return shared.classify_repro_diffs(diff_out, p, work, _RE_REPRO_CODE, _RE_REPRO_META)

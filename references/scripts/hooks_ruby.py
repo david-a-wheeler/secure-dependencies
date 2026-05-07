@@ -218,6 +218,7 @@ class Hooks(shared.EcosystemHooks):
         unpacked_dir: Path,
         work: Path,
         failures: list[str],
+        p: 'shared.Printer',
     ) -> dict:
         """Parse gemspec; write manifest-analysis.txt and gemspec.txt.
 
@@ -249,77 +250,81 @@ class Hooks(shared.EcosystemHooks):
                 shutil.copy2(gemspec_file, dest_gemspec)
             gemspec_text = gemspec_file.read_text(encoding='utf-8', errors='replace')
 
-            manifest_lines: list[str] = [f'=== Manifest analysis: {pkgname} {version} ===', '']
+            p(f'=== Manifest analysis: {pkgname} {version} ===')
+            p('')
 
             if 'extensions' in gemspec_text:
                 extensions = 'YES'
-                manifest_lines.append('HAS_EXTENSIONS: YES')
+                p('HAS_EXTENSIONS: YES')
             else:
-                manifest_lines.append('HAS_EXTENSIONS: NO')
+                p('HAS_EXTENSIONS: NO')
 
-            exec_lines = [l for l in gemspec_text.splitlines() if 'executables' in l]
+            exec_lines = [el for el in gemspec_text.splitlines() if 'executables' in el]
             if exec_lines:
                 executables = 'YES'
                 executables_list = shared.sanitize_line('; '.join(exec_lines[:3]))
-                manifest_lines.extend(['HAS_EXECUTABLES: YES', f'EXECUTABLES_LINES: {executables_list}'])
+                p('HAS_EXECUTABLES: YES')
+                p(f'EXECUTABLES_LINES: {executables_list}')
             else:
-                manifest_lines.append('HAS_EXECUTABLES: NO')
+                p('HAS_EXECUTABLES: NO')
 
             if 'post_install_message' in gemspec_text:
                 post_install_msg = 'YES'
-                manifest_lines.append('HAS_POST_INSTALL_MESSAGE: YES')
+                p('HAS_POST_INSTALL_MESSAGE: YES')
             else:
-                manifest_lines.append('HAS_POST_INSTALL_MESSAGE: NO')
+                p('HAS_POST_INSTALL_MESSAGE: NO')
 
-            manifest_lines.append('')
-            manifest_lines.append('RUNTIME_DEPS:')
+            p('')
+            p('RUNTIME_DEPS:')
             dep_lines = [
-                l for l in gemspec_text.splitlines()
-                if 'add_runtime_dependency' in l or
-                   ('add_dependency' in l and 'development' not in l)
+                dl for dl in gemspec_text.splitlines()
+                if 'add_runtime_dependency' in dl or
+                   ('add_dependency' in dl and 'development' not in dl)
             ]
             if dep_lines:
                 runtime_dep_lines = dep_lines
-                manifest_lines.extend(shared.sanitize_line(l) for l in dep_lines)
+                for dl in dep_lines:
+                    p(shared.sanitize_line(dl))
             else:
-                manifest_lines.append('  (none)')
+                p('  (none)')
 
-            manifest_lines.extend(['', 'DEV_DEPS:'])
-            dev_lines = [l for l in gemspec_text.splitlines() if 'add_development_dependency' in l]
-            (manifest_lines.extend(shared.sanitize_line(l) for l in dev_lines)
-             if dev_lines else manifest_lines.append('  (none)'))
+            p('')
+            p('DEV_DEPS:')
+            dev_lines = [dl for dl in gemspec_text.splitlines() if 'add_development_dependency' in dl]
+            if dev_lines:
+                for dl in dev_lines:
+                    p(shared.sanitize_line(dl))
+            else:
+                p('  (none)')
 
             hp_match = re.search(
                 r'(?:homepage|source_code_uri|homepage_uri)\s*=\s*["\']([^"\']+)', gemspec_text
             )
             homepage_val = shared.sanitize_line(hp_match.group(1)) if hp_match else '(not found)'
-            manifest_lines.extend(['', f'HOMEPAGE: {homepage_val}'])
+            p('')
+            p(f'HOMEPAGE: {homepage_val}')
 
             auth_match = re.search(r'authors?\s*=\s*([^\n]+)', gemspec_text)
             authors_val = shared.sanitize_line(auth_match.group(1)[:200]) if auth_match else '(not found)'
-            manifest_lines.append(f'AUTHORS: {authors_val}')
+            p(f'AUTHORS: {authors_val}')
 
             gemspec_license_raw = _extract_gemspec_license(gemspec_text)
-            manifest_lines.extend(
-                ['', f'LICENSE_DECLARED: {shared.sanitize_line(gemspec_license_raw) or "(not declared)"}']
-            )
+            p('')
+            p(f'LICENSE_DECLARED: {shared.sanitize_line(gemspec_license_raw) or "(not declared)"}')
 
-            manifest_lines.append('')
+            p('')
             rakefile = unpacked_dir / 'Rakefile'
             if rakefile.is_file():
-                manifest_lines.append('RAKEFILE_PRESENT: YES')
+                p('RAKEFILE_PRESENT: YES')
                 rake_text = rakefile.read_text(encoding='utf-8', errors='replace')
                 if re.search(r'(?i)install|post_install', rake_text):
                     has_rakefile_tasks = 'YES'
-                    manifest_lines.append('RAKEFILE_INSTALL_TASKS: YES')
+                    p('RAKEFILE_INSTALL_TASKS: YES')
                 else:
-                    manifest_lines.append('RAKEFILE_INSTALL_TASKS: NO')
+                    p('RAKEFILE_INSTALL_TASKS: NO')
             else:
-                manifest_lines.append('RAKEFILE_PRESENT: NO')
+                p('RAKEFILE_PRESENT: NO')
 
-            (work / 'manifest-analysis.txt').write_text(
-                '\n'.join(manifest_lines) + '\n', encoding='utf-8'
-            )
             source_url = _extract_source_url(gemspec_text)
 
             # Collect install-time scripts for AI review when any install-time
@@ -328,9 +333,9 @@ class Hooks(shared.EcosystemHooks):
             install_script_files: list[tuple[str, Path]] = []
             if extensions == 'YES':
                 for name in ('extconf.rb', 'Makefile.in', 'Makefile'):
-                    p = unpacked_dir / name
-                    if p.is_file():
-                        install_script_files.append((name, p))
+                    script_fp = unpacked_dir / name
+                    if script_fp.is_file():
+                        install_script_files.append((name, script_fp))
             if has_rakefile_tasks == 'YES' and rakefile.is_file():
                 install_script_files.append(('Rakefile', rakefile))
 
@@ -352,7 +357,7 @@ class Hooks(shared.EcosystemHooks):
                 )
         else:
             failures.append('gemspec-missing')
-            (work / 'manifest-analysis.txt').write_text('ERROR: gemspec not found\n', encoding='utf-8')
+            p('ERROR: gemspec not found')
 
         has_install_scripts = (work / 'install-scripts.txt').is_file()
 
@@ -514,6 +519,7 @@ class Hooks(shared.EcosystemHooks):
         pkgname: str,
         version: str,
         work: Path,
+        p: 'shared.Printer',
     ) -> dict:
         """Fetch RubyGems API: gems endpoint (MFA), versions endpoint (age/stability), owners.
 
@@ -533,11 +539,12 @@ class Hooks(shared.EcosystemHooks):
         license_from_registry: list[str] = []
         ver_info_lines: list[str] = []
 
-        prov_lines: list[str] = [f'=== Provenance: {pkgname} {version} ===', '']
+        p(f'=== Provenance: {pkgname} {version} ===')
+        p('')
         rc_gi, gi_out, _ = shared.run_cmd(['gem', 'info', pkgname, '-r'])
-        prov_lines.extend(
-            ['GEM_INFO:', shared.sanitize(gi_out[:2000]) if rc_gi == 0 else '(unavailable)', '']
-        )
+        p('GEM_INFO:')
+        p(shared.sanitize(gi_out[:2000]) if rc_gi == 0 else '(unavailable)')
+        p('')
 
         # Gems endpoint: MFA
         # RubyGems stores MFA status in metadata.rubygems_mfa_required (a string "true"/"false")
@@ -560,7 +567,8 @@ class Hooks(shared.EcosystemHooks):
                         mfa_status = 'false'
             except (ValueError, KeyError):
                 pass
-        prov_lines.extend([f'MFA_REQUIRED: {shared.sanitize_line(mfa_status)}', ''])
+        p(f'MFA_REQUIRED: {shared.sanitize_line(mfa_status)}')
+        p('')
 
         # Versions endpoint: age, stability, license
         ver_api_data_bytes = shared.http_get(f'{api_base}/api/v1/versions/{pkgname}.json')
@@ -607,7 +615,8 @@ class Hooks(shared.EcosystemHooks):
         else:
             ver_info_lines.append('VERSION_INFO: (unavailable)')
 
-        prov_lines.extend(ver_info_lines)
+        for vline in ver_info_lines:
+            p(vline)
 
         # Owners endpoint
         owners_data = shared.http_get(f'{api_base}/api/v1/owners/{pkgname}.json')
@@ -619,8 +628,6 @@ class Hooks(shared.EcosystemHooks):
                     owner_count_int = len(owners)
             except (ValueError, TypeError):
                 pass
-
-        (work / 'provenance.txt').write_text('\n'.join(prov_lines) + '\n', encoding='utf-8')
 
         return {
             'mfa_status': mfa_status,
@@ -735,10 +742,11 @@ class Hooks(shared.EcosystemHooks):
         version: str,
         lockfile_path: Path,
         work: Path,
+        p: 'shared.Printer',
     ) -> dict:
         """Run `gem dependency`; compare against lockfile.
 
-        Writes: transitive-deps.txt, raw-transitive-deps.txt.
+        Writes: transitive-deps.txt (via p), raw-transitive-deps.txt.
         Returns dict with keys: total (int), not_in_lockfile (list[str]).
         """
         rc_dep, dep_out, _ = shared.run_cmd(
@@ -765,7 +773,7 @@ class Hooks(shared.EcosystemHooks):
             if not re.search(rf'^    {re.escape(dep_name)} ', lf_text, re.MULTILINE):
                 transitive_new.append(dep_name)
 
-        return shared.write_transitive_deps(work, pkgname, version, total, transitive_new)
+        return shared.write_transitive_deps(work, pkgname, version, total, transitive_new, p)
 
     def check_alternatives(
         self,
@@ -907,14 +915,15 @@ class Hooks(shared.EcosystemHooks):
                         'Verify this external wrapper is intentional.'
                     )
 
-        return shared.write_alternatives(
-            work, pkgname, version,
-            {
-                'Installed/stdlib gems checked': len(gem_names),
-                'Lockfile deps checked': len(lockfile_names),
-            },
-            concerns, notes,
-        )
+        with shared.Printer(work / 'alternatives.txt') as _p_alt:
+            return shared.write_alternatives(
+                _p_alt, pkgname, version,
+                {
+                    'Installed/stdlib gems checked': len(gem_names),
+                    'Lockfile deps checked': len(lockfile_names),
+                },
+                concerns, notes,
+            )
 
     def get_diff_excludes(self) -> list[str]:
         """Returns list of glob patterns to exclude from diff."""
@@ -962,6 +971,7 @@ class Hooks(shared.EcosystemHooks):
         version: str,
         work: Path,
         sandbox: str,
+        p: 'shared.Printer',
     ) -> tuple[str, int, int]:
         """Attempt to build gem from source and compare with distributed gem.
 
@@ -978,24 +988,22 @@ class Hooks(shared.EcosystemHooks):
         built_gem_dir = work / 'raw-built-gem'
         built_gem_dir.mkdir(exist_ok=True)
 
-        lines: list[str] = [
-            f'=== Reproducible build: {pkgname} {version} ===',
-            f'Sandbox: {sandbox}',
-            '',
-        ]
+        p(f'=== Reproducible build: {pkgname} {version} ===')
+        p(f'Sandbox: {sandbox}')
+        p('')
 
         if not clone_dir.is_dir():
-            return shared.finish_reproducible_build(lines, work, 'SKIPPED (no source clone)')
+            return shared.finish_reproducible_build(p, work, 'SKIPPED (no source clone)')
 
         rc_rv, rv_out, _ = shared.run_cmd(['ruby', '--version'], timeout=10)
         ruby_ver = shared.sanitize_line(rv_out.strip()) if rc_rv == 0 else 'unknown'
-        lines.append(f'RUBY_VERSION: {ruby_ver}')
+        p(f'RUBY_VERSION: {ruby_ver}')
 
         gemspec_candidates = list(clone_dir.rglob('*.gemspec'))
         if not gemspec_candidates:
-            return shared.finish_reproducible_build(lines, work, 'SKIPPED (no gemspec in source)')
+            return shared.finish_reproducible_build(p, work, 'SKIPPED (no gemspec in source)')
         source_gemspec = gemspec_candidates[0].relative_to(clone_dir)
-        lines.append(f'SOURCE_GEMSPEC: {shared.sanitize_line(str(source_gemspec))}')
+        p(f'SOURCE_GEMSPEC: {shared.sanitize_line(str(source_gemspec))}')
 
         build_log_path = work / 'raw-build-output.txt'
 
@@ -1004,7 +1012,7 @@ class Hooks(shared.EcosystemHooks):
         parts = ruby_img_tag.split('.')
         ruby_img_tag = '.'.join(parts[:2]) if len(parts) >= 2 else parts[0]
 
-        result = shared.run_sandboxed(
+        build_result = shared.run_sandboxed(
             sandbox, clone_dir, built_gem_dir,
             '',  # shell_cmd unused for bwrap/firejail; cmd= used instead
             f'ruby:{ruby_img_tag}',
@@ -1016,27 +1024,27 @@ class Hooks(shared.EcosystemHooks):
                 'gem build *.gemspec && cp *.gem {out}/'
             ),
         )
-        if result is None:
+        if build_result is None:
             return shared.finish_reproducible_build(
-                lines, work,
+                p, work,
                 'SKIPPED (no sandbox available: install bwrap, firejail, docker, or podman)',
             )
-        rc_b, combined = result
+        rc_b, combined = build_result
         build_log_path.write_text(combined, encoding='utf-8', errors='replace')
         build_ok = (rc_b == 0)
 
-        lines.append(f'BUILD_STATUS: {"yes" if build_ok else "no"}')
+        p(f'BUILD_STATUS: {"yes" if build_ok else "no"}')
 
         if not build_ok:
-            return shared.finish_reproducible_build(lines, work, 'INCONCLUSIVE (build failed)')
+            return shared.finish_reproducible_build(p, work, 'INCONCLUSIVE (build failed)')
 
         built_gems = list(built_gem_dir.glob('*.gem'))
         if not built_gems:
-            return shared.finish_reproducible_build(lines, work, 'INCONCLUSIVE (no .gem produced)')
+            return shared.finish_reproducible_build(p, work, 'INCONCLUSIVE (no .gem produced)')
         built_gem = built_gems[0]
 
         built_sha = shared.sha256_file(built_gem)
-        if (repro := shared.compare_repro_sha256(built_sha, work, lines)) is not None:
+        if (repro := shared.compare_repro_sha256(built_sha, work, p)) is not None:
             return repro
 
         # Hashes differ; unpack and compare contents
@@ -1053,7 +1061,7 @@ class Hooks(shared.EcosystemHooks):
 
         dist_unpacked = work / 'unpacked' / f'{pkgname}-{version}'
         if not dist_unpacked.is_dir():
-            return shared.finish_reproducible_build(lines, work, 'INCONCLUSIVE (hashes differ, no dist unpacked dir)')
+            return shared.finish_reproducible_build(p, work, 'INCONCLUSIVE (hashes differ, no dist unpacked dir)')
 
         rc_diff, diff_out, _ = shared.run_cmd(
             ['diff', '-r', str(built_unpacked), str(dist_unpacked), '--exclude=*.gem'],
@@ -1062,9 +1070,9 @@ class Hooks(shared.EcosystemHooks):
         (work / 'raw-repro-diff.txt').write_text(diff_out, encoding='utf-8', errors='replace')
 
         diff_line_count = len(diff_out.splitlines())
-        lines.append(f'CONTENT_DIFF_LINES: {diff_line_count}')
+        p(f'CONTENT_DIFF_LINES: {diff_line_count}')
 
         if diff_line_count == 0:
-            return shared.finish_reproducible_build(lines, work, 'EXACTLY REPRODUCIBLE (content match)')
+            return shared.finish_reproducible_build(p, work, 'EXACTLY REPRODUCIBLE (content match)')
 
-        return shared.classify_repro_diffs(diff_out, lines, work, _RE_REPRO_CODE, _RE_REPRO_META)
+        return shared.classify_repro_diffs(diff_out, p, work, _RE_REPRO_CODE, _RE_REPRO_META)

@@ -366,6 +366,7 @@ class Hooks(shared.EcosystemHooks):
         unpacked_dir: Path,
         work: Path,
         failures: list[str],
+        p: 'shared.Printer',
     ) -> dict:
         """Parse METADATA (wheel) or PKG-INFO (sdist); write manifest-analysis.txt.
 
@@ -410,7 +411,8 @@ class Hooks(shared.EcosystemHooks):
         else:
             failures.append('metadata-missing')
 
-        manifest_lines: list[str] = [f'=== Manifest analysis: {pkgname} {version} ===', '']
+        p(f'=== Manifest analysis: {pkgname} {version} ===')
+        p('')
 
         # Read pyproject.toml once; reused for extensions, executables, and build-hook checks.
         ppt_text = ''
@@ -436,7 +438,7 @@ class Hooks(shared.EcosystemHooks):
                         if re.search(r'(?i)ext_modules|cffi|Cython|cython|distutils\.extension', txt):
                             extensions = 'YES'
                             break
-        manifest_lines.append(f'HAS_EXTENSIONS: {extensions}')
+        p(f'HAS_EXTENSIONS: {extensions}')
 
         # Check for entry points (executables installed to PATH)
         entry_points_file: Path | None = None
@@ -459,9 +461,9 @@ class Hooks(shared.EcosystemHooks):
                 executables = 'YES'
                 scripts = re.findall(r'^\s*(\S+)\s*=', ppt_text, re.MULTILINE)
                 executables_list = shared.sanitize_line(', '.join(scripts[:10]))
-        manifest_lines.append(f'HAS_EXECUTABLES: {executables}')
+        p(f'HAS_EXECUTABLES: {executables}')
         if executables == 'YES':
-            manifest_lines.append(f'EXECUTABLES: {executables_list}')
+            p(f'EXECUTABLES: {executables_list}')
 
         # Check for build hooks / install-time code:
         # setup.py with code beyond bare metadata; pyproject.toml build hooks;
@@ -489,55 +491,52 @@ class Hooks(shared.EcosystemHooks):
                 if has_build_hooks == 'NO':
                     has_build_hooks = 'MAYBE'
 
-        manifest_lines.append(f'HAS_BUILD_HOOKS: {has_build_hooks}')
+        p(f'HAS_BUILD_HOOKS: {has_build_hooks}')
         if has_setup_py:
-            manifest_lines.append('SETUP_PY_PRESENT: YES')
+            p('SETUP_PY_PRESENT: YES')
 
         # Runtime dependencies
-        manifest_lines.extend(['', 'RUNTIME_DEPS:'])
+        p('')
+        p('RUNTIME_DEPS:')
         requires_dist = meta.get('Requires-Dist', [])
         if isinstance(requires_dist, str):
             requires_dist = [requires_dist]
         runtime_dep_lines = [str(r) for r in requires_dist if r and '; extra ==' not in str(r)]
         if runtime_dep_lines:
-            manifest_lines.extend(shared.sanitize_line(l) for l in runtime_dep_lines)
+            for rdl in runtime_dep_lines:
+                p(shared.sanitize_line(rdl))
         else:
-            manifest_lines.append('  (none declared)')
+            p('  (none declared)')
 
         # Python version requirement
         py_req = meta.get('Requires-Python', '')
         if py_req and isinstance(py_req, str):
-            manifest_lines.extend(['', f'REQUIRES_PYTHON: {shared.sanitize_line(py_req)}'])
+            p('')
+            p(f'REQUIRES_PYTHON: {shared.sanitize_line(py_req)}')
 
         # Homepage / source URL
         source_url = _extract_source_url_from_meta(meta)
         hp_display = shared.sanitize_line(source_url) if source_url else '(not found)'
-        manifest_lines.extend(['', f'HOMEPAGE: {hp_display}'])
+        p('')
+        p(f'HOMEPAGE: {hp_display}')
 
         # Authors
         author = meta.get('Author', '') or meta.get('Author-email', '')
         if isinstance(author, list):
             author = ', '.join(author)
-        manifest_lines.append(f'AUTHOR: {shared.sanitize_line(str(author)[:200])}')
+        p(f'AUTHOR: {shared.sanitize_line(str(author)[:200])}')
 
         # License
         manifest_license_raw = _extract_license_from_meta(meta)
-        manifest_lines.extend([
-            '',
-            f'LICENSE_DECLARED: {shared.sanitize_line(manifest_license_raw) or "(not declared)"}',
-        ])
+        p('')
+        p(f'LICENSE_DECLARED: {shared.sanitize_line(manifest_license_raw) or "(not declared)"}')
 
         # Summary
         summary = meta.get('Summary', '')
         if isinstance(summary, list):
             summary = summary[0] if summary else ''
         if summary:
-            manifest_lines.append(f'SUMMARY: {shared.sanitize_line(str(summary)[:300])}')
-
-        manifest_lines.append('')
-        (work / 'manifest-analysis.txt').write_text(
-            '\n'.join(manifest_lines) + '\n', encoding='utf-8'
-        )
+            p(f'SUMMARY: {shared.sanitize_line(str(summary)[:300])}')
 
         # Extract install-time scripts for AI review
         if install_script_files:
@@ -736,12 +735,13 @@ class Hooks(shared.EcosystemHooks):
         pkgname: str,
         version: str,
         work: Path,
+        p: 'shared.Printer',
     ) -> dict:
         """Fetch PyPI JSON API: package info, version history, upload metadata.
 
         self.registry_url overrides the default pypi.org base URL for private indices.
 
-        Writes: provenance.txt.
+        Writes: provenance.txt (via p).
         Returns dict with keys: mfa_status, age_years_float, last_release_days,
         owner_count_int, version_stability, license_from_registry, ver_info_lines.
         """
@@ -754,7 +754,8 @@ class Hooks(shared.EcosystemHooks):
         license_from_registry: list[str] = []
         ver_info_lines: list[str] = []
 
-        prov_lines: list[str] = [f'=== Provenance: {pkgname} {version} ===', '']
+        p(f'=== Provenance: {pkgname} {version} ===')
+        p('')
 
         # Package-level JSON: info + releases
         pkg_data = shared.http_get(f'{api_base}/pypi/{pkgname}/json')
@@ -767,8 +768,8 @@ class Hooks(shared.EcosystemHooks):
                 releases = pkg_json.get('releases', {})
                 all_upload_times: list[str] = []
                 for rel_files in releases.values():
-                    for f in (rel_files or []):
-                        t = f.get('upload_time_iso_8601', '') or f.get('upload_time', '')
+                    for rf in (rel_files or []):
+                        t = rf.get('upload_time_iso_8601', '') or rf.get('upload_time', '')
                         if t:
                             all_upload_times.append(t)
                 if all_upload_times:
@@ -797,25 +798,23 @@ class Hooks(shared.EcosystemHooks):
 
                 # Yanked status
                 yanked = info.get('yanked', False)
-                prov_lines.append(f'YANKED: {"YES" if yanked else "NO"}')
+                p(f'YANKED: {"YES" if yanked else "NO"}')
                 if yanked:
                     reason = shared.sanitize_line(str(info.get('yanked_reason', '')))
-                    prov_lines.append(f'YANKED_REASON: {reason}')
-                prov_lines.append('')
+                    p(f'YANKED_REASON: {reason}')
+                p('')
 
                 # Summary provenance info
                 author = info.get('author', '') or ''
                 maintainer = info.get('maintainer', '') or ''
                 home = info.get('home_page', '') or ''
-                prov_lines.extend([
-                    f'AUTHOR: {shared.sanitize_line(str(author)[:200])}',
-                    f'MAINTAINER: {shared.sanitize_line(str(maintainer)[:200])}',
-                    f'HOME_PAGE: {shared.sanitize_line(str(home)[:300])}',
-                    '',
-                ])
+                p(f'AUTHOR: {shared.sanitize_line(str(author)[:200])}')
+                p(f'MAINTAINER: {shared.sanitize_line(str(maintainer)[:200])}')
+                p(f'HOME_PAGE: {shared.sanitize_line(str(home)[:300])}')
+                p('')
 
             except (ValueError, KeyError, TypeError):
-                prov_lines.append('REGISTRY_DATA: parse error')
+                p('REGISTRY_DATA: parse error')
 
         # Version-specific JSON
         ver_data = shared.http_get(f'{api_base}/pypi/{pkgname}/{version}/json')
@@ -838,11 +837,11 @@ class Hooks(shared.EcosystemHooks):
         else:
             ver_info_lines.append('VERSION_INFO: (unavailable)')
 
-        prov_lines.append('NOTE: PyPI does not expose per-package MFA status via API.')
-        prov_lines.append('      MFA_REQUIRED is always "unknown" for PyPI packages.')
-        prov_lines.extend(['', *ver_info_lines])
-
-        (work / 'provenance.txt').write_text('\n'.join(prov_lines) + '\n', encoding='utf-8')
+        p('NOTE: PyPI does not expose per-package MFA status via API.')
+        p('      MFA_REQUIRED is always "unknown" for PyPI packages.')
+        p('')
+        for vline in ver_info_lines:
+            p(vline)
 
         return {
             'mfa_status': mfa_status,
@@ -992,6 +991,7 @@ class Hooks(shared.EcosystemHooks):
         version: str,
         lockfile_path: Path,
         work: Path,
+        p: 'shared.Printer',
     ) -> dict:
         """Fetch Requires-Dist from PyPI JSON API; compare against lockfile.
 
@@ -999,7 +999,7 @@ class Hooks(shared.EcosystemHooks):
         would require recursive PyPI API calls; that is deferred to a future
         enhancement.
 
-        Writes: transitive-deps.txt, raw-transitive-deps.txt.
+        Writes: transitive-deps.txt (via p), raw-transitive-deps.txt.
         Returns dict with keys: total (int), not_in_lockfile (list[str]).
         """
         # Fetch requires_dist from PyPI for the specific version
@@ -1041,7 +1041,7 @@ class Hooks(shared.EcosystemHooks):
                 transitive_new.append(dep_name)
 
         return shared.write_transitive_deps(
-            work, pkgname, version, total, transitive_new,
+            work, pkgname, version, total, transitive_new, p,
             total_label='TOTAL_DIRECT_DEPS',
             note='shows direct (level-1) deps from PyPI metadata only.',
         )
@@ -1208,15 +1208,16 @@ class Hooks(shared.EcosystemHooks):
                         'Verify this wrapper is intentional.'
                     )
 
-        return shared.write_alternatives(
-            work, pkgname, version,
-            {
-                'Stdlib modules checked': len(stdlib_names),
-                'Installed pkgs checked': len(installed_names),
-                'Lockfile deps checked': len(lockfile_names),
-            },
-            concerns, notes,
-        )
+        with shared.Printer(work / 'alternatives.txt') as _p_alt:
+            return shared.write_alternatives(
+                _p_alt, pkgname, version,
+                {
+                    'Stdlib modules checked': len(stdlib_names),
+                    'Installed pkgs checked': len(installed_names),
+                    'Lockfile deps checked': len(lockfile_names),
+                },
+                concerns, notes,
+            )
 
     def _get_stdlib_names(self) -> list[str]:
         """Return a list of Python stdlib module names.
@@ -1321,6 +1322,7 @@ class Hooks(shared.EcosystemHooks):
         version: str,
         work: Path,
         sandbox: str,
+        p: 'shared.Printer',
     ) -> tuple[str, int, int]:
         """Attempt to build a wheel from source and compare with the distributed wheel.
 
@@ -1339,18 +1341,16 @@ class Hooks(shared.EcosystemHooks):
         built_whl_dir = work / 'raw-built-whl'
         built_whl_dir.mkdir(exist_ok=True)
 
-        lines: list[str] = [
-            f'=== Reproducible build: {pkgname} {version} ===',
-            f'Sandbox: {sandbox}',
-            '',
-        ]
+        p(f'=== Reproducible build: {pkgname} {version} ===')
+        p(f'Sandbox: {sandbox}')
+        p('')
 
         if not clone_dir.is_dir():
-            return shared.finish_reproducible_build(lines, work, 'SKIPPED (no source clone)')
+            return shared.finish_reproducible_build(p, work, 'SKIPPED (no source clone)')
 
         rc_pv, pv_out, _ = shared.run_cmd(['python3', '--version'], timeout=10)
         python_ver = shared.sanitize_line(pv_out.strip()) if rc_pv == 0 else 'unknown'
-        lines.append(f'PYTHON_VERSION: {python_ver}')
+        p(f'PYTHON_VERSION: {python_ver}')
 
         # Locate pyproject.toml or setup.py in the clone
         build_root = clone_dir
@@ -1367,9 +1367,9 @@ class Hooks(shared.EcosystemHooks):
                     break
 
         if not (build_root / 'pyproject.toml').is_file() and not (build_root / 'setup.py').is_file():
-            return shared.finish_reproducible_build(lines, work, 'SKIPPED (no pyproject.toml or setup.py in source)')
+            return shared.finish_reproducible_build(p, work, 'SKIPPED (no pyproject.toml or setup.py in source)')
 
-        lines.append(f'BUILD_ROOT: {shared.sanitize_line(str(build_root))}')
+        p(f'BUILD_ROOT: {shared.sanitize_line(str(build_root))}')
         build_log_path = work / 'raw-build-output.txt'
 
         rc_pv2, pv2_out, _ = shared.run_cmd(
@@ -1381,7 +1381,7 @@ class Hooks(shared.EcosystemHooks):
             if m:
                 py_img_tag = f'{m.group(1)}.{m.group(2)}'
 
-        result = shared.run_sandboxed(
+        build_result = shared.run_sandboxed(
             sandbox, build_root, built_whl_dir,
             'python3 -m build --wheel --no-isolation --outdir {out} {src}',
             f'python:{py_img_tag}',
@@ -1393,27 +1393,27 @@ class Hooks(shared.EcosystemHooks):
             ),
             container_allow_network=True,
         )
-        if result is None:
+        if build_result is None:
             return shared.finish_reproducible_build(
-                lines, work,
+                p, work,
                 'SKIPPED (no sandbox available: install bwrap, firejail, docker, or podman)',
             )
-        rc_b, combined = result
+        rc_b, combined = build_result
         build_log_path.write_text(combined, encoding='utf-8', errors='replace')
         build_ok = rc_b == 0
 
-        lines.append(f'BUILD_STATUS: {"yes" if build_ok else "no"}')
+        p(f'BUILD_STATUS: {"yes" if build_ok else "no"}')
 
         if not build_ok:
-            return shared.finish_reproducible_build(lines, work, 'INCONCLUSIVE (build failed)')
+            return shared.finish_reproducible_build(p, work, 'INCONCLUSIVE (build failed)')
 
         built_whls = list(built_whl_dir.glob('*.whl'))
         if not built_whls:
-            return shared.finish_reproducible_build(lines, work, 'INCONCLUSIVE (no .whl produced)')
+            return shared.finish_reproducible_build(p, work, 'INCONCLUSIVE (no .whl produced)')
         built_whl = built_whls[0]
 
         built_sha = shared.sha256_file(built_whl)
-        if (repro := shared.compare_repro_sha256(built_sha, work, lines)) is not None:
+        if (repro := shared.compare_repro_sha256(built_sha, work, p)) is not None:
             return repro
 
         # Hashes differ: unpack both and compare contents
@@ -1423,7 +1423,7 @@ class Hooks(shared.EcosystemHooks):
 
         dist_unpacked = work / 'unpacked'
         if not dist_unpacked.is_dir():
-            return shared.finish_reproducible_build(lines, work, 'INCONCLUSIVE (hashes differ, no dist unpacked dir)')
+            return shared.finish_reproducible_build(p, work, 'INCONCLUSIVE (hashes differ, no dist unpacked dir)')
 
         rc_diff, diff_out, _ = shared.run_cmd(
             ['diff', '-r', str(built_unpacked), str(dist_unpacked),
@@ -1433,9 +1433,9 @@ class Hooks(shared.EcosystemHooks):
         (work / 'raw-repro-diff.txt').write_text(diff_out, encoding='utf-8', errors='replace')
 
         diff_line_count = len(diff_out.splitlines())
-        lines.append(f'CONTENT_DIFF_LINES: {diff_line_count}')
+        p(f'CONTENT_DIFF_LINES: {diff_line_count}')
 
         if diff_line_count == 0:
-            return shared.finish_reproducible_build(lines, work, 'EXACTLY REPRODUCIBLE (content match)')
+            return shared.finish_reproducible_build(p, work, 'EXACTLY REPRODUCIBLE (content match)')
 
-        return shared.classify_repro_diffs(diff_out, lines, work, _RE_REPRO_CODE, _RE_REPRO_META)
+        return shared.classify_repro_diffs(diff_out, p, work, _RE_REPRO_CODE, _RE_REPRO_META)
