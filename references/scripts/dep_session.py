@@ -67,6 +67,9 @@ VALID_RECOMMENDATIONS = frozenset({
 # malformed names that slip past ecosystem-level validation or a hook bug.
 # Covers npm, PyPI, RubyGems, Maven (group:artifact), and CPAN (Foo::Bar).
 # ':' is not a shell metacharacter in argument position, so it is safe to allow.
+# Shell injection is not a risk: all subprocess calls use list form (never
+# shell=True), so special chars cannot inject into commands. Path traversal
+# via '/' is separately neutralized by safe_dir_component.
 _DEP_NAME_RE = re.compile(r'^[@A-Za-z0-9][A-Za-z0-9._/:-]{0,213}$')
 VALID_RISKS = frozenset({'LOW', 'MEDIUM', 'HIGH', 'CRITICAL'})
 
@@ -446,7 +449,8 @@ def print_next_action(session: dict, session_path: Path) -> None:
     print(f'Step 2: read output, make security judgment, write assessment.txt')
     print()
     print(f'Step 3: record verdict:')
-    print(f'  python3 {scripts_rel}/dep_session.py complete {session_rel} \\')
+    _token_flag = f' --token {_tok}' if _tok else ''
+    print(f'  python3 {scripts_rel}/dep_session.py complete{_token_flag} -- {session_rel} \\')
     print(f'    {sname} {sversion} RECOMMENDATION RISK')
     print()
     print('  RECOMMENDATION: APPROVE | APPROVE_WITH_CAUTION | REVIEW_MANUALLY | DO_NOT_INSTALL')
@@ -501,6 +505,10 @@ def cmd_init(args: argparse.Namespace) -> None:
         'depth_confirmed': False,
         'aborted': False,
         'abort_reason': None,
+        # Mitigates instruction-mimicry attacks: a malicious package cannot
+        # forge a valid NEXT_ACTION/{token}: ... line without knowing this
+        # value. The `complete --token` argument enforces this at the script
+        # level (see cmd_complete), independent of AI judgment.
         'next_action_token': secrets.token_hex(8),
     }
     save_session(session_path, session)
@@ -526,11 +534,42 @@ def cmd_complete(args: argparse.Namespace) -> None:
         sys.exit(f'Invalid RISK: {risk!r}\n'
                  f'Must be one of: {", ".join(sorted(VALID_RISKS))}')
 
+    # Token verification: prevents malicious package content from embedding
+    # fake `complete` calls that a sub-agent might execute blindly. The token
+    # is unknown to content inside the reviewed package.
+    _expected_token = session.get('next_action_token')
+    _provided_token = getattr(args, 'token', None)
+    if _expected_token:
+        if not _provided_token:
+            sys.exit(
+                'This session requires --token TOKEN.\n'
+                'Use the token from the === NEXT_ACTION/TOKEN: ... === line.'
+            )
+        if _provided_token != _expected_token:
+            sys.exit(
+                'Token mismatch: provided token does not match session.\n'
+                'Use the token from the === NEXT_ACTION/TOKEN: ... === line.'
+            )
+
     key = _pkg_key(name, version)
 
     # Read session-update.json written by dep_review.py --session
     root = Path(session['project_root'])
     work = root / 'temp' / 'dep-review' / shared.safe_dir_component(name, version)
+    # Enforce adversarial gate: if dep_review.py found adversarial content,
+    # only DO_NOT_INSTALL/CRITICAL is accepted. This prevents a
+    # compromised sub-agent from approving a malicious package,
+    # even though it was detected by the adversarial gate,
+    # by ignoring the ABORT in signals.txt.
+    _abort_flag = work / 'adversarial-abort.flag'
+    if _abort_flag.exists() and (
+        recommendation != 'DO_NOT_INSTALL' or risk != 'CRITICAL'
+    ):
+        sys.exit(
+            f'Adversarial gate was triggered for {name} {version}.\n'
+            f'Only DO_NOT_INSTALL / CRITICAL is accepted.\n'
+            f'See {work / "signals.txt"} for details.'
+        )
     update_file = work / 'session-update.json'
     new_dep_names: list[str] = []
     alternatives_critical = False
@@ -1629,6 +1668,9 @@ def main() -> None:
                             help='APPROVE | APPROVE_WITH_CAUTION | REVIEW_MANUALLY | DO_NOT_INSTALL')
     p_complete.add_argument('risk', metavar='RISK',
                             help='LOW | MEDIUM | HIGH | CRITICAL')
+    p_complete.add_argument('--token', metavar='TOKEN',
+                            help='next_action_token from the NEXT_ACTION line '
+                                 '(required when the session has one)')
 
     # resolve
     p_resolve = sub.add_parser('resolve',

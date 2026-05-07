@@ -86,7 +86,12 @@ def fetch_json(url: str) -> object:
         raise ValueError(f'Only HTTPS URLs are allowed, got: {url!r}')
     req = urllib.request.Request(
         url, headers={'User-Agent': 'fetch_json/1.0 (security-review)'})
-    with urllib.request.urlopen(req, timeout=15) as resp:
+    # timeout=60: intentionally generous. Registry endpoints occasionally go
+    # briefly unavailable under load; a long timeout maximizes the chance of
+    # getting data when the site recovers, at the cost of a slower failure if
+    # it does not. For this CLI tool that is the right tradeoff. MAX_BYTES
+    # still caps memory exhaustion regardless of how long the transfer takes.
+    with urllib.request.urlopen(req, timeout=60) as resp:
         raw = resp.read(MAX_BYTES)
     return json.loads(raw.decode('utf-8', errors='replace'))
 
