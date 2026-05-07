@@ -345,13 +345,19 @@ def sanitize(text: str) -> str:
 
 
 def sanitize_line(text: str) -> str:
-    """Collapse newline/CR runs to a space, then apply sanitize().
+    """Collapse newline/CR runs to a space AND apply sanitize(); safe anywhere.
 
     Use for single-line fields (author, version, URL, license, etc.) where
     an embedded newline would break structured output. Consecutive \\r and \\n
     characters (including Windows \\r\\n) are collapsed to a single space so
     the field remains readable when legitimate data contains a stray newline.
     Tab is preserved. For multi-line content use sanitize().
+
+    The internal sanitize() call is intentional: this function is used both
+    inside Printer (where sanitize() would run again anyway) and in plain
+    write_text() and print() paths that have no other sanitization. Keeping
+    it self-contained means callers need not track whether their output goes
+    through Printer or not.
 
     >>> sanitize_line('hello')
     'hello'
@@ -692,7 +698,8 @@ def clone_source_repo(
                                  to any specific commit and is HIGH RISK. May be
                                  benign (unpinned build tooling) but is suspicious.
     """
-    (work / 'source-url.txt').write_text(sanitize_line(source_url) + '\n', encoding='utf-8')
+    with Printer(work / 'source-url.txt') as _p:
+        _p(sanitize_line(source_url))
 
     clone_ok = False
     version_tag = ''
@@ -1289,9 +1296,8 @@ def compute_diff(
     """
     if not old_dir.is_dir() or not new_dir.is_dir():
         (work / 'raw-diff-full.txt').write_text('', encoding='utf-8')
-        (work / 'diff-filenames.txt').write_text(
-            'DIFF: N/A (old or new directory missing)\n', encoding='utf-8'
-        )
+        with Printer(work / 'diff-filenames.txt') as _p:
+            _p('DIFF: N/A (old or new directory missing)')
         return 0, ''
 
     exclude_args: list[str] = []
@@ -1342,13 +1348,12 @@ def compute_diff(
             short_names.append(sanitize_line(line))
 
     changed_files_text = '\n'.join(short_names)
-    (work / 'diff-filenames.txt').write_text(
-        '\n'.join([
-            f'DIFF_TOTAL_LINES: {diff_lines}', '',
-            'Changed/added/removed files (relative paths):',
-        ] + short_names) + '\n',
-        encoding='utf-8',
-    )
+    with Printer(work / 'diff-filenames.txt') as _p:
+        _p(f'DIFF_TOTAL_LINES: {diff_lines}')
+        _p('')
+        _p('Changed/added/removed files (relative paths):')
+        for name in short_names:
+            _p(name)
     return diff_lines, changed_files_text
 
 
@@ -1395,10 +1400,8 @@ def git_diff_between_tags(
                     break
 
     if not old_tag:
-        (work / 'diff-filenames.txt').write_text(
-            f'DIFF: N/A (old version tag for {sanitize_line(old_ver)} not found in source repo)\n',
-            encoding='utf-8',
-        )
+        with Printer(work / 'diff-filenames.txt') as _p:
+            _p(f'DIFF: N/A (old version tag for {sanitize_line(old_ver)} not found in source repo)')
         (work / 'raw-diff-full.txt').write_text('', encoding='utf-8')
         return 0, ''
 
@@ -1409,10 +1412,8 @@ def git_diff_between_tags(
         timeout=60,
     )
     if rc_fetch != 0:
-        (work / 'diff-filenames.txt').write_text(
-            f'DIFF: N/A (could not fetch old tag {sanitize_line(old_tag)} into clone)\n',
-            encoding='utf-8',
-        )
+        with Printer(work / 'diff-filenames.txt') as _p:
+            _p(f'DIFF: N/A (could not fetch old tag {sanitize_line(old_tag)} into clone)')
         (work / 'raw-diff-full.txt').write_text('', encoding='utf-8')
         return 0, ''
 
@@ -1443,15 +1444,13 @@ def git_diff_between_tags(
                     short_names.append(fname)
 
     changed_files_text = '\n'.join(short_names)
-    (work / 'diff-filenames.txt').write_text(
-        '\n'.join([
-            f'DIFF_TOTAL_LINES: {diff_lines}',
-            f'DIFF_SOURCE: git diff {sanitize_line(old_tag)}..HEAD (source repo; old gem unavailable)',
-            '',
-            'Changed/added/removed files (relative paths):',
-        ] + short_names) + '\n',
-        encoding='utf-8',
-    )
+    with Printer(work / 'diff-filenames.txt') as _p:
+        _p(f'DIFF_TOTAL_LINES: {diff_lines}')
+        _p(f'DIFF_SOURCE: git diff {sanitize_line(old_tag)}..HEAD (source repo; old gem unavailable)')
+        _p('')
+        _p('Changed/added/removed files (relative paths):')
+        for name in short_names:
+            _p(name)
     return diff_lines, changed_files_text
 
 
