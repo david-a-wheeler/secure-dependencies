@@ -190,7 +190,7 @@ Their callers in `dep_review.py` create the Printer inline.
 | `lookup_oss_rebuild` | `oss-rebuild.txt` | none |
 | `write_transitive_deps` | `transitive-deps.txt` | `raw-transitive-deps.txt` |
 | `write_alternatives` | `alternatives.txt` | none |
-| `lookup_ecosystems_package` | `raw-ecosystems.json` (already raw, no change) | — |
+| `lookup_ecosystems_package` | `raw-ecosystems.json` (already raw, no change) | none |
 
 **`clone_source_repo` is a special case.** It both writes output *and*
 creates the `work/source/` subdirectory for the git clone. It keeps a
