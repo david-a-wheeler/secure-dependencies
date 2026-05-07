@@ -283,6 +283,39 @@ Once installed, ask your AI assistant something like:
 The skill will ask clarifying questions as needed and keep you informed at
 each step before taking action.
 
+## Security
+
+We presume that this skill will be run *within* a virtual machine or
+container that does *not* have unlimited rights, so even if the AI itself
+becomes malicious, any damage will be contained.
+
+This skill uses AI, which sometimes makes mistakes and may follow
+malicious instructions if the AI sees them.
+To compensate, the AI orchestrator calls on AI sub-agents to evaluate
+each package, reducing the blast radius of any mistaks.
+The AI sub-agents call on deterministic scripts to gather data, which is
+generally sanitized before providing it to the sub-agents.
+If the system tries to reproduce a build, it will do that within a sandbox
+so the rebuild has limited access.
+However, these mechanisms can't be foolproof.
+In particular, the AI sub-agent may evaluate code or code differences, and
+malicious instruction in that data might fool or manipulate the AI.
+
+In the end, this skill cannot be perfect.
+It attempts to do due diligence to estimate the risk
+of adding or updating a dependency. Just like a human, it may not notice
+a problem, or realize its severity, or consider something excessively
+vulnerable or malicious even when it isn't.
+Still, because it deterministically collects a lot of information, and then
+evaluates that information holistically, it should provide a helpful
+defense against unintentional or malicious dependencies.
+
+This skill is *not* intended to do a deep security analysis of some
+particular program. Consult other skills and tools if you want that.
+
+See [SECURITY.md](./SECURITY.md) for how to report vulnerabilities in
+this program.
+
 ## Current status
 
 This is an early-stage technology demonstration.
