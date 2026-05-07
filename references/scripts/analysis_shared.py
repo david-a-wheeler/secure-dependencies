@@ -450,6 +450,11 @@ class Printer:
     def __exit__(self, *_: object) -> None: self.close()
 
 
+# Environment note: run_cmd inherits the caller's environment. This is
+# intentional for metadata operations (gem fetch, pip download, git clone)
+# which need PATH, HOME, and ecosystem config vars to function. Package
+# code never runs through this path; the install probe (bwrap/firejail/
+# docker) provides OS-level isolation for actual code execution.
 def run_cmd(
     args: list[str],
     cwd: str | Path | None = None,
@@ -513,12 +518,32 @@ def tarfile_extractall_safe(
     On Python 3.12+, delegates to the built-in filter='data' policy.
     On older Python, drops any member that is not a plain file or directory,
     or that has a non-empty linkname (symlink or hardlink target).
+
+    Symlinks are also removed at the directory level after extraction by
+    remove_symlinks(), providing a second layer for any edge cases.
     """
     if sys.version_info >= (3, 12):
         tf.extractall(str(target_dir), members=members, filter='data')
     else:
         safe = [m for m in members if (m.isfile() or m.isdir()) and not m.linkname]
         tf.extractall(str(target_dir), members=safe)
+
+
+def remove_symlinks(directory: Path) -> int:
+    """Remove all symlinks under directory recursively. Returns count removed.
+
+    Called after every package extraction to neutralize symlink attacks
+    regardless of which extraction tool was used. Tar-based extractors
+    already filter symlinks at the member level (tarfile_extractall_safe),
+    but zip extraction and system tools (gem unpack) do not, and grep/
+    file-reader behavior on symlinks differs between GNU and BSD builds.
+    """
+    removed = 0
+    for path in list(directory.rglob('*')):
+        if path.is_symlink():
+            path.unlink()
+            removed += 1
+    return removed
 
 
 def safe_dir_component(name: str, version: str) -> str:
@@ -551,7 +576,7 @@ def blind_scan(
     cmd = ['grep', '-rnP', pattern]
     for glob in (include_globs or []):
         cmd += [f'--include={glob}']
-    cmd.append(str(target))
+    cmd += ['--', str(target)]
     rc, stdout, stderr = run_cmd(cmd, timeout=60)
 
     if rc > 1:
@@ -1440,7 +1465,7 @@ def git_diff_between_tags(
     # Fetch the old tag into the existing shallow clone.
     rc_fetch, _, _ = run_cmd(
         ['git', '-C', str(source_dir), 'fetch', '--depth', '1', 'origin',
-         f'refs/tags/{old_tag}:refs/tags/{old_tag}'],
+         '--', f'refs/tags/{old_tag}:refs/tags/{old_tag}'],
         timeout=60,
     )
     if rc_fetch != 0:
@@ -1450,8 +1475,12 @@ def git_diff_between_tags(
         return 0, ''
 
     # Full diff output for scan/AI review (written to raw- file; never returned to caller).
+    # Raw diff goes to a 'raw-' prefixed file. Sub-agents are instructed
+    # never to read raw- files, so a large or adversarial diff cannot
+    # overflow the sub-agent's context window. Only the sanitized scan
+    # summary in signals.txt is surfaced to the AI.
     rc_diff, diff_out, _ = run_cmd(
-        ['git', '-C', str(source_dir), 'diff', f'{old_tag}..HEAD'],
+        ['git', '-C', str(source_dir), 'diff', f'{old_tag}..HEAD', '--'],
         timeout=60,
     )
     (work / 'raw-diff-full.txt').write_text(diff_out, encoding='utf-8', errors='replace')
@@ -1459,7 +1488,7 @@ def git_diff_between_tags(
 
     # File-level summary via --name-status (safe to surface to AI).
     rc_names, names_out, _ = run_cmd(
-        ['git', '-C', str(source_dir), 'diff', '--name-status', f'{old_tag}..HEAD'],
+        ['git', '-C', str(source_dir), 'diff', '--name-status', f'{old_tag}..HEAD', '--'],
         timeout=30,
     )
     short_names: list[str] = []
