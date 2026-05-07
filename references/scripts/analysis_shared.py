@@ -323,15 +323,16 @@ _SANITIZE_NEWLINE_RE = re.compile(r'[\r\n]+')
 # '?' + tail characters.
 #
 # 1. CSI (ESC [): parameter bytes, optional intermediate bytes, final byte.
-# 2. String-type sequences (DCS=P, OSC=], PM=^, APC=_): content up to
-#    ST (ESC \) or BEL (\x07). Covers OSC hyperlinks, window titles, etc.
+# 2. String-type sequences (SOS=X, DCS=P, OSC=], PM=^, APC=_): content up to
+#    ST (ESC \) or BEL (\x07), terminator optional to catch unterminated ones.
+#    Covers OSC hyperlinks, window titles, device control strings, etc.
 # 3. Two-character Fe sequences (ESC + 0x40-0x7E): SS2, SS3, NEL, RI, RIS,
 #    keypad modes, etc. Each is a single byte after ESC.
 _TERMINAL_ESCAPE_RE = re.compile(
     r'\x1b(?:'
-    r'\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]'          # CSI sequences
-    r'|[\x50\x5d\x5e\x5f][^\x1b\x07]*(?:\x1b\\|\x07)'  # DCS, OSC, PM, APC
-    r'|[\x40-\x7e]'                                      # two-char Fe sequences
+    r'\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]'            # CSI sequences
+    r'|[\x50\x58\x5d\x5e\x5f][^\x1b\x07]*(?:\x1b\\|\x07)?'  # SOS, DCS, OSC, PM, APC
+    r'|[\x40-\x7e]'                                        # two-char Fe sequences
     r')'
 )
 
