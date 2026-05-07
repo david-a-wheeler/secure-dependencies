@@ -70,6 +70,9 @@ VALID_RECOMMENDATIONS = frozenset({
 # Shell injection is not a risk: all subprocess calls use list form (never
 # shell=True), so special chars cannot inject into commands. Path traversal
 # via '/' is separately neutralized by safe_dir_component.
+# All subprocess calls that take a package name or version also use '--'
+# to explicitly terminate option processing, providing defense-in-depth
+# that is portable across platforms and independent of this regex.
 _DEP_NAME_RE = re.compile(r'^[@A-Za-z0-9][A-Za-z0-9._/:-]{0,213}$')
 VALID_RISKS = frozenset({'LOW', 'MEDIUM', 'HIGH', 'CRITICAL'})
 

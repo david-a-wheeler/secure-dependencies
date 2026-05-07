@@ -173,9 +173,13 @@ class Hooks(shared.EcosystemHooks):
         gem_file = work / f'{pkgname}-{version}.gem'
         sha256 = ''
 
-        fetch_cmd = ['gem', 'fetch', pkgname, '-v', version]
+        # Options before '--'; pkgname after cannot be mistaken for a flag.
+        # Defense-in-depth: _DEP_NAME_RE already prevents leading '-', but
+        # explicit '--' is portable and works even if that check is bypassed.
+        fetch_cmd = ['gem', 'fetch', '-v', version]
         if self.registry_url:
             fetch_cmd += ['--source', self.registry_url]
+        fetch_cmd += ['--', pkgname]
         rc, _, err = shared.run_cmd(fetch_cmd, cwd=work)
 
         # gem fetch may download a platform-specific gem
@@ -192,8 +196,8 @@ class Hooks(shared.EcosystemHooks):
                 f'{sha256}  {gem_file.name}\n', encoding='utf-8'
             )
             rc2, _, _ = shared.run_cmd(
-                ['gem', 'unpack', str(gem_file),
-                 '--target', str(unpacked_dir_base)]
+                ['gem', 'unpack', '--target', str(unpacked_dir_base),
+                 '--', str(gem_file)]
             )
             if rc2 != 0:
                 failures.append('gem-unpack-new')
@@ -210,12 +214,22 @@ class Hooks(shared.EcosystemHooks):
             if candidates:
                 unpacked_dir = candidates[0]
 
+        # Remove symlinks gem unpack may have preserved from the archive.
+        # Malicious gems can embed symlinks pointing to host paths outside
+        # the package (e.g. /etc/passwd). remove_symlinks is called on
+        # every ecosystem but is the primary defense here since gem unpack
+        # is a system tool with no Python-level symlink filtering.
+        if unpacked_dir.is_dir():
+            _n = shared.remove_symlinks(unpacked_dir)
+            if _n:
+                failures.append(f'symlinks-removed({_n})')
+
         # Fall back to `gem specification` for gemspec if not present
         # in the unpacked dir
         gemspec_file = unpacked_dir / f'{pkgname}.gemspec'
         if not gemspec_file.is_file() and gem_file.is_file():
             rc_spec, spec_out, _ = shared.run_cmd(
-                ['gem', 'specification', str(gem_file), '--ruby']
+                ['gem', 'specification', '--ruby', '--', str(gem_file)]
             )
             if rc_spec == 0 and spec_out.strip():
                 extracted = work / 'gemspec.txt'
@@ -467,8 +481,8 @@ class Hooks(shared.EcosystemHooks):
 
         if old_cached_gem and old_cached_gem.is_file():
             rc_up, _, _ = shared.run_cmd(
-                ['gem', 'unpack', str(old_cached_gem),
-                 '--target', str(old_dir_base)]
+                ['gem', 'unpack', '--target', str(old_dir_base),
+                 '--', str(old_cached_gem)]
             )
             if rc_up == 0:
                 ok = True
@@ -478,9 +492,10 @@ class Hooks(shared.EcosystemHooks):
         else:
             raw_old_pkg = work / 'raw-old-pkg'
             raw_old_pkg.mkdir(exist_ok=True)
-            fetch_cmd = ['gem', 'fetch', pkgname, '-v', old_ver]
+            fetch_cmd = ['gem', 'fetch', '-v', old_ver]
             if self.registry_url:
                 fetch_cmd += ['--source', self.registry_url]
+            fetch_cmd += ['--', pkgname]
             rc_fetch, _, _ = shared.run_cmd(fetch_cmd, cwd=raw_old_pkg)
             if rc_fetch == 0:
                 old_gem = raw_old_pkg / f'{pkgname}-{old_ver}.gem'
@@ -492,8 +507,8 @@ class Hooks(shared.EcosystemHooks):
                         old_gem = candidates[0]
                 if old_gem.is_file():
                     rc_up2, _, _ = shared.run_cmd(
-                        ['gem', 'unpack', str(old_gem),
-                         '--target', str(old_dir_base)]
+                        ['gem', 'unpack', '--target', str(old_dir_base),
+                         '--', str(old_gem)]
                     )
                     if rc_up2 == 0:
                         ok = True
@@ -505,6 +520,8 @@ class Hooks(shared.EcosystemHooks):
             else:
                 failures.append('gem-fetch-old')
 
+        # Remove symlinks from whichever path populated old_dir_base.
+        shared.remove_symlinks(old_dir_base)
         (work / 'old-version-status.txt').write_text(
             f'OLD_VERSION_SOURCE: {source or "unavailable"}\n',
             encoding='utf-8'
@@ -597,7 +614,7 @@ class Hooks(shared.EcosystemHooks):
 
         p(f'=== Provenance: {pkgname} {version} ===')
         p('')
-        rc_gi, gi_out, _ = shared.run_cmd(['gem', 'info', pkgname, '-r'])
+        rc_gi, gi_out, _ = shared.run_cmd(['gem', 'info', '-r', '--', pkgname])
         p('GEM_INFO:')
         p(shared.sanitize(gi_out[:2000]) if rc_gi == 0 else '(unavailable)')
         p('')
@@ -839,8 +856,8 @@ class Hooks(shared.EcosystemHooks):
         Returns dict with keys: total (int), not_in_lockfile (list[str]).
         """
         rc_dep, dep_out, _ = shared.run_cmd(
-            ['gem', 'dependency', pkgname,
-             '-v', version, '--remote', '--pipe'],
+            ['gem', 'dependency', '-v', version, '--remote', '--pipe',
+             '--', pkgname],
             timeout=60,
         )
         (work / 'raw-transitive-deps.txt').write_text(

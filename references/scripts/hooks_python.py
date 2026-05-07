@@ -177,6 +177,8 @@ def _unpack_pkg(
             with zipfile.ZipFile(str(pkg_file), 'r') as zf:
                 # zipfile strips leading '/' and '..' itself, so no member filter needed.
                 zf.extractall(str(target_dir))
+            # zip extraction has no symlink filter; remove any that were created.
+            shared.remove_symlinks(target_dir)
             return 'wheel' if pkg_file.suffix == '.whl' else 'sdist-zip'
         if name.endswith(('.tar.gz', '.tgz', '.tar.bz2', '.tar.xz')):
             with tarfile.open(str(pkg_file), 'r:*') as tf:
@@ -191,6 +193,8 @@ def _unpack_pkg(
                             continue
                         members.append(m)
                 shared.tarfile_extractall_safe(tf, target_dir, members)
+            # tarfile_extractall_safe already filters symlinks; belt-and-suspenders.
+            shared.remove_symlinks(target_dir)
             return 'sdist'
     except Exception as exc:
         failures.append(f'{failure_key}: {exc}')
@@ -318,16 +322,17 @@ class Hooks(shared.EcosystemHooks):
         unpacked_dir = work / 'unpacked'
         unpacked_dir.mkdir(parents=True, exist_ok=True)
 
+        # Options before '--'; package spec after cannot be mistaken for a flag.
         dl_cmd = [
             'python3', '-m',
             'pip', 'download',
-            f'{pkgname}=={version}',
             '--no-deps',
             '--prefer-binary',
             '-d', str(work),
         ]
         if self.registry_url:
             dl_cmd += ['--index-url', self.registry_url]
+        dl_cmd += ['--', f'{pkgname}=={version}']
 
         rc, _out, err = shared.run_cmd(dl_cmd, cwd=work, timeout=180)
 
@@ -648,13 +653,13 @@ class Hooks(shared.EcosystemHooks):
             dl_cmd = [
                 'python3', '-m',
                 'pip', 'download',
-                f'{pkgname}=={old_ver}',
                 '--no-deps',
                 '--prefer-binary',
                 '-d', str(raw_old),
             ]
             if self.registry_url:
                 dl_cmd += ['--index-url', self.registry_url]
+            dl_cmd += ['--', f'{pkgname}=={old_ver}']
             rc_dl, _, _ = shared.run_cmd(dl_cmd, cwd=raw_old, timeout=180)
             if rc_dl == 0:
                 pkg_file = _get_pkg_file(raw_old, pkgname, old_ver)

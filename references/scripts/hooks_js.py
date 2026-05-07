@@ -122,6 +122,9 @@ def _unpack_tgz(
                     continue
                 members.append(m)
             shared.tarfile_extractall_safe(tf, target_dir, members)
+        # Belt-and-suspenders: tarfile_extractall_safe already filters
+        # symlinks at the member level; this catches any edge cases.
+        shared.remove_symlinks(target_dir)
         return True
     except Exception as exc:
         failures.append(f'{key}: {exc}')
@@ -230,12 +233,11 @@ class Hooks(shared.EcosystemHooks):
         unpacked_dir = work / 'unpacked'
         unpacked_dir.mkdir(parents=True, exist_ok=True)
 
-        pack_cmd = [
-            'npm', 'pack', f'{pkgname}@{version}',
-            '--pack-destination', str(work),
-        ]
+        # Options before '--'; package spec after cannot be mistaken for a flag.
+        pack_cmd = ['npm', 'pack', '--pack-destination', str(work)]
         if self.registry_url:
             pack_cmd += ['--registry', self.registry_url]
+        pack_cmd += ['--', f'{pkgname}@{version}']
 
         rc, _out, err = shared.run_cmd(pack_cmd, cwd=work, timeout=180)
         tgz_file: Path | None = None
@@ -497,12 +499,10 @@ class Hooks(shared.EcosystemHooks):
         raw_old = work / 'raw-old-pkg'
         raw_old.mkdir(exist_ok=True)
 
-        pack_cmd = [
-            'npm', 'pack', f'{pkgname}@{old_ver}',
-            '--pack-destination', str(raw_old),
-        ]
+        pack_cmd = ['npm', 'pack', '--pack-destination', str(raw_old)]
         if self.registry_url:
             pack_cmd += ['--registry', self.registry_url]
+        pack_cmd += ['--', f'{pkgname}@{old_ver}']
 
         rc, _, _ = shared.run_cmd(pack_cmd, cwd=raw_old, timeout=180)
         ok = False
