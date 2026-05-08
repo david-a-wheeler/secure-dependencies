@@ -46,6 +46,7 @@ if sys.version_info < (3, 10):
 
 import argparse
 import json
+import os
 import re
 import secrets
 import subprocess
@@ -861,6 +862,39 @@ def cmd_env_check(_args: argparse.Namespace) -> None:  # noqa: C901
         print('SUGGESTION: Ask the user if they would like to install the above tool(s)')
         print('  before proceeding. If yes, install and re-run env-check to confirm.')
         print('  If no, proceed; install-probe will use the available backend.')
+
+    # AI sandbox section
+    import shutil as _shutil_ai
+    print()
+    print('=== AI SANDBOX ===')
+    sandbox_ai_val = os.environ.get('SECURE_DEPS_SANDBOX_AI', '')
+    if sandbox_ai_val:
+        print(f'SECURE_DEPS_SANDBOX_AI: {sandbox_ai_val}')
+    else:
+        print('SECURE_DEPS_SANDBOX_AI: NOT SET')
+    claude_path = _shutil_ai.which('claude')
+    gh_path = _shutil_ai.which('gh')
+    print(f'claude CLI: {claude_path if claude_path else "NOT FOUND"}')
+    print(f'gh (Copilot CLI): {gh_path if gh_path else "NOT FOUND"}')
+
+    if not sandbox_ai_val and claude_path:
+        print()
+        print('SUGGESTION: export SECURE_DEPS_SANDBOX_AI=claude')
+        print('  (enables sandboxed AI review of diffs and filenames; strongly recommended')
+        print('  for --deeper and UPDATE mode analysis)')
+    elif sandbox_ai_val:
+        _ai_cli_map = {'claude': 'claude', 'copilot': 'gh'}
+        _expected_cli = _ai_cli_map.get(sandbox_ai_val.strip().lower())
+        if _expected_cli is None:
+            print()
+            print(f'WARNING: SECURE_DEPS_SANDBOX_AI={sandbox_ai_val!r} is not a recognised backend.')
+            print('  Known values: claude, copilot. Tier 3 AI review will be skipped.')
+        elif not _shutil_ai.which(_expected_cli):
+            print()
+            print(f'WARNING: SECURE_DEPS_SANDBOX_AI={sandbox_ai_val} but {_expected_cli} CLI not found in PATH.')
+            print('  Tier 3 AI review will be skipped.')
+
+    if suggestions:
         sys.exit(1)
     else:
         print()
@@ -1087,8 +1121,121 @@ def cmd_report(args: argparse.Namespace) -> None:
               'review analysis reports before proceeding.')
 
 
+def _next_report_path(dep_review_dir: Path, today: str) -> Path:
+    """Return the next available report-YYYY-MM-DD-SEQ.md path."""
+    existing = []
+    for f in dep_review_dir.glob(f'report-{today}-*.md'):
+        m = re.match(r'report-\d{4}-\d{2}-\d{2}-(\d+)\.md', f.name)
+        if m:
+            existing.append(int(m.group(1)))
+    seq = max(existing) + 1 if existing else 1
+    return dep_review_dir / f'report-{today}-{seq}.md'
+
+
+def _parse_assessment_fields(path: Path) -> dict:
+    """Extract structured fields from an AI-written assessment.txt.
+
+    Returns a dict with keys: name, version, mode, ecosystem, license_spdx,
+    license_osi, license_status, risk, recommendation, risk_increasing,
+    risk_decreasing, summary, work_dir. All values are strings; missing fields
+    fall back to 'unknown' or empty string.
+    """
+    result = {
+        'name': 'unknown', 'version': 'unknown', 'mode': 'unknown',
+        'ecosystem': 'unknown', 'license_spdx': 'unknown',
+        'license_osi': 'unknown', 'license_status': 'unknown',
+        'risk': 'unknown', 'recommendation': 'unknown',
+        'risk_increasing': '', 'risk_decreasing': '', 'summary': '',
+        'work_dir': '',
+    }
+    if not path.is_file():
+        return result
+
+    # Simple section-aware line-by-line parser.
+    # Top-level keys are lines like "KEY: value" with no leading whitespace.
+    # Indented lines (leading spaces) belong to the current section.
+    summary_lines: list[str] = []
+    in_summary = False
+    in_risk_factors = False
+    in_license = False
+    _risk_last = ''  # 'increasing' or 'decreasing': tracks last seen sub-key
+
+    try:
+        lines = path.read_text(encoding='utf-8', errors='replace').splitlines()
+    except OSError:
+        return result
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            if in_summary:
+                summary_lines.append('')
+            continue
+
+        is_indented = line.startswith(' ') or line.startswith('\t')
+
+        if not is_indented:
+            in_summary = False
+            in_risk_factors = False
+            in_license = False
+            if ':' in line:
+                key, _, val = line.partition(':')
+                key = key.strip()
+                val = val.strip()
+                if key == 'PACKAGE':
+                    result['name'] = val
+                elif key == 'VERSION':
+                    result['version'] = val
+                elif key == 'MODE':
+                    result['mode'] = val
+                elif key == 'ECOSYSTEM':
+                    result['ecosystem'] = val
+                elif key == 'RISK_ASSESSMENT':
+                    result['risk'] = val
+                elif key == 'SUMMARY_RECOMMENDATION':
+                    result['recommendation'] = val
+                elif key == 'WORK_DIR':
+                    result['work_dir'] = val
+                elif key == 'LICENSE':
+                    in_license = True
+                elif key == 'RISK_FACTORS':
+                    in_risk_factors = True
+                    _risk_last = ''
+                elif key == 'SUMMARY':
+                    in_summary = True
+                    if val:
+                        summary_lines.append(val)
+        else:
+            # Indented: belongs to current section
+            if in_license:
+                if stripped.startswith('spdx:'):
+                    result['license_spdx'] = stripped[len('spdx:'):].strip()
+                elif stripped.startswith('osi_approved:'):
+                    result['license_osi'] = stripped[len('osi_approved:'):].strip()
+                elif stripped.startswith('status:'):
+                    result['license_status'] = stripped[len('status:'):].strip()
+            elif in_risk_factors:
+                if stripped.startswith('increasing:'):
+                    result['risk_increasing'] = stripped[len('increasing:'):].strip()
+                    _risk_last = 'increasing'
+                elif stripped.startswith('decreasing:'):
+                    result['risk_decreasing'] = stripped[len('decreasing:'):].strip()
+                    _risk_last = 'decreasing'
+                elif _risk_last:
+                    # continuation of a multi-line risk factor list
+                    key_name = f'risk_{_risk_last}'
+                    result[key_name] = (result[key_name] + ' ' + stripped).strip()
+            elif in_summary:
+                summary_lines.append(stripped)
+
+    if summary_lines:
+        result['summary'] = ' '.join(s for s in summary_lines if s)
+
+    return result
+
+
 def cmd_wrap_up(args: argparse.Namespace) -> None:
-    """Generate (or append to) the session progress file."""
+    """Generate the session report file."""
     session_path = Path(args.session).resolve()
     session = load_session(session_path)
     root = Path(session['project_root'])
@@ -1096,51 +1243,145 @@ def cmd_wrap_up(args: argparse.Namespace) -> None:
     analyzed: dict = session.get('analyzed', {})
 
     today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
-    hour = datetime.now(timezone.utc).strftime('%H')
-    base_path = root / 'temp' / 'dep-review' / f'progress-{today}.md'
-    out_path = (root / 'temp' / 'dep-review' / f'progress-{today}T{hour}.md'
-                if base_path.is_file() else base_path)
+    dep_review_dir = root / 'temp' / 'dep-review'
+    dep_review_dir.mkdir(parents=True, exist_ok=True)
+    out_path = _next_report_path(dep_review_dir, today)
 
-    col_w = 24
-    lines: list[str] = [
-        f'# Dependency Session: {today}',
-        f'Ecosystem: {registry}',
-        f'Session: {session_path}',
-        '',
-        '## Vulnerability audit',
-        '(run `dep_session.py vuln-audit --root .` and paste summary here)',
-        '',
-        '## Packages analyzed',
-        '',
-        '| Package | Mode | From → To | SHA256 (first 12) | License | Status | Report |',
-        '|---------|------|-----------|-------------------|---------|--------|--------|',
-    ]
+    # Risk sort order: CRITICAL first, then HIGH, MEDIUM, LOW, unknown
+    _risk_order = {'CRITICAL': 0, 'HIGH': 1, 'MEDIUM': 2, 'LOW': 3}
 
+    # Collect per-package data
+    pkg_data: list[dict] = []
     for _key, v in analyzed.items():
         name = v['name']
         version = v['version']
         rec = v.get('recommendation', 'pending')
-        risk = v.get('risk', '')
+        risk = v.get('risk', 'unknown')
         work_dir = root / 'temp' / 'dep-review' / shared.safe_dir_component(name, version)
         af = _parse_signals(work_dir / 'signals.txt')
-        pkg_mode = af.get('mode', '?')
-        old_ver = af.get('old_version', '')
-        sha = af.get('sha256', '?').split()[0][:12]
-        lic_raw = af.get('license_line', '?')
-        spdx = lic_raw.split('|')[0].replace('SPDX:', '').strip() if '|' in lic_raw else lic_raw
-        ver_str = f'{old_ver} → {version}' if old_ver else version
-        status = f'{rec} / {risk}' if risk else rec
-        rep_rel = f'temp/dep-review/{shared.safe_dir_component(name, version)}/assessment.txt'
+        fields = _parse_assessment_fields(work_dir / 'assessment.txt')
+
+        old_ver = af.get('old_version', fields.get('version', ''))
+        pkg_mode = af.get('mode', fields.get('mode', 'unknown'))
+        lic_raw = af.get('license_line', '')
+        if '|' in lic_raw:
+            spdx = lic_raw.split('|')[0].replace('SPDX:', '').strip()
+            osi = 'approved' if 'YES' in lic_raw else 'not approved'
+            lic_status = ''
+            for part in lic_raw.split('|'):
+                if 'Status:' in part:
+                    lic_status = part.replace('Status:', '').strip()
+        else:
+            spdx = fields.get('license_spdx', 'unknown')
+            osi = fields.get('license_osi', 'unknown')
+            lic_status = fields.get('license_status', 'unknown')
+
+        lic_display = spdx
+        if osi and lic_status:
+            lic_display = f'{spdx} ({lic_status})'
+        elif osi:
+            lic_display = f'{spdx}'
+
+        # Version display using ->
+        if old_ver and old_ver != version:
+            ver_display = f'{old_ver} -> {version}'
+        else:
+            ver_display = version
+
+        # Assessment.txt relative path from temp/dep-review/
+        assessment_rel = f'{shared.safe_dir_component(name, version)}/assessment.txt'
+        # Also compute from work_dir field if available
+        wd = fields.get('work_dir', '')
+        if wd:
+            try:
+                wd_path = Path(wd)
+                dep_review_path = dep_review_dir.resolve()
+                if wd_path.is_absolute():
+                    assessment_rel = str(wd_path.relative_to(dep_review_path)) + '/assessment.txt'
+            except (ValueError, OSError):
+                pass
+
+        pkg_data.append({
+            'name': name,
+            'version': version,
+            'ver_display': ver_display,
+            'rec': rec,
+            'risk': risk,
+            'ecosystem': fields.get('ecosystem', registry),
+            'lic_display': lic_display,
+            'spdx': spdx,
+            'osi': osi,
+            'lic_status': lic_status,
+            'risk_increasing': fields.get('risk_increasing', ''),
+            'risk_decreasing': fields.get('risk_decreasing', ''),
+            'summary': fields.get('summary', ''),
+            'assessment_rel': assessment_rel,
+            'sort_key': _risk_order.get(risk.upper(), 4),
+        })
+
+    # Sort by risk (CRITICAL first)
+    pkg_data.sort(key=lambda x: x['sort_key'])
+
+    rel_session = f'temp/dep-review/session.json'
+
+    lines: list[str] = [
+        '# Dependency Security Report',
+        '',
+        f'**Date:** {today}',
+        f'**Mode:** {session.get("mode", "unknown").upper() if session.get("mode") else "unknown"}',
+        f'**Project root:** {root}',
+        f'**Packages reviewed:** {len(pkg_data)}',
+        f'**Session:** {rel_session}',
+        '',
+        '> This report is generated automatically by the secure-dependencies skill and supports',
+        '> due diligence review of dependency changes. It is not a substitute for human judgment.',
+        '> Review the linked per-package assessments before approving any installation.',
+        '',
+        '## Results Summary',
+        '',
+        '| Package | Version | Ecosystem | Risk | Recommendation | License |',
+        '|---|---|---|---|---|---|',
+    ]
+
+    for p in pkg_data:
         lines.append(
-            f'| {name} | {pkg_mode} | {ver_str} | {sha} | {spdx} | {status} | '
-            f'[report]({rep_rel}) |'
+            f'| {p["name"]} | {p["ver_display"]} | {p["ecosystem"]} '
+            f'| {p["risk"]} | {p["rec"]} | {p["lic_display"]} |'
         )
 
-    lines += ['', f'*Generated by `dep_session.py wrap-up` at {_now()}*']
+    lines += ['', '## Per-Package Findings', '']
 
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+    for p in pkg_data:
+        lines.append(f'### {p["name"]} {p["ver_display"]}')
+        lines.append('')
+        lines.append(f'**Risk:** {p["risk"]}')
+        lines.append(f'**Recommendation:** {p["rec"]}')
+        # License line
+        lic_detail = p["spdx"]
+        if p["osi"] and p["osi"] not in ('unknown',):
+            lic_detail += f', OSI {p["osi"]}'
+        if p["lic_status"] and p["lic_status"] not in ('unknown',):
+            lic_detail += f' ({p["lic_status"]})'
+        lines.append(f'**License:** {lic_detail}')
+        lines.append('')
+        lines.append('**Risk factors:**')
+        ri = p['risk_increasing'] or 'none'
+        rd = p['risk_decreasing'] or 'none'
+        lines.append(f'- Increasing: {ri}')
+        lines.append(f'- Decreasing: {rd}')
+        lines.append('')
+        if p['summary']:
+            lines.append(f'**Summary:** {p["summary"]}')
+            lines.append('')
+        lines.append(f'[Full assessment]({p["assessment_rel"]})')
+        lines.append('')
+        lines.append('---')
+        lines.append('')
+
+    lines += [f'*Generated by `dep_session.py wrap-up` at {_now()}*']
+
     out_path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
-    print(f'Progress file written: {out_path}')
+    print(f'Report written: {out_path}')
 
     gitignore = root / '.gitignore'
     if gitignore.is_file():
