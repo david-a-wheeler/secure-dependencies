@@ -885,7 +885,11 @@ def cmd_env_check(_args: argparse.Namespace) -> None:  # noqa: C901
     elif sandbox_ai_val:
         _ai_cli_map = {'claude': 'claude', 'copilot': 'gh'}
         _expected_cli = _ai_cli_map.get(sandbox_ai_val.strip().lower())
-        if _expected_cli and not _shutil_ai.which(_expected_cli):
+        if _expected_cli is None:
+            print()
+            print(f'WARNING: SECURE_DEPS_SANDBOX_AI={sandbox_ai_val!r} is not a recognised backend.')
+            print('  Known values: claude, copilot. Tier 3 AI review will be skipped.')
+        elif not _shutil_ai.which(_expected_cli):
             print()
             print(f'WARNING: SECURE_DEPS_SANDBOX_AI={sandbox_ai_val} but {_expected_cli} CLI not found in PATH.')
             print('  Tier 3 AI review will be skipped.')
@@ -1119,10 +1123,9 @@ def cmd_report(args: argparse.Namespace) -> None:
 
 def _next_report_path(dep_review_dir: Path, today: str) -> Path:
     """Return the next available report-YYYY-MM-DD-SEQ.md path."""
-    import re as _re
     existing = []
     for f in dep_review_dir.glob(f'report-{today}-*.md'):
-        m = _re.match(r'report-\d{4}-\d{2}-\d{2}-(\d+)\.md', f.name)
+        m = re.match(r'report-\d{4}-\d{2}-\d{2}-(\d+)\.md', f.name)
         if m:
             existing.append(int(m.group(1)))
     seq = max(existing) + 1 if existing else 1
@@ -1151,13 +1154,11 @@ def _parse_assessment_fields(path: Path) -> dict:
     # Simple section-aware line-by-line parser.
     # Top-level keys are lines like "KEY: value" with no leading whitespace.
     # Indented lines (leading spaces) belong to the current section.
-    section = ''
     summary_lines: list[str] = []
     in_summary = False
     in_risk_factors = False
     in_license = False
-    ri_lines: list[str] = []
-    rd_lines: list[str] = []
+    _risk_last = ''  # 'increasing' or 'decreasing': tracks last seen sub-key
 
     try:
         lines = path.read_text(encoding='utf-8', errors='replace').splitlines()
@@ -1197,13 +1198,11 @@ def _parse_assessment_fields(path: Path) -> dict:
                     result['work_dir'] = val
                 elif key == 'LICENSE':
                     in_license = True
-                    section = 'LICENSE'
                 elif key == 'RISK_FACTORS':
                     in_risk_factors = True
-                    section = 'RISK_FACTORS'
+                    _risk_last = ''
                 elif key == 'SUMMARY':
                     in_summary = True
-                    section = 'SUMMARY'
                     if val:
                         summary_lines.append(val)
         else:
@@ -1218,19 +1217,19 @@ def _parse_assessment_fields(path: Path) -> dict:
             elif in_risk_factors:
                 if stripped.startswith('increasing:'):
                     result['risk_increasing'] = stripped[len('increasing:'):].strip()
+                    _risk_last = 'increasing'
                 elif stripped.startswith('decreasing:'):
                     result['risk_decreasing'] = stripped[len('decreasing:'):].strip()
-                else:
-                    # continuation lines for multi-line risk factor lists
-                    if ri_lines or result['risk_increasing']:
-                        ri_lines.append(stripped)
+                    _risk_last = 'decreasing'
+                elif _risk_last:
+                    # continuation of a multi-line risk factor list
+                    key_name = f'risk_{_risk_last}'
+                    result[key_name] = (result[key_name] + ' ' + stripped).strip()
             elif in_summary:
                 summary_lines.append(stripped)
 
     if summary_lines:
         result['summary'] = ' '.join(s for s in summary_lines if s)
-    if ri_lines:
-        result['risk_increasing'] = (result['risk_increasing'] + ' ' + ' '.join(ri_lines)).strip()
 
     return result
 

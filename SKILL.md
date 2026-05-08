@@ -492,7 +492,7 @@ python3 PROJECT_ROOT/temp/dep-review/scripts/dep_review.py \
 ```
 
 (`--deeper` reuses the existing work dir; it does not re-download.)
-Then read: `sandbox-detection.txt`, `reproducible-build.txt`, `source-deep-diff.txt`.
+Then read: `sandbox-detection.txt`, `reproducible-build.txt`, `source-review.txt`.
 
 If Install probe mode is YES (or if `--deeper` results raise serious concerns),
 run the install probe:

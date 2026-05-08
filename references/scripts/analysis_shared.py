@@ -2837,7 +2837,7 @@ def _validate_ai_output(data: dict, schema: dict) -> bool:
             if val not in spec['values']:
                 return False
         elif t == 'str':
-            if not isinstance(val, str):
+            if not isinstance(val, str) or not val:
                 return False
         elif t == 'list_of_str':
             if not isinstance(val, list) or not all(isinstance(s, str) for s in val):
