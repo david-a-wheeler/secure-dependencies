@@ -295,22 +295,23 @@ requests it upfront.
 
 ## Session reports
 
-Each session produces a Markdown report at
-`dep_review/<ecosystem>/<package>/report-YYYY-MM-DD-SEQ.md`.
-The sequence number allows multiple reports per day
-(for example, when a basic analysis is followed by a deeper one).
-The report includes:
+At the end of a session, the tier 1 orchestrator calls `dep_session.py wrap-up`
+to generate a session-level Markdown report at
+`temp/dep-review/report-YYYY-MM-DD-SEQ.md`.
+This is a single report covering *all* packages analyzed in the session.
+The sequence number allows multiple wrap-ups per day
+(for example, when analysis is done in stages).
+The report includes, for each analyzed package:
 
-- The package name, ecosystem, and analysis mode
-- Risk level and key risk factors extracted from `assessment.txt`
-- A concern summary
-- The AI assessment narrative
-- Links to the detailed supporting files (`signals.txt`, `assessment.txt`,
+- The package name, version, and risk level
+- Key risk factors extracted from that package's `assessment.txt`
+- The concern summary
+- Links to the per-package supporting files (`signals.txt`, `assessment.txt`,
   `diff-semantic.txt`, `source-review.txt`, etc.)
 
-This report is the primary artifact for human review and record-keeping.
-The supporting files provide the raw evidence; the report provides the
-human-readable summary with pointers to them.
+The per-package detail files live under `temp/dep-review/<package-version>/`.
+The session report provides the human-readable cross-package summary with
+pointers into those detail files.
 
 ## Scripts
 
