@@ -1153,12 +1153,18 @@ class Hooks(shared.EcosystemHooks):
         parts = ruby_img_tag.split('.')
         ruby_img_tag = '.'.join(parts[:2]) if len(parts) >= 2 else parts[0]
 
+        # Shell injection defense: two separate paths, neither uses
+        # source_gemspec in a shell string.
+        #   bwrap/firejail: cmd= list is exec'd directly (no shell), so a
+        #     gemspec path like "$(evil).gemspec" is a literal filename
+        #     argument to gem build, not a shell command.
+        #   docker/podman: container_shell_cmd is a hardcoded string that
+        #     uses "*.gemspec" (a shell glob), independent of the discovered
+        #     filename entirely.
         build_result = shared.run_sandboxed(
             sandbox, clone_dir, built_gem_dir,
             '',  # shell_cmd unused for bwrap/firejail; cmd= used instead
             f'ruby:{ruby_img_tag}',
-            # Pass argv list so bwrap/firejail exec gem directly
-            # (no shell, no escaping needed).
             cmd=['gem', 'build', '{src}/' + str(source_gemspec),
                  '--output', '{out}/'],
             container_shell_cmd=(
