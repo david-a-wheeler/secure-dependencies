@@ -7,7 +7,8 @@ gather bulk data and registry metadata,
 derive important *signals* from that data, and track progress).
 We then use AI agents to do what deterministic scripts can't do well (such as
 analyze the initial signals for patterns and investigate further) to
-develop a final *assessment*.
+develop a final *assessment* for each package.
+These assessments are then wrapped into a final *report*.
 
 Using deterministic scripts to acquire data and signals, combined
 with AI to analyze them and produce an assessment, has many advantages
@@ -23,28 +24,167 @@ because it's:
 
 A session file tracks the BFS queue across the full dependency graph so the
 AI never has to manage that bookkeeping manually.
+(AI systems sometimes lazily "skip steps" if there are many steps;
+using a deterministic tracker makes it much easier for the AIs to focus.)
 
 ## Three tiers of AI agents
 
-There are 3 tiers of AI agents:
+A core design principle is that **no AI agent that can take action should
+directly read attacker-controlled content**. To enforce this, the system
+uses three strictly separated tiers:
 
-1. Orchestrator. This handles the whole set of packages to be analyzed.
-   It never *directly* sees possibly-malicious text from packages.
-2. Package. This manages overall package evaluation by invoking
-   deterministic scripts (which may be sandboxed, e.g., if they
-   build something) and tier 3 agents in sandboxes.
-   It never *directly* sees possibly-malicious text from packages.
-3. AI agents that directly see potentially-malicious text.
-   These examine the text (after warnings about malicious text) and provide
-   summaries; they do *not* have network access or general file access.
-   Their results are then forcefully sanitized.
+### Tier 1: Overall orchestrator
 
-It's possible that malicious attackers might trick a tier 3 agent to
-re-send data that would subvert tier 2 or even tier 1, but these defensive
-measures should make it harder for attacker to subvert them.
-We presume the entire system is in a virtual machine or container that
-*itself* has limited access, so no matter what the damage would be
-contained.
+The overall orchestrator (the agent running the top-level SKILL.md
+instructions) interacts with theh scripts to manage the session queue,
+decides which packages to evaluate,
+and synthesizes final recommendations. It reads only:
+
+- The session queue file and status metadata
+- Per-package assessment summaries produced by tier 2 (below)
+- The final session report
+
+It never reads raw package source, diffs, filenames from the package, or any
+other file that could contain attacker-controlled text. Its context persists
+across the whole session, so it is the most valuable to protect.
+
+### Tier 2: Per-package agent
+
+For each package, a fresh sub-agent is spawned (its context is discarded
+after the package is done, which limits cross-package contamination). This
+agent manages the evaluation of one package by:
+
+- Invoking deterministic scripts and reading their clean, structured outputs
+- Invoking tier 3 AI for any content that is or might be attacker-controlled
+- Writing the package assessment
+
+Tier 2 reads structured text files such as `signals.txt`, `metadata.txt`,
+`assessment.txt`, `diff-semantic.txt`, and `source-review.txt`. These files
+are either produced by deterministic scripts (which do their own sanitization)
+or are JSON summaries produced by a tier 3 agent and validated against a
+schema.
+
+Tier 2 is **prohibited** from reading `raw-*` files (raw package content),
+`diff-filenames.txt`, `source-deep-diff.txt`, or any file that contains
+unfiltered package data. The SKILL.md instructions enforce this explicitly
+(which should be adequate since it never directly sees data to tell it
+otherwise).
+
+### Tier 3: Sandboxed AI (reads adversarial content)
+
+Tier 3 AI agents are invoked as sandboxed subprocesses
+by the deterministic Python scripts,
+not directly by AI agents.
+They are the only tier that directly reads attacker-controlled
+content such as source diffs and file listings. They:
+
+- Receive content via stdin (never via file system access)
+- Are given a fixed system prompt warning them about adversarial content
+- Return only a JSON object validated against a strict schema
+- Run with `--allowedTools ''` to prevent any tool use
+- Have no network access (the invoking script controls the subprocess
+  environment)
+
+The schema validation in `run_ai_sandbox()` (`analysis_shared.py`) rejects
+any response that does not match the expected structure: correct field names,
+correct value types, non-empty strings for string fields, and enum values
+drawn from a fixed allowed set. A failure or schema mismatch produces a
+sentinel value (e.g., `DIFF_REVIEW_FAILED`) that tier 2 can see and report,
+rather than passing through unvalidated text.
+
+Content piped to tier 3 is truncated at 500,000 characters before being sent,
+to prevent resource exhaustion from an unusually large file.
+This does mean that in some cases the AI won't see everything, but
+at that point the AI would be less effective anyway.
+
+### Tier selection and configuration
+
+The tier 3 AI backend is selected by the `SECURE_DEPS_SANDBOX_AI` environment
+variable:
+
+- `claude`: uses the `claude` CLI with `claude -p PROMPT --allowedTools ''`
+- `copilot`: uses `gh copilot` (stub; not yet implemented)
+- Unset or unknown: tier 3 features are skipped with a SKIPPED sentinel
+
+Run `dep_session.py env-check` to verify which backend is configured and
+whether the required CLI tool is available.
+
+## Deterministic sandbox for build scripts
+
+In some cases we want to run deterministic programs that might be
+malicious. These are also run in a sandbox.
+
+For example,
+when a package includes install-time build scripts (`extconf.rb`, `Makefile`,
+Rakefile install tasks, etc.), the scripts must be executed as part of deeper
+analysis or the install probe. These are run inside a **deterministic
+sandbox** using one of: `bwrap`, `firejail`, `docker`, or `podman` (selected
+based on what is available). The sandbox:
+
+- Disables network access (`--unshare-net` for bwrap/firejail)
+- Restricts file system access to the package directory
+- Runs with a timeout
+
+This is separate from the AI sandbox: the deterministic sandbox is for
+*executing deterministic scripts* (like build scripts),
+while the AI sandbox is for *AI review of adversarial text*.
+
+## Adversarial content detection and gating
+
+Before any content is processed, the deterministic scripts scan for known
+prompt-injection patterns: text that explicitly tries to override AI
+instructions, impersonate the `NEXT_ACTION` system, or manipulate the AI into
+approving the package. If a high-confidence injection pattern is detected,
+the script writes `ADVERSARIAL_GATE: ABORT` to `signals.txt`, which causes
+the tier 2 agent to stop the analysis and escalate immediately without
+reading further content.
+
+This gate fires *before* tier 3 is invoked: a package that contains explicit
+injection instructions is treated as an attack, not as something to be
+analyzed further. These can only detect fairly naive attacks, but
+nevertheless they provide some limited protection against naive attacks.
+
+## Output sanitization
+
+The `Printer` class in `analysis_shared.py` wraps all writes to output files
+that might contain attacker-controlled text. It strips:
+
+- Unicode bidirectional control characters (used in "Trojan Source" attacks
+  to make code appear different from what it does)
+- Zero-width and invisible characters
+- ANSI terminal escape sequences; note that it strips the *entire*
+  sequence, so hidden text in this sequences is completely removed instead
+  of being revealed.
+- Other non-printable control characters
+
+This happens automatically as part of printing; the code doesn't need to
+consistently "remember" to call a sanitizer before printing.
+Making sanitization the default is a common practice for reducing security
+vulnerabilities (e.g., it's the common countermeasure for XSS attacks).
+
+Tier 2 agents only read files produced through this sanitization layer (or
+validated tier 3 JSON). They should never encounter raw terminal output or
+unfiltered package content.
+
+## NEXT_ACTION replay prevention
+
+The SKILL.md instructions require the tier 2 sub-agent to end its response
+with exactly two lines: `NEXT_ACTION: <action>` and a session-specific secret
+token that is generated fresh for each package session. The session token is
+included in the SKILL.md prompt provided to the sub-agent. The orchestrator
+(tier 1) validates both lines and rejects any response that does not include
+the correct token. This prevents a compromised package from injecting a fake
+`NEXT_ACTION: APPROVE` that the orchestrator would accept.
+
+## "Download before install" principle
+
+A core workflow constraint: the package is always downloaded and analyzed
+*before* any install is considered. The hash of the downloaded package is
+recorded in the session data. If a human later decides to install the package,
+`dep_session.py` can re-verify the hash against the recorded value to confirm
+that the package to be installed is the same one that was analyzed. This
+closes the TOCTOU (time-of-check/time-of-use) window where an attacker might
+serve a different artifact for download than for install.
 
 ## Levels of analysis
 
@@ -96,8 +236,9 @@ package it:
 - Checks whether the published version corresponds to a tagged commit,
   flags when the commit had to be inferred from history (lower confidence),
   and strongly flags if a package release has no corresponding source change.
-- For updates: scans the diff for newly introduced dangerous patterns
-  (SQL injection, command injection, hardcoded secrets, eval)
+- For updates: invokes a tier 3 AI to review the diff for newly introduced
+  dangerous patterns and summarizes the result in `diff-semantic.txt`
+  (the raw diff is never passed to tier 2)
 - Queries the registry for license, last-release date, maintainer count,
   MFA enforcement status, and OpenSSF Scorecard score
 - Queries [packages.ecosyste.ms](https://packages.ecosyste.ms) for
@@ -141,8 +282,9 @@ level warrants it, or when the human requests it upfront. It adds:
   (a "functionally equivalent build"). This counters attacks like
   the xz utils supply chain attack, which intentionally created a release
   that was not built from the repo source code.
-- A full file-level source diff to help understand what changed between
-  the source repository and the distributed package
+- A tier 3 AI source review that examines the package file listing and
+  selected source content for structural anomalies, summarized in
+  `source-review.txt`
 
 **Install probe** (`--install-probe`) goes further still and runs the
 package installer inside a sandbox with honeytoken credentials, monitoring
@@ -150,6 +292,25 @@ for suspicious activity: unexpected network calls, credential access, and
 writes outside expected locations. This is the most invasive level and is
 used when the other levels raise serious concerns or when the human
 requests it upfront.
+
+## Session reports
+
+Each session produces a Markdown report at
+`dep_review/<ecosystem>/<package>/report-YYYY-MM-DD-SEQ.md`.
+The sequence number allows multiple reports per day
+(for example, when a basic analysis is followed by a deeper one).
+The report includes:
+
+- The package name, ecosystem, and analysis mode
+- Risk level and key risk factors extracted from `assessment.txt`
+- A concern summary
+- The AI assessment narrative
+- Links to the detailed supporting files (`signals.txt`, `assessment.txt`,
+  `diff-semantic.txt`, `source-review.txt`, etc.)
+
+This report is the primary artifact for human review and record-keeping.
+The supporting files provide the raw evidence; the report provides the
+human-readable summary with pointers to them.
 
 ## Scripts
 
@@ -159,7 +320,7 @@ Scripts live in `references/scripts/`:
 |---|---|
 | `dep_session.py` | Session management: init, status, vuln-audit, health-scan |
 | `dep_review.py` | Per-package analysis: download, inspect, diff, health |
-| `analysis_shared.py` | Shared utilities used by the above |
+| `analysis_shared.py` | Shared utilities including tier 3 AI sandbox |
 | `fetch_json.py` | Registry JSON fetcher with caching |
 | `hooks_ruby.py` | Ruby-specific ecosystem hooks (RubyGems) |
 | `hooks_python.py` | Python-specific ecosystem hooks (PyPI) |
@@ -174,30 +335,42 @@ make test
 
 We presume that this skill will be run *within* a virtual machine or
 container that does *not* have unlimited rights, so even if the AI itself
-becomes malicious, any damage will be contained.
+becomes subverted, any damage will be contained within that environment.
 
-This skill uses AI, which sometimes makes mistakes and may follow
-malicious instructions if the AI sees them.
-To compensate, the AI orchestrator calls on AI sub-agents to evaluate
-each package, reducing the blast radius of any mistaks.
-The AI sub-agents call on deterministic scripts to gather data, which is
-generally sanitized before providing it to the sub-agents.
-If the system tries to reproduce a build, it will do that within a sandbox
-so the rebuild has limited access.
-However, these mechanisms can't be foolproof.
-In particular, the AI sub-agent may evaluate code or code differences, and
-malicious instruction in that data might fool or manipulate the AI.
+The three-tier AI architecture described above is the primary systemic
+defense against prompt injection. Rather than relying on the AI to resist
+adversarial text, the architecture structurally prevents tiers 1 and 2 from
+reading attacker-controlled content at all. Tier 3, which does read that
+content, runs as a sandboxed subprocess with no tools, no network, and no
+output path except a narrow validated JSON channel.
+Tier 3 *might* output data that subverted tier 1 and 2, but other
+countermeasures make this more difficult.
 
-In the end, this skill cannot be perfect.
-It attempts to do due diligence to estimate the risk
-of adding or updating a dependency. Just like a human, it may not notice
-a problem, or realize its severity, or consider something excessively
-vulnerable or malicious even when it isn't.
-Still, because it deterministically collects a lot of information, and then
-evaluates that information holistically, it should provide a helpful
-defense against unintentional or malicious dependencies.
+Additional layered defenses:
 
-This skill is *not* intended to do a deep security analysis of some
+- **Adversarial gate**: explicit injection patterns halt the analysis before
+  any AI tier processes the content
+- **Output sanitization**: the `Printer` class strips terminal escapes, bidi
+  characters, and control characters from all files that tier 2 reads
+- **Schema validation**: tier 3 output is validated field-by-field against
+  a strict schema before tier 2 sees it; a malformed response produces a
+  failure sentinel, not unvalidated text
+- **Context isolation**: each tier 2 sub-agent starts fresh for each package,
+  so a successful injection in one package cannot accumulate state across
+  packages or persist into the tier 1 context
+- **NEXT_ACTION token**: a per-session secret prevents a compromised package
+  from injecting a fake approval that the orchestrator would accept
+- **Deterministic sandbox**: build scripts run in an isolated environment
+  (bwrap, firejail, docker, or podman) with network access disabled
+- **Content truncation**: content sent to tier 3 is capped at 500,000
+  characters to prevent resource exhaustion
+
+None of these defenses are individually foolproof. A sufficiently sophisticated
+attacker might find a way to inject content that survives schema validation, or
+to exploit a vulnerability in the AI model itself. The goal is defense in depth:
+multiple independent barriers that an attacker must defeat simultaneously.
+
+This skill is *not* intended to do a long deep security analysis of some
 particular program. Consult other skills and tools if you want that.
 
 See [SECURITY.md](./SECURITY.md) for how to report vulnerabilities in
