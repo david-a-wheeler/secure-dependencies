@@ -12,6 +12,8 @@ This skill is not tied to any specific AI assistant
 It takes various steps to protect itself from malicious packages
 (though we presume it will be run in a sandboxed environment).
 
+## Ecosystems supported
+
 This skill can support *any* ecosystem.
 That's because if the human permits it, the AI agent using this skill can
 generate support for whatever ecosystem you need.
@@ -63,7 +65,9 @@ Add `temp/` to your `.gitignore`.
 ## How it works
 
 See [ARCHITECTURE.md](./ARCHITECTURE.md) for information on
-how this works.
+how this skill works. It uses deterministic scripts to gather data
+where possible, and uses AI to analyze their results or do tasks that
+only AI can do. Sandboxes reduce risk during execution.
 
 ## Levels of analysis
 
@@ -186,8 +190,8 @@ Most of the code is currently vibe-coded. That's not as bad as you might
 think in this case, because most of the code involves "download data from X"
 or "do trivial analysis of downloaded data and provide the various summaries
 to an AI sub-agent". There's also not a lot of code in the first place.
-The point of the deterministic code is to provide
-a rich source of data for the AI sub-agent to review
+The point of nearly all of the deterministic code is to provide
+a rich source of data for an AI sub-agent to review
 and heuristically summarize. So for a vibe-coding task this is a
 relatively easy task. That doesn't mean we can just trust the vibe-coded
 code; that's something that needs to be reviewed.
