@@ -27,6 +27,16 @@ AI never has to manage that bookkeeping manually.
 (AI systems sometimes lazily "skip steps" if there are many steps;
 using a deterministic tracker makes it much easier for the AIs to focus.)
 
+## Examine before installing
+
+This skill **downloads and inspects before installing**.
+Downloading and unpacking a package does not execute its code; installing does.
+This skill keeps those steps strictly separate and never runs untrusted code
+to examine untrusted code. If it decides to analyze more deeply, or do
+a test installation, it uses sandboxes to reduce risk.
+We can't *guarantee* that a malicious package won't slip through, but we
+take steps to reduce the risk.
+
 ## Three tiers of AI agents
 
 A core design principle is that **no AI agent that can take action should

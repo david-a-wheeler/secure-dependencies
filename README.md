@@ -3,10 +3,14 @@
 This is a general-purpose AI skill for evaluating software dependency security,
 building on guidance such as the
 [OpenSSF Concise Guide for Evaluating Open Source Software](https://best.openssf.org/Concise-Guide-for-Evaluating-Open-Source-Software.html).
-Its purpose is to provide some reasonable level of due diligence when
+Its purpose is to provide support a reasonable level of due diligence
+analysis when
 adding dependencies, updating dependencies, or examining current dependencies.
+It determines what will be done and estimates its security risk.
 This skill is not tied to any specific AI assistant
 (such as Claude Code, GitHub Copilot, etc.).
+It takes various steps to protect itself from malicious packages
+(though we presume it will be run in a sandboxed environment).
 
 This skill can support *any* ecosystem.
 That's because if the human permits it, the AI agent using this skill can
@@ -16,14 +20,6 @@ and hook in the many data sources that are ecosystem-independent.
 That said, you'll need to give the AI agent some time to generate support
 for an ecosystem we don't directly support yet.
 Currently this skill includes direct support for Ruby, Python, and JavaScript.
-
-Its core principle is **download and inspect before you install**.
-Downloading and unpacking a package does not execute its code; installing does.
-This skill keeps those steps strictly separate and never runs untrusted code
-to examine untrusted code. If it decides to analyze more deeply, or do
-a test installation, it uses sandboxes to reduce risk.
-We can't *guarantee* that a malicious package won't slip through, but we
-take steps to reduce the risk.
 
 ## What it does
 
