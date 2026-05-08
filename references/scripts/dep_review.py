@@ -101,6 +101,50 @@ def run_diff_scans(hooks, work: Path, diff_lines: int) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Tier 3 AI output writers
+# ---------------------------------------------------------------------------
+
+def _write_diff_semantic(p: 'Printer', result: dict) -> None:
+    """Write diff-semantic.txt content from a run_ai_sandbox result dict."""
+    assessment = result.get('assessment', 'AI_REVIEW_FAILED')
+    if assessment in ('AI_REVIEW_SKIPPED', 'AI_REVIEW_FAILED'):
+        p(f'AI_REVIEW: {assessment}')
+        p(f'SUMMARY: {result.get("summary", "")}')
+        return
+    p('AI_REVIEW: COMPLETE')
+    p(f'ASSESSMENT: {assessment}')
+    p(f'CONFIDENCE: {result.get("confidence", "LOW")}')
+    patterns = result.get('suspicious_patterns', [])
+    p(f'SUSPICIOUS_PATTERNS: {", ".join(patterns) if patterns else "none"}')
+    p(f'FILENAME_INJECTION_ATTEMPTS: {result.get("injection_attempts_in_filenames", 0)}')
+    changed = result.get('changed_files', [])
+    if not changed:
+        p('CHANGED_FILES: (none)')
+    elif len(changed) > 50:
+        p('CHANGED_FILES: (list truncated; more than 50 files changed)')
+    else:
+        p(f'CHANGED_FILES: {", ".join(changed)}')
+    p(f'SUMMARY: {result.get("summary", "")}')
+
+
+def _write_source_review(p: 'Printer', result: dict) -> None:
+    """Write source-review.txt content from a run_ai_sandbox result dict."""
+    assessment = result.get('assessment', 'AI_REVIEW_FAILED')
+    if assessment in ('AI_REVIEW_SKIPPED', 'AI_REVIEW_FAILED'):
+        p(f'AI_REVIEW: {assessment}')
+        p(f'SUMMARY: {result.get("summary", "")}')
+        return
+    p('AI_REVIEW: COMPLETE')
+    p(f'ASSESSMENT: {assessment}')
+    p(f'FILENAME_INJECTION_ATTEMPTS: {result.get("injection_attempts_in_filenames", 0)}')
+    pkg_only = result.get('files_only_in_package', [])
+    p(f'FILES_ONLY_IN_PACKAGE: {", ".join(pkg_only) if pkg_only else "none"}')
+    suspicious = result.get('suspicious_files', [])
+    p(f'SUSPICIOUS_FILES: {", ".join(suspicious) if suspicious else "none"}')
+    p(f'SUMMARY: {result.get("summary", "")}')
+
+
+# ---------------------------------------------------------------------------
 # Old dep lines extraction
 # ---------------------------------------------------------------------------
 
@@ -158,6 +202,8 @@ def write_signals(  # noqa: C901
     source_lines: int = 0,
     ecosystems_data: dict | None = None,
     oss_rebuild_result: dict | None = None,
+    diff_semantic_result: dict | None = None,
+    source_review_result: dict | None = None,
 ) -> None:
     """Write the rich self-describing signals.txt report."""
     timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
@@ -401,6 +447,19 @@ def write_signals(  # noqa: C901
             'review oss-rebuild.txt for details]',
         ))
 
+    _ds_assessment = (diff_semantic_result or {}).get('assessment', 'NOT_RUN')
+    if _ds_assessment in ('SUSPICIOUS', 'CRITICAL'):
+        _concerns.append((
+            'diff_semantic',
+            f'{_ds_assessment}  [tier 3 AI diff review flagged concerns; read diff-semantic.txt]',
+        ))
+    _sr_assessment = (source_review_result or {}).get('assessment', 'NOT_RUN')
+    if _sr_assessment in ('SUSPICIOUS', 'CRITICAL'):
+        _concerns.append((
+            'source_review',
+            f'{_sr_assessment}  [tier 3 AI source review flagged concerns; read source-review.txt]',
+        ))
+
     _concern_count = len(_concerns)
     if _concern_count == 0:
         _concern_level = 'NONE'
@@ -435,6 +494,12 @@ def write_signals(  # noqa: C901
         p('  (none)')
     p(f'CONCERN_COUNT: {_concern_count}')
     p(f'CONCERN_LEVEL: {_concern_level}  (LOW=1, MEDIUM=2-3, HIGH=4+)')
+
+    # Tier 3 AI review results
+    ds_assessment = (diff_semantic_result or {}).get('assessment', 'NOT_RUN')
+    sr_assessment = (source_review_result or {}).get('assessment', 'NOT_RUN')
+    p(f'DIFF_SEMANTIC_ASSESSMENT: {ds_assessment}')
+    p(f'SOURCE_REVIEW_ASSESSMENT: {sr_assessment}')
 
     # ---- LICENSE ----
     p(sec('LICENSE'))
@@ -1462,6 +1527,25 @@ def run_analysis(  # noqa: C901
         (work / 'raw-diff-full.txt').write_text('', encoding='utf-8')
         print('--- Old version / diff / diff scans: Skipped (NEW/CURRENT mode) ---')
 
+    # Tier 3: diff semantic review
+    diff_semantic_result = shared.DIFF_REVIEW_SKIPPED
+    if diff_lines > 0 and shared.sandbox_ai_available():
+        print()
+        print('--- Tier 3: diff semantic review ---')
+        _raw_diff_path = work / 'raw-diff-full.txt'
+        if _raw_diff_path.is_file():
+            _raw_diff = _raw_diff_path.read_text(encoding='utf-8', errors='replace')
+            diff_semantic_result = shared.run_ai_sandbox(
+                _raw_diff,
+                shared.DIFF_REVIEW_PROMPT,
+                shared.DIFF_REVIEW_SCHEMA,
+                shared.DIFF_REVIEW_FAILED,
+                shared.DIFF_REVIEW_SKIPPED,
+            )
+            print(f'  assessment: {diff_semantic_result.get("assessment", "?")}')
+    with shared.Printer(work / 'diff-semantic.txt') as _p_ds:
+        _write_diff_semantic(_p_ds, diff_semantic_result)
+
     # 9. Registry data
     print()
     print('--- Registry / provenance data ---')
@@ -1645,6 +1729,25 @@ def run_analysis(  # noqa: C901
             'old_ok': old_result.get('ok', False),
         }
 
+    # Tier 3: source review (deeper mode only)
+    source_review_result = shared.SOURCE_REVIEW_SKIPPED
+    if deeper and shared.sandbox_ai_available():
+        print()
+        print('--- Tier 3: source review ---')
+        _sdd_path = work / 'source-deep-diff.txt'
+        if _sdd_path.is_file():
+            _sdd = _sdd_path.read_text(encoding='utf-8', errors='replace')
+            source_review_result = shared.run_ai_sandbox(
+                _sdd,
+                shared.SOURCE_REVIEW_PROMPT,
+                shared.SOURCE_REVIEW_SCHEMA,
+                shared.SOURCE_REVIEW_FAILED,
+                shared.SOURCE_REVIEW_SKIPPED,
+            )
+            print(f'  assessment: {source_review_result.get("assessment", "?")}')
+    with shared.Printer(work / 'source-review.txt') as _p_sr:
+        _write_source_review(_p_sr, source_review_result)
+
     # Install-probe: sandboxed behavioral analysis with honeytokens
     if install_probe:
         print()
@@ -1691,6 +1794,8 @@ def run_analysis(  # noqa: C901
             source_lines=source_lines,
             ecosystems_data=ecosystems_data,
             oss_rebuild_result=oss_rebuild_result,
+            diff_semantic_result=diff_semantic_result,
+            source_review_result=source_review_result,
         )
 
     # Final summary
