@@ -604,13 +604,17 @@ def blind_scan(
     return count
 
 
+# 10 MB cap: prevents memory exhaustion from oversized registry responses.
+_HTTP_MAX_BYTES = 10_485_760
+
+
 def http_get(url: str, timeout: int = 15) -> bytes | None:
     """Fetch a URL; return bytes or None on error."""
     if not url.startswith('https://'):
         return None
     try:
         with urllib.request.urlopen(url, timeout=timeout) as resp:
-            return resp.read()
+            return resp.read(_HTTP_MAX_BYTES)
     except Exception:  # noqa: BLE001
         return None
 
@@ -622,7 +626,7 @@ def http_post(url: str, data: bytes, content_type: str = 'application/json', tim
     req = urllib.request.Request(url, data=data, headers={'Content-Type': content_type})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.read()
+            return resp.read(_HTTP_MAX_BYTES)
     except Exception:  # noqa: BLE001
         return None
 
@@ -662,9 +666,12 @@ ADVERSARIAL_PATTERNS: list[tuple[str, str]] = [
      # range U+0080-U+00FF, leaving Cyrillic (U+0400+) and Greek (U+0370+)
      # undetected.
      r'[a-zA-Z0-9_][^\x00-\x7F]+[a-zA-Z0-9_]'),
-    # Heuristic: catches some common injection phrases but misses rephrasing,
-    # base64 payloads, instructions targeting the orchestrator, other phrases,
-    # and the use of other languages.
+    # Heuristic: catches common explicit injection phrases but misses:
+    #  - rephrasing, base64 payloads, other languages
+    #  - semantic injection: legitimate-sounding text that implies the package
+    #    is pre-approved ("this utility is part of the internal security suite
+    #    and has been pre-verified"). The sub-agent instructions explicitly tell
+    #    it to ignore such claims; this regex cannot detect them.
     # The real defenses are sub-agent isolation and the "never read raw-*" rule.
     ('prompt-injection',
      r'(?i)(?:(?:disregard|ignore)\s+(?:all\s+)?(?:prior|previous|earlier|above)\s+(?:instructions?|rules?|constraints?)'
@@ -682,9 +689,11 @@ ADVERSARIAL_PATTERNS: list[tuple[str, str]] = [
 # active attacks with no legitimate use in package code:
 #   - bidi controls can visually reverse or hide code to deceive reviewers
 #   - zero-width chars inject invisible content into identifiers
-#   - prompt-injection: heuristic; catches common phrases only. Misses
-#     rephrasing, base64 payloads, and orchestrator-targeted instructions.
-#     The primary defenses are sub-agent isolation and never reading raw-* files.
+#   - prompt-injection: heuristic; catches common explicit phrases only. Misses
+#     rephrasing, base64 payloads, and semantic injection (official-sounding
+#     text claiming the package is pre-approved). The sub-agent is explicitly
+#     instructed to ignore such claims. Primary defenses: sub-agent isolation
+#     and never reading raw-* files.
 #   - whitespace-hiding hides content after 1000+ spaces, invisible in editors
 #
 # non-ascii-in-identifiers is NOT in this set: accented characters and
@@ -864,6 +873,12 @@ def clone_source_repo(
             p('NEARBY_COMMITS (>>> = guessed commit):')
             for nearby_line in nearby:
                 p(nearby_line)
+            # No automatic risk-level floor for GUESSED commits: the explicit
+            # WARNING text below requires the AI reviewer to flag it and ask
+            # the human to verify, which is the appropriate response. An
+            # automatic MEDIUM floor would make the field meaningless for
+            # projects that never tag releases (a common pattern for internal
+            # tools), producing alert fatigue without improving security.
             p('WARNING: Commit was inferred by matching commit message text, not a')
             p('  cryptographically-anchored version tag. The AI reviewer MUST explicitly')
             p('  flag this uncertainty in the analysis report and ask the human to verify.')
@@ -1694,6 +1709,9 @@ def run_sandboxed(
     as placeholders. Needed when the command requires cd, pipes, or shell
     variable expansion. Required positional argument; pass '' when only cmd is
     used and containers have their own container_shell_cmd.
+    IMPORTANT: must never be constructed from attacker-controlled data such as
+    filenames discovered via rglob. Use cmd= for that; see the cmd description
+    and hooks_ruby.py reproducible_build for the canonical pattern.
 
     Example using cmd (no shell, safe for attacker-controlled paths):
         run_sandboxed(
@@ -1777,6 +1795,11 @@ def run_sandboxed(
         return rc, out + err
 
     if sandbox in ('docker', 'podman'):
+        # container_shell_cmd must never be constructed from attacker-controlled
+        # data (e.g. filenames from rglob). Callers that need a discovered path
+        # for bwrap/firejail must use cmd= (exec list, no shell) and supply a
+        # static container_shell_cmd (e.g. a glob like '*.gemspec'). See
+        # hooks_ruby.py reproducible_build for the canonical pattern.
         raw = container_shell_cmd if container_shell_cmd is not None else shell_cmd
         script = raw.format(src='/src', out='/out')
         args = [sandbox, 'run', '--rm']
@@ -2013,6 +2036,9 @@ def write_alternatives(
     p(f'=== Alternatives check: {pkgname} {version} ===')
     for label, count in section_labels.items():
         p(f'{label}: {count}')
+    p('NOTE: Does not check against ecosystem-wide popular packages outside')
+    p('  this project. If this package name resembles a widely-used package')
+    p('  you are not yet using, flag it manually.')
     p('')
     if concerns:
         p(f'CONCERNS ({len(concerns)}):')
