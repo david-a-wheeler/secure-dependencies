@@ -608,10 +608,15 @@ def count_source_lines(unpacked_dir: Path) -> int:
 #    by a file entry A/shadow.  If a system tool writes the symlink and then
 #    follows it while writing the subsequent entry, it can overwrite files
 #    outside the target directory before any post-extraction cleanup runs.
-#    By iterating members ourselves we can skip symlinks entirely: the symlink
-#    is never written, so there is no window.  The filter='data' mode added
-#    to Python's tarfile in 3.12 achieves the same for tar, but requires
-#    Python 3.12+; our streaming approach works on Python 3.10+.
+#    We close this window with a two-pass approach: the first pass extracts
+#    regular files and validates symlinks but does not create them; the second
+#    pass creates only symlinks whose targets resolve within the extraction
+#    directory.  Because no symlinks exist on disk during the first pass,
+#    resolve() cannot follow any archive-supplied symlink, so validation is
+#    conservative and correct.  Symlinks with absolute targets or targets that
+#    escape via '..' raise ArchiveSecurityError.  The filter='data' mode added
+#    to Python's tarfile in 3.12 similarly closes the race window for tar, but
+#    provides no byte-count enforcement; our approach works on Python 3.10+.
 #
 # 3. Consistent, inspectable policy: embedding the limits and filtering logic
 #    here makes the policy auditable in one place.  Equivalent protections
@@ -654,20 +659,61 @@ def _is_safe_extract_path(base_dir: Path, member_path: str) -> bool:
         return False
 
 
+def _is_safe_symlink_target(base_dir: Path, symlink_path: str, link_target: str) -> bool:
+    """Return True if link_target resolves within base_dir when placed at symlink_path.
+
+    Absolute targets are always rejected: they point to a fixed filesystem
+    path regardless of where the archive is extracted.
+
+    Relative targets are resolved from the symlink's own parent directory,
+    mirroring the OS behaviour when the symlink is later followed: a symlink
+    at 'lib/foo.so' pointing to 'foo.so.1' resolves to 'lib/foo.so.1', not
+    to 'base_dir/foo.so.1'.
+
+    IMPORTANT: This function only validates the *target*; callers must
+    separately validate the *symlink path itself* using _is_safe_extract_path.
+    A path like '../outside/link' with a target that resolves back inside
+    base_dir would pass this check while placing the symlink outside base_dir.
+
+    IMPORTANT: Call this only during the first extraction pass, before any
+    archive symlinks have been written to disk.  resolve() follows real
+    filesystem symlinks; if archive-supplied symlinks existed at call time
+    they could redirect the resolved path and defeat this check.
+    """
+    if os.path.isabs(link_target):
+        return False
+    try:
+        symlink_parent = (base_dir / symlink_path).parent
+        resolved = (symlink_parent / link_target).resolve()
+        base = base_dir.resolve()
+        return str(resolved) == str(base) or str(resolved).startswith(str(base) + os.sep)
+    except Exception:
+        return False
+
+
 def extract_zip_securely(zip_path: Path, target_dir: Path) -> None:
     """Extract a ZIP archive enforcing size, count, path, and symlink limits.
 
     Mitigates CWE-409 (decompression bombs) by streaming each entry and
     counting bytes as they are written.  Mitigates CWE-22 (path traversal)
-    by validating every entry path.  Skips symlink entries entirely (no
-    post-extraction cleanup race window).
+    by validating every entry path and every symlink target.
+
+    Symlinks whose targets resolve within target_dir are collected and
+    created in a second pass, after all regular files are written.  This
+    closes the TOCTOU race window: no entry written during the first pass
+    can follow a symlink, because no symlinks exist yet.  Symlinks whose
+    targets point outside target_dir (absolute paths, '../' escapes) raise
+    ArchiveSecurityError; legitimate packages do not need to reach outside
+    their own tree.
 
     Raises ArchiveSecurityError if any limit is exceeded or an unsafe path
-    is detected.  Propagates zipfile.BadZipFile on corrupt archives.
+    or symlink target is detected.  Propagates zipfile.BadZipFile on
+    corrupt archives.
     """
     target_dir.mkdir(parents=True, exist_ok=True)
     total_size = 0
     file_count = 0
+    deferred_symlinks: list[tuple[Path, str]] = []
 
     with zipfile.ZipFile(zip_path, 'r') as zf:
         for member in zf.infolist():
@@ -678,14 +724,39 @@ def extract_zip_securely(zip_path: Path, target_dir: Path) -> None:
             # Detect Unix symlinks via the external_attr field.
             # The ZIP spec stores the Unix file mode in the high 16 bits of
             # external_attr.  S_IFMT (0o170000) masks the file-type bits;
-            # S_IFLNK (0o120000) means symlink.  We skip rather than extract
-            # so there is no race window for a subsequent entry to follow it.
+            # S_IFLNK (0o120000) means symlink.
             unix_mode = (member.external_attr >> 16) & 0xFFFF
             # The unix_mode guard handles Windows-created ZIPs: on Windows the
             # high 16 bits are 0 (MS-DOS attributes use the low 16 bits), so
             # we treat those entries as regular files, which is correct because
             # the MS-DOS/PKZIP format has no symlink concept.
             if unix_mode and (unix_mode & 0o170000) == 0o120000:
+                # The symlink target is stored as the entry's file content.
+                # 4096 bytes is more than enough for any real path; a longer
+                # value indicates a crafted archive and is treated as unsafe
+                # by _is_safe_symlink_target (the truncated target will not
+                # resolve correctly within base_dir).  strip() removes any
+                # trailing newline that some archivers append.
+                with zf.open(member) as src:
+                    link_target = src.read(4096).decode('utf-8', errors='replace').strip()
+                # Two independent checks are both required (first pass only --
+                # no archive symlinks exist on disk yet, so resolve() is safe):
+                # 1. Validate where the symlink itself will be placed.
+                #    _is_safe_symlink_target alone does not catch paths like
+                #    '../other/link' whose targets resolve back inside base_dir
+                #    but whose location is outside base_dir.
+                # 2. Validate the target it will point to.
+                if not _is_safe_extract_path(target_dir, member.filename):
+                    raise ArchiveSecurityError(
+                        f'Unsafe symlink path in ZIP: {member.filename!r}')
+                if not _is_safe_symlink_target(target_dir, member.filename, link_target):
+                    raise ArchiveSecurityError(
+                        f'Unsafe symlink in ZIP: {member.filename!r} -> {link_target!r}')
+                file_count += 1
+                if file_count > _MAX_EXTRACTED_FILES:
+                    raise ArchiveSecurityError(
+                        f'ZIP exceeds maximum file count ({_MAX_EXTRACTED_FILES})')
+                deferred_symlinks.append((target_dir / member.filename, link_target))
                 continue
 
             # Path-traversal check.  member.filename can contain '../' or
@@ -719,38 +790,87 @@ def extract_zip_securely(zip_path: Path, target_dir: Path) -> None:
                             f'({_MAX_EXTRACTED_SIZE // 1_000_000} MB)')
                     dst.write(chunk)
 
+    # Second pass: create symlinks validated during the first pass.
+    # Validation ran when no archive symlinks existed on disk, so resolve()
+    # could not follow any of them.  Creating them now (after all regular
+    # files are written) closes the TOCTOU window: nothing written in the
+    # first pass could have followed a symlink, and the set of symlinks
+    # created here is already frozen and validated.
+    for dest, link_target in deferred_symlinks:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        # If a regular file was already extracted at this path, skip: an archive
+        # that contains both a regular file and a symlink at the same path is
+        # malformed, and letting the regular file win is the safer choice.
+        if not dest.is_symlink() and dest.exists():
+            continue
+        if dest.is_symlink():
+            dest.unlink()
+        dest.symlink_to(link_target)
+
 
 def tarfile_extractall_safe(
     tf: tarfile.TarFile, target_dir: Path, members: list[tarfile.TarInfo],
 ) -> None:
-    """Extract tar members, blocking symlink/hardlink/device attacks and enforcing size limits.
+    """Extract tar members, blocking path-traversal/hardlink/device attacks and enforcing size limits.
 
     Streams each regular file through _EXTRACT_CHUNK-sized reads to enforce
     _MAX_EXTRACTED_SIZE and _MAX_EXTRACTED_FILES limits (CWE-409).
-    Skips any member that is not a plain file or directory, or that carries
-    a non-empty linkname (symlink or hardlink target), to prevent CWE-22.
+
+    Symlinks whose targets resolve within target_dir are collected and
+    created in a second pass after all regular files are written, closing
+    the TOCTOU race window (CWE-22).  Symlinks whose targets escape
+    target_dir raise ArchiveSecurityError.  Hardlinks, devices, FIFOs,
+    and sockets are skipped entirely.
 
     Raises ArchiveSecurityError if size or file-count limits are exceeded,
-    if a member path escapes target_dir, or if a path cannot be resolved.
-    Any of these conditions is a strong attack signal: callers record it as
-    a SECURITY_VIOLATION.  Propagates tarfile exceptions for corrupt archives.
+    if a member path escapes target_dir, if a symlink target escapes
+    target_dir, or if a path cannot be resolved.  Any of these conditions
+    is a strong attack signal: callers record it as a SECURITY_VIOLATION.
+    Propagates tarfile exceptions for corrupt archives.
     """
     total_size = 0
     file_count = 0
     base_resolved = target_dir.resolve()
+    deferred_symlinks: list[tuple[Path, str]] = []
 
     for m in members:
         if m.isdir():
             (target_dir / m.name).mkdir(parents=True, exist_ok=True)
             continue
 
+        # Symlinks: validate path and target, defer creation.
+        # m.issym() checks m.type == tarfile.SYMTYPE; m.linkname is the target.
+        # Both checks are required (first pass only -- no archive symlinks on
+        # disk yet, so resolve() is safe to call):
+        # 1. _is_safe_extract_path validates where the symlink will be placed.
+        #    Without it, a path like '../other/link' whose target resolves back
+        #    inside base_dir would pass _is_safe_symlink_target but place the
+        #    symlink (and mkdir its parent) outside base_dir.
+        # 2. _is_safe_symlink_target validates the target it will point to.
+        if m.issym():
+            if not _is_safe_extract_path(target_dir, m.name):
+                raise ArchiveSecurityError(
+                    f'Unsafe symlink path in TAR: {m.name!r}')
+            if not _is_safe_symlink_target(target_dir, m.name, m.linkname):
+                raise ArchiveSecurityError(
+                    f'Unsafe symlink in TAR: {m.name!r} -> {m.linkname!r}')
+            file_count += 1
+            if file_count > _MAX_EXTRACTED_FILES:
+                raise ArchiveSecurityError(
+                    f'TAR exceeds maximum file count ({_MAX_EXTRACTED_FILES})')
+            deferred_symlinks.append((target_dir / m.name, m.linkname))
+            continue
+
         # m.isfile() returns True only for REGTYPE/AREGTYPE (regular files).
-        # Hardlinks have type LNKTYPE, so m.isfile() is False for them.
-        # Symlinks, devices, FIFOs, and sockets all also have m.isfile()==False.
-        # m.linkname is the target for both symlinks and hardlinks; it is empty
-        # for regular files.  The combined check excludes all non-regular-file
-        # member types, including any regular-file member with a non-empty
-        # linkname (which would be malformed but could appear in a crafted tar).
+        # Hardlinks (LNKTYPE) have m.isfile()==False and m.linkname non-empty.
+        # Hardlinks are excluded rather than validated because their target
+        # (m.linkname) is an archive-root-relative path, not a path relative to
+        # the hardlink's own directory; validating them safely requires tracking
+        # which regular files were extracted, which adds complexity for a feature
+        # that real packages rarely use.
+        # Devices, FIFOs, and sockets also have m.isfile()==False.
+        # The m.linkname guard catches malformed entries that claim REGTYPE but
+        # carry a non-empty linkname (should not occur in well-formed archives).
         if not m.isfile() or m.linkname:
             continue
 
@@ -802,16 +922,35 @@ def tarfile_extractall_safe(
                         f'({_MAX_EXTRACTED_SIZE // 1_000_000} MB)')
                 out.write(chunk)
 
+    # Second pass: create symlinks validated during the first pass.
+    # Validation ran when no archive symlinks existed on disk, so resolve()
+    # could not follow any of them.  Creating them now (after all regular
+    # files are written) closes the TOCTOU window: nothing written in the
+    # first pass could have followed a symlink, and the set of symlinks
+    # created here is already frozen and validated.
+    for dest, link_target in deferred_symlinks:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        # If a regular file was already extracted at this path, skip: an archive
+        # that contains both a regular file and a symlink at the same path is
+        # malformed, and letting the regular file win is the safer choice.
+        if not dest.is_symlink() and dest.exists():
+            continue
+        if dest.is_symlink():
+            dest.unlink()
+        dest.symlink_to(link_target)
+
 
 def remove_symlinks(directory: Path) -> int:
     """Remove all symlinks under directory recursively. Returns count removed.
 
-    Both extract_zip_securely() and tarfile_extractall_safe() skip symlink
-    members during extraction, so this function should find nothing to remove
-    for ZIP and TAR archives.  It is still called as a belt-and-suspenders
-    measure and as the primary defence for system tools (gem unpack) that
-    offer no Python-level symlink filtering.  A non-zero return count is
-    a signal that the archive contained symlinks, which is suspicious.
+    extract_zip_securely() and tarfile_extractall_safe() allow safe
+    intra-archive symlinks (targets that resolve within the extraction
+    directory) and raise ArchiveSecurityError on unsafe ones, so this
+    function is a belt-and-suspenders measure for those formats.  It is
+    the primary defence for system tools such as gem unpack that offer no
+    Python-level symlink filtering.  A non-zero return count is a signal
+    that the archive contained symlinks not already handled at extraction
+    time, which may be suspicious depending on context.
     """
     removed = 0
     for path in list(directory.rglob('*')):

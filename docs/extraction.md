@@ -38,10 +38,21 @@ writing the subsequent entry, it overwrites `/etc/passwd` (or any other
 path the process can write).  The post-extraction call to
 `remove_symlinks()` is too late: the overwrite has already happened.
 
-By skipping symlink entries entirely at extraction time we eliminate the
-race window.  There is no symlink to follow, so the subsequent
-`A/shadow` entry either hits a missing directory (and is skipped or
-raises) or is written into a benign local path.
+We close the race window with a two-pass approach.  In the first pass
+we extract all regular files and collect symlink entries for later.  In
+the second pass we create only symlinks whose targets resolve within the
+extraction directory; symlinks with absolute targets or targets that
+escape via `..` raise `ArchiveSecurityError`.
+
+Because no symlinks exist during the first pass, no entry written then
+can follow one.  By the second pass all regular files are already present,
+so a symlink `A -> B` created at that point can only reach files that
+were legitimately part of the archive.
+
+Intra-archive symlinks are a normal feature of Unix packages (shared
+library versioning, `bin/` aliases, etc.) and rejecting all of them
+would break real packages.  Symlinks that point outside the archive
+are never legitimate and always raise.
 
 ### 3. Consistent, auditable policy in one place
 
@@ -56,7 +67,7 @@ platforms and easy to audit.
 | Concern | Analysis |
 |---|---|
 | Path traversal | `zipfile` strips leading `/` from member names, but does NOT strip `..` components on all Python versions.  We call `_is_safe_extract_path()` on every entry. |
-| Symlinks | Python's `zipfile.extractall()` creates symlinks when the ZIP entry has Unix external_attr with file type `0o120000` (S_IFLNK).  We check `(external_attr >> 16) & 0xFFFF` for this type and skip such entries. |
+| Symlinks | Python's `zipfile.extractall()` creates symlinks when the ZIP entry has Unix external_attr with file type `0o120000` (S_IFLNK).  We detect these via `(external_attr >> 16) & 0xFFFF`, read the target from the entry content, validate it with `_is_safe_symlink_target()`, and defer creation to a second pass. Symlinks with absolute targets or targets that escape the extraction directory raise `ArchiveSecurityError`. |
 | Windows external_attr | On Windows-created ZIPs, `external_attr` stores MS-DOS attributes in the low 16 bits and the Unix mode bits are zero.  When `unix_mode == 0` our symlink check evaluates to False (the `if unix_mode and ...` guard), so the entry is treated as a regular file.  This is the correct behaviour: MS-DOS archives have no symlink concept. |
 | Decompression bombs | `zipfile.ZipInfo.file_size` reports the uncompressed size from the local header, but this field can be forged.  We do NOT rely on it; instead we count actual bytes written. |
 | Directory traversal via encoding | `_is_safe_extract_path()` calls `Path.resolve()` which normalises `..` components and returns an absolute path.  We then check that the result starts with `str(base) + os.sep`, using `os.sep` rather than `/` to avoid matching a path like `/base_extension/file`. |
@@ -64,7 +75,7 @@ platforms and easy to audit.
 #### `zipfile.extractall()` vs. our implementation
 
 `zipfile.extractall()` was replaced because:
-- It creates symlinks without any filtering.
+- It creates symlinks without validating their targets.
 - It has no size limit.
 - It does not check paths on older Python versions.
 
@@ -72,8 +83,8 @@ platforms and easy to audit.
 
 | Concern | Analysis |
 |---|---|
-| Symlinks | `tarfile.TarInfo.type == tarfile.SYMTYPE` marks a symlink.  We check `m.linkname` (non-empty on both symlinks and hardlinks) and `m.isfile()` (False for symlinks, hardlinks, devices, fifos).  Together these exclude all non-regular-file members except directories, which we handle separately. |
-| Hardlinks | `m.isfile()` is False for hardlinks (`type == LNKTYPE`); they are excluded. |
+| Symlinks | `m.issym()` checks `m.type == tarfile.SYMTYPE`.  We read `m.linkname`, validate it with `_is_safe_symlink_target()`, and defer creation to a second pass after all regular files are written.  Symlinks with absolute targets or targets that escape the extraction directory raise `ArchiveSecurityError`. |
+| Hardlinks | `m.isfile()` is False for hardlinks (`type == LNKTYPE`); they are excluded entirely.  Hardlinks point to paths within the archive by archive-root-relative name rather than by the symlink's parent directory, making safe validation more complex and the feature rarely needed. |
 | Device/FIFO/socket nodes | All have `m.isfile() == False`; excluded. |
 | Decompression bombs | Same streaming approach as ZIP: bytes are counted as written. |
 | Path traversal | Callers strip the top-level directory from member names and filter `..` components before passing the member list.  `tarfile_extractall_safe()` adds a belt-and-suspenders path check and raises `ArchiveSecurityError` if a path escapes `target_dir` or cannot be resolved at all, as both are attack signals. |
