@@ -8,7 +8,8 @@ analysis when
 adding dependencies, updating dependencies, or examining current dependencies.
 It determines what will be done and estimates its security risk.
 This skill is not tied to any specific AI assistant
-(such as Claude Code, GitHub Copilot, etc.).
+(such as Claude Code, Gemini CLI, GitHub Copilot, etc.) and
+is intended to comply with the [Agent Skills Standard](https://agentskills.io).
 It takes various steps to protect itself from malicious packages
 (though we presume it will be run in a sandboxed environment).
 
@@ -118,26 +119,39 @@ can focus where it matters most.
 ## Installing this skill
 
 This repository is an
-[agent skill](https://docs.github.com/en/copilot/how-tos/use-copilot-agents/cloud-agent/create-skills)
-compatible with Claude Code, GitHub Copilot CLI, and other AI tools that
-support the agent skills standard.
+[agent skill](https://agentskills.io)
+intended to be compatible with Claude Code, Gemini CLI, GitHub Copilot CLI,
+and other AI tools that
+support the [Agent Skills Standard](https://agentskills.io).
+We plan to eventually better align with that standard; see
+[TODO-SKILL-SPEC.md](TODO-SKILL-SPEC.md) for the changes we expect to make.
 
 Skills can be installed at two scopes:
 
 - **Personal** (shared across all your projects): clone into a
-  `~/.claude/skills/`, `~/.copilot/skills/`, or `~/.agents/skills/`
+ `~/.claude/skills/`, `~/.gemini/skills/`,
+ `~/.copilot/skills/`, or `~/.agents/skills/`
   directory, depending on your AI tool.
 - **Project** (specific to one repository): clone into
-  `.claude/skills/`, `.github/skills/`, or `.agents/skills/` inside
-  that repository.
+ `.claude/skills/`, `.gemini/skills/`,
+ `.github/skills/`, or `.agents/skills/`
+  inside that repository.
 
-For example, to install as a personal skill for Claude Code:
+Here are examples of how to install this skill for personal use:
+
+For Claude Code, use `~/.claude/skills/`:
 
 ```bash
 git clone https://github.com/ossf/secure-dependencies ~/.claude/skills/secure-dependencies
 ```
 
-For GitHub Copilot CLI, use `~/.copilot/skills/` instead:
+For Gemini CLI, use `~/.gemini/skills/`:
+
+```bash
+git clone https://github.com/ossf/secure-dependencies ~/.gemini/skills/secure-dependencies
+```
+
+For GitHub Copilot CLI, use `~/.copilot/skills/`:
 
 ```bash
 git clone https://github.com/ossf/secure-dependencies ~/.copilot/skills/secure-dependencies
