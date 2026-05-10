@@ -196,6 +196,66 @@ that the package to be installed is the same one that was analyzed. This
 closes the TOCTOU (time-of-check/time-of-use) window where an attacker might
 serve a different artifact for download than for install.
 
+## Security properties of the scripts themselves
+
+The scripts that analyze untrusted packages are themselves attack surfaces.
+Several properties are maintained to keep them safe.
+
+### Command injection prevention (CWE-78)
+
+All calls to external tools (pip, npm, gem, git, grep, diff, etc.) pass
+arguments as Python lists with `shell=False` (the default for
+`subprocess.run` and `subprocess.Popen`). Shell interpolation is never
+used.  Untrusted values (package names, versions, file paths) are placed
+after an explicit `--` separator so the tool cannot interpret them as
+command-line flags.  Package names are validated against a strict character
+allowlist regex before reaching any command. These measures together prevent
+a malicious package name like `; rm -rf ~` or `--dangerous-flag` from being
+interpreted as shell syntax or a flag.
+
+### Archive extraction hardening (CWE-409, CWE-22)
+
+Archives (`.whl`, `.zip`, `.tgz`, `.tar.gz`, `.gem`) are extracted with
+explicit resource limits and symlink filtering:
+
+- **Decompression bomb prevention (CWE-409):** `extract_zip_securely()`
+  and `tarfile_extractall_safe()` in `analysis_shared.py` stream each file
+  entry in 64 KB chunks and accumulate a running byte count.  Extraction is
+  aborted with `ArchiveSecurityError` if total uncompressed size exceeds
+  1 GB or the file count exceeds 10,000.
+
+- **Path traversal and symlink prevention (CWE-22):** Every entry path is
+  validated with `_is_safe_extract_path()` before writing.  Symlink entries
+  are skipped entirely at extraction time (no post-extraction race window).
+  For tar archives, only `isfile()` members with an empty `linkname` are
+  extracted; directories are created on demand.
+
+### Subprocess output limits (CWE-400)
+
+`run_cmd()` uses two background threads to read stdout and stderr
+concurrently (preventing pipe deadlocks) and caps each stream at 10 MB.
+Output beyond the cap is discarded and a truncation marker is appended.
+This prevents a tool that emits gigabytes of output from exhausting memory.
+
+### HTTP fetch limits (CWE-400)
+
+`http_get()` and `http_post()` only accept `https://` URLs (blocking
+`file://`, `ext::` shell vectors, and HTTP downgrade) and cap the response
+body at 10 MB (`_HTTP_MAX_BYTES`).  This prevents server-side request
+forgery (SSRF) against internal hosts and memory exhaustion from infinite
+HTTP streams.
+
+### AI output isolation and validation
+
+Tier 3 AI output is parsed through `run_ai_sandbox()`, which:
+
+- Strips optional markdown fences before calling `json.loads()` (a
+  misbehaving AI might wrap its JSON in ` ```json ... ``` `).
+- Validates the parsed object against a strict schema (correct field names,
+  allowed enum values, non-empty strings, typed integers).
+- Returns a FAILED sentinel on any parse or validation error; it never
+  passes through free-form text to tier 2.
+
 ## Levels of analysis
 
 This skill implements several kinds of analysis: alternatives check,

@@ -126,6 +126,11 @@ def _unpack_tgz(
         # symlinks at the member level; this catches any edge cases.
         shared.remove_symlinks(target_dir)
         return True
+    except shared.ArchiveSecurityError as exc:
+        # An ArchiveSecurityError is a strong indicator of a malicious package:
+        # legitimate npm packages do not contain tar bombs or traversal payloads.
+        failures.append(f'SECURITY_VIOLATION:{key}: {exc}')
+        return False
     except Exception as exc:
         failures.append(f'{key}: {exc}')
         return False

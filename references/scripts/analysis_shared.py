@@ -31,10 +31,12 @@ import re
 import shutil
 import sys
 import tarfile
+import threading
 import unicodedata
 import subprocess
 import urllib.parse
 import urllib.request
+import zipfile
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -457,24 +459,97 @@ class Printer:
 # which need PATH, HOME, and ecosystem config vars to function. Package
 # code never runs through this path; the install probe (bwrap/firejail/
 # docker) provides OS-level isolation for actual code execution.
+# Maximum bytes captured from a single subprocess stream (stdout or stderr).
+# Prevents memory exhaustion if a malicious package causes a tool to emit
+# gigabytes of output (CWE-400).  Output beyond this limit is discarded and
+# a truncation marker is appended.
+_MAX_CMD_OUTPUT_BYTES = 10_485_760  # 10 MB per stream
+
+
+def _drain_stream(stream: io.RawIOBase, limit: int) -> bytes:
+    """Read stream up to limit bytes; drain the remainder without storing it.
+
+    The drain loop is necessary to prevent the subprocess from blocking on a
+    full pipe buffer after the limit is reached.
+    """
+    chunks: list[bytes] = []
+    total = 0
+    truncated = False
+    while True:
+        chunk = stream.read(65536)  # type: ignore[arg-type]
+        if not chunk:
+            break
+        if not truncated:
+            remaining = limit - total
+            if len(chunk) <= remaining:
+                chunks.append(chunk)
+                total += len(chunk)
+            else:
+                chunks.append(chunk[:remaining])
+                truncated = True
+                # Continue reading (and discarding) to drain the pipe.
+    return b''.join(chunks) + (b'\n[OUTPUT TRUNCATED]' if truncated else b'')
+
+
 def run_cmd(
     args: list[str],
     cwd: str | Path | None = None,
     timeout: int = 120,
     capture: bool = True,
 ) -> tuple[int, str, str]:
-    """Run a subprocess; return (returncode, stdout, stderr). Never raises."""
+    """Run a subprocess; return (returncode, stdout, stderr). Never raises.
+
+    stdout and stderr are each capped at _MAX_CMD_OUTPUT_BYTES to prevent
+    memory exhaustion from unexpectedly large tool output (CWE-400).
+    Two threads read stdout and stderr concurrently to avoid pipe deadlocks.
+    """
+    cwd_str = str(cwd) if cwd else None
     try:
-        result = subprocess.run(
+        if not capture:
+            result = subprocess.run(args, cwd=cwd_str, timeout=timeout)
+            return result.returncode, '', ''
+
+        with subprocess.Popen(
             args,
-            cwd=str(cwd) if cwd else None,
-            capture_output=capture,
-            text=True,
-            timeout=timeout,
-        )
-        return result.returncode, result.stdout or '', result.stderr or ''
-    except subprocess.TimeoutExpired:
-        return 1, '', f'TIMEOUT after {timeout}s'
+            cwd=cwd_str,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        ) as proc:
+            stdout_buf: list[bytes] = [b'']
+            stderr_buf: list[bytes] = [b'']
+
+            def _read_out() -> None:
+                stdout_buf[0] = _drain_stream(
+                    proc.stdout,  # type: ignore[arg-type]
+                    _MAX_CMD_OUTPUT_BYTES,
+                )
+
+            def _read_err() -> None:
+                stderr_buf[0] = _drain_stream(
+                    proc.stderr,  # type: ignore[arg-type]
+                    _MAX_CMD_OUTPUT_BYTES,
+                )
+
+            t_out = threading.Thread(target=_read_out, daemon=True)
+            t_err = threading.Thread(target=_read_err, daemon=True)
+            t_out.start()
+            t_err.start()
+
+            try:
+                proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+                t_out.join(timeout=5)
+                t_err.join(timeout=5)
+                return 1, '', f'TIMEOUT after {timeout}s'
+
+            t_out.join()
+            t_err.join()
+            rc = proc.returncode
+            out = stdout_buf[0].decode('utf-8', errors='replace')
+            err = stderr_buf[0].decode('utf-8', errors='replace')
+            return rc, out, err
     except FileNotFoundError:
         return 1, '', f'command not found: {args[0]}'
     except Exception as exc:  # noqa: BLE001
@@ -512,33 +587,231 @@ def count_source_lines(unpacked_dir: Path) -> int:
     return total
 
 
+# ---------------------------------------------------------------------------
+# Secure archive extraction (CWE-409 decompression bombs, CWE-22 path traversal)
+# ---------------------------------------------------------------------------
+#
+# WHY PYTHON RATHER THAN SYSTEM TOOLS
+# ------------------------------------
+# We implement extraction in Python rather than shelling out to system tools
+# (unzip, tar, gem unpack) for three specific reasons:
+#
+# 1. Decompression bomb prevention (CWE-409): system tools like unzip and tar
+#    will cheerfully expand a 1 KB archive into terabytes.  There is no
+#    portable command-line flag to enforce a total uncompressed-byte quota;
+#    wrappers like ulimit are difficult to apply portably and reliably inside
+#    subprocesses.  By streaming each entry ourselves we can accumulate a
+#    running byte count and abort before filling the disk.
+#
+# 2. Symlink filtering without a race window (CWE-22 / TOCTOU): a malicious
+#    archive can contain a symlink entry A -> /etc/passwd followed immediately
+#    by a file entry A/shadow.  If a system tool writes the symlink and then
+#    follows it while writing the subsequent entry, it can overwrite files
+#    outside the target directory before any post-extraction cleanup runs.
+#    By iterating members ourselves we can skip symlinks entirely: the symlink
+#    is never written, so there is no window.  The filter='data' mode added
+#    to Python's tarfile in 3.12 achieves the same for tar, but requires
+#    Python 3.12+; our streaming approach works on Python 3.10+.
+#
+# 3. Consistent, inspectable policy: embedding the limits and filtering logic
+#    here makes the policy auditable in one place.  Equivalent protections
+#    via shell flags differ across GNU/BSD variants and may silently not apply.
+#
+# TRADE-OFFS
+# ----------
+# This approach is slower than system utilities and adds code that must be
+# maintained.  We accept that cost because the packages being extracted are
+# deliberately adversarial: a dedicated attacker will craft archives to exploit
+# any gap in the system tools' default behaviour.
+
+# Hard limits applied during archive extraction to prevent denial-of-service.
+# An attacker could craft a "zip bomb" or "tar bomb" that expands to many GBs.
+# These limits cap the total uncompressed size and file count per archive.
+_MAX_EXTRACTED_SIZE = 1_000_000_000  # 1 GB total uncompressed across all files
+_MAX_EXTRACTED_FILES = 10_000        # maximum number of files per archive
+_EXTRACT_CHUNK = 65536               # 64 KB streaming chunk for size accounting
+
+
+class ArchiveSecurityError(Exception):
+    """Raised when an archive violates security policy (CWE-409 or CWE-22)."""
+
+
+def _is_safe_extract_path(base_dir: Path, member_path: str) -> bool:
+    """Return True if the resolved extraction path stays within base_dir.
+
+    Defends against path-traversal payloads such as '../../etc/passwd'.
+    resolve() on Python 3.6+ normalises '..' components and resolves
+    symlinks in existing path prefixes, but does not require the final
+    component to exist; non-existing tails are appended literally.
+    """
+    try:
+        resolved = (base_dir / member_path).resolve()
+        base = base_dir.resolve()
+        # Use os.sep suffix so '/safe' does not accidentally match
+        # '/safe_extra/file' (the latter starts with '/safe' but not '/safe/').
+        return str(resolved) == str(base) or str(resolved).startswith(str(base) + os.sep)
+    except Exception:
+        return False
+
+
+def extract_zip_securely(zip_path: Path, target_dir: Path) -> None:
+    """Extract a ZIP archive enforcing size, count, path, and symlink limits.
+
+    Mitigates CWE-409 (decompression bombs) by streaming each entry and
+    counting bytes as they are written.  Mitigates CWE-22 (path traversal)
+    by validating every entry path.  Skips symlink entries entirely (no
+    post-extraction cleanup race window).
+
+    Raises ArchiveSecurityError if any limit is exceeded or an unsafe path
+    is detected.  Propagates zipfile.BadZipFile on corrupt archives.
+    """
+    target_dir.mkdir(parents=True, exist_ok=True)
+    total_size = 0
+    file_count = 0
+
+    with zipfile.ZipFile(zip_path, 'r') as zf:
+        for member in zf.infolist():
+            # Skip directory entries; parent dirs are created on demand below.
+            if member.is_dir():
+                continue
+
+            # Detect Unix symlinks via the external_attr field.
+            # The ZIP spec stores the Unix file mode in the high 16 bits of
+            # external_attr.  S_IFMT (0o170000) masks the file-type bits;
+            # S_IFLNK (0o120000) means symlink.  We skip rather than extract
+            # so there is no race window for a subsequent entry to follow it.
+            unix_mode = (member.external_attr >> 16) & 0xFFFF
+            # The unix_mode guard handles Windows-created ZIPs: on Windows the
+            # high 16 bits are 0 (MS-DOS attributes use the low 16 bits), so
+            # we treat those entries as regular files, which is correct because
+            # the MS-DOS/PKZIP format has no symlink concept.
+            if unix_mode and (unix_mode & 0o170000) == 0o120000:
+                continue
+
+            # Path-traversal check.  member.filename can contain '../' or
+            # absolute paths; _is_safe_extract_path resolves the full path
+            # and confirms it stays inside target_dir.
+            if not _is_safe_extract_path(target_dir, member.filename):
+                raise ArchiveSecurityError(
+                    f'Unsafe path in ZIP: {member.filename!r}')
+
+            file_count += 1
+            if file_count > _MAX_EXTRACTED_FILES:
+                raise ArchiveSecurityError(
+                    f'ZIP exceeds maximum file count ({_MAX_EXTRACTED_FILES})')
+
+            dest = target_dir / member.filename
+            dest.parent.mkdir(parents=True, exist_ok=True)
+
+            # Stream the entry rather than calling extractall() so we can
+            # count bytes as they arrive.  We do NOT trust ZipInfo.file_size:
+            # it is read from the local header and can be forged to any value
+            # in a crafted archive.  Actual byte count is the only safe limit.
+            with zf.open(member) as src, open(dest, 'wb') as dst:
+                while True:
+                    chunk = src.read(_EXTRACT_CHUNK)
+                    if not chunk:
+                        break
+                    total_size += len(chunk)
+                    if total_size > _MAX_EXTRACTED_SIZE:
+                        raise ArchiveSecurityError(
+                            f'ZIP exceeds maximum uncompressed size '
+                            f'({_MAX_EXTRACTED_SIZE // 1_000_000} MB)')
+                    dst.write(chunk)
+
+
 def tarfile_extractall_safe(
     tf: tarfile.TarFile, target_dir: Path, members: list[tarfile.TarInfo],
 ) -> None:
-    """Extract tar members, blocking symlink/hardlink attacks.
+    """Extract tar members, blocking symlink/hardlink/device attacks and enforcing size limits.
 
-    On Python 3.12+, delegates to the built-in filter='data' policy.
-    On older Python, drops any member that is not a plain file or directory,
-    or that has a non-empty linkname (symlink or hardlink target).
+    Streams each regular file through _EXTRACT_CHUNK-sized reads to enforce
+    _MAX_EXTRACTED_SIZE and _MAX_EXTRACTED_FILES limits (CWE-409).
+    Skips any member that is not a plain file or directory, or that carries
+    a non-empty linkname (symlink or hardlink target), to prevent CWE-22.
 
-    Symlinks are also removed at the directory level after extraction by
-    remove_symlinks(), providing a second layer for any edge cases.
+    Raises ArchiveSecurityError if size or file-count limits are exceeded,
+    if a member path escapes target_dir, or if a path cannot be resolved.
+    Any of these conditions is a strong attack signal: callers record it as
+    a SECURITY_VIOLATION.  Propagates tarfile exceptions for corrupt archives.
     """
-    if sys.version_info >= (3, 12):
-        tf.extractall(str(target_dir), members=members, filter='data')
-    else:
-        safe = [m for m in members if (m.isfile() or m.isdir()) and not m.linkname]
-        tf.extractall(str(target_dir), members=safe)
+    total_size = 0
+    file_count = 0
+    base_resolved = target_dir.resolve()
+
+    for m in members:
+        if m.isdir():
+            (target_dir / m.name).mkdir(parents=True, exist_ok=True)
+            continue
+
+        # m.isfile() returns True only for REGTYPE/AREGTYPE (regular files).
+        # Hardlinks have type LNKTYPE, so m.isfile() is False for them.
+        # Symlinks, devices, FIFOs, and sockets all also have m.isfile()==False.
+        # m.linkname is the target for both symlinks and hardlinks; it is empty
+        # for regular files.  The combined check excludes all non-regular-file
+        # member types, including any regular-file member with a non-empty
+        # linkname (which would be malformed but could appear in a crafted tar).
+        if not m.isfile() or m.linkname:
+            continue
+
+        # Belt-and-suspenders path check.  Callers already filtered '..' but
+        # an unusual encoding or edge case could slip through; resolve() catches
+        # all of them.  Any path that escapes target_dir, or that cannot be
+        # resolved at all, is raised as ArchiveSecurityError so the caller can
+        # record it as a SECURITY_VIOLATION signal: legitimate packages never
+        # contain path-traversal payloads.
+        try:
+            dest_resolved = (target_dir / m.name).resolve()
+            if (str(dest_resolved) != str(base_resolved)
+                    and not str(dest_resolved).startswith(
+                        str(base_resolved) + os.sep)):
+                raise ArchiveSecurityError(
+                    f'Unsafe path in TAR: {m.name!r}')
+        except ArchiveSecurityError:
+            raise
+        except Exception:
+            raise ArchiveSecurityError(
+                f'Unresolvable path in TAR: {m.name!r}')
+
+        file_count += 1
+        if file_count > _MAX_EXTRACTED_FILES:
+            raise ArchiveSecurityError(
+                f'TAR exceeds maximum file count ({_MAX_EXTRACTED_FILES})')
+
+        # Open the entry before creating parent directories so we don't leave
+        # orphan directories behind if extractfile() returns None (which it
+        # can for some non-regular-file types that slipped past the checks).
+        f = tf.extractfile(m)
+        if f is None:
+            continue
+
+        dest_path = target_dir / m.name
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Stream the entry for the same reason as in extract_zip_securely:
+        # the tar header's reported size can be forged, so we count actual bytes.
+        with open(dest_path, 'wb') as out:
+            while True:
+                chunk = f.read(_EXTRACT_CHUNK)
+                if not chunk:
+                    break
+                total_size += len(chunk)
+                if total_size > _MAX_EXTRACTED_SIZE:
+                    raise ArchiveSecurityError(
+                        f'TAR exceeds maximum uncompressed size '
+                        f'({_MAX_EXTRACTED_SIZE // 1_000_000} MB)')
+                out.write(chunk)
 
 
 def remove_symlinks(directory: Path) -> int:
     """Remove all symlinks under directory recursively. Returns count removed.
 
-    Called after every package extraction to neutralize symlink attacks
-    regardless of which extraction tool was used. Tar-based extractors
-    already filter symlinks at the member level (tarfile_extractall_safe),
-    but zip extraction and system tools (gem unpack) do not, and grep/
-    file-reader behavior on symlinks differs between GNU and BSD builds.
+    Both extract_zip_securely() and tarfile_extractall_safe() skip symlink
+    members during extraction, so this function should find nothing to remove
+    for ZIP and TAR archives.  It is still called as a belt-and-suspenders
+    measure and as the primary defence for system tools (gem unpack) that
+    offer no Python-level symlink filtering.  A non-zero return count is
+    a signal that the archive contained symlinks, which is suspicious.
     """
     removed = 0
     for path in list(directory.rglob('*')):
@@ -2931,8 +3204,14 @@ def run_ai_sandbox(
         print(f'  WARNING: AI sandbox returned rc={rc}; review failed', file=sys.stderr)
         return failure_sentinel
 
+    # Strip optional markdown fences before parsing.  A misbehaving AI backend
+    # might wrap its JSON in ```json ... ``` even though the prompt forbids it.
+    raw = stdout.strip()
+    if raw.startswith('```'):
+        raw = re.sub(r'^```[a-z]*\n?', '', raw)
+        raw = re.sub(r'\n?```$', '', raw.rstrip())
     try:
-        data = json.loads(stdout)
+        data = json.loads(raw)
     except json.JSONDecodeError as exc:
         print(f'  WARNING: AI sandbox returned invalid JSON: {exc}', file=sys.stderr)
         return failure_sentinel

@@ -222,7 +222,11 @@ class Hooks(shared.EcosystemHooks):
         if unpacked_dir.is_dir():
             _n = shared.remove_symlinks(unpacked_dir)
             if _n:
-                failures.append(f'symlinks-removed({_n})')
+                # Symlinks in gem archives are a strong attack signal: legitimate
+                # gems do not contain symlinks pointing outside the package tree.
+                failures.append(
+                    f'SECURITY_VIOLATION:symlinks-in-gem({_n} symlinks removed)'
+                )
 
         # Fall back to `gem specification` for gemspec if not present
         # in the unpacked dir
@@ -521,7 +525,11 @@ class Hooks(shared.EcosystemHooks):
                 failures.append('gem-fetch-old')
 
         # Remove symlinks from whichever path populated old_dir_base.
-        shared.remove_symlinks(old_dir_base)
+        _n_old = shared.remove_symlinks(old_dir_base)
+        if _n_old:
+            failures.append(
+                f'SECURITY_VIOLATION:symlinks-in-old-gem({_n_old} symlinks removed)'
+            )
         (work / 'old-version-status.txt').write_text(
             f'OLD_VERSION_SOURCE: {source or "unavailable"}\n',
             encoding='utf-8'
