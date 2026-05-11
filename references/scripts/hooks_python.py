@@ -16,7 +16,6 @@
 import json
 import re
 import tarfile
-import zipfile
 from pathlib import Path
 import sys
 
@@ -169,16 +168,14 @@ def _unpack_pkg(
     """Unpack a wheel (.whl) or sdist (.tar.gz/.zip) into target_dir.
 
     Returns a dist_type string: 'wheel', 'sdist', 'sdist-zip', or 'unknown'.
-    Uses Python stdlib only (zipfile, tarfile).
+    Uses Python stdlib only (tarfile; zip via shared.extract_zip_securely).
     """
     name = pkg_file.name
     try:
         if pkg_file.suffix == '.whl' or name.endswith('.zip'):
-            with zipfile.ZipFile(str(pkg_file), 'r') as zf:
-                # zipfile strips leading '/' and '..' itself, so no member filter needed.
-                zf.extractall(str(target_dir))
-            # zip extraction has no symlink filter; remove any that were created.
-            shared.remove_symlinks(target_dir)
+            # extract_zip_securely enforces size limits, filters symlinks, and
+            # checks paths during extraction (no post-extraction race window).
+            shared.extract_zip_securely(pkg_file, target_dir)
             return 'wheel' if pkg_file.suffix == '.whl' else 'sdist-zip'
         if name.endswith(('.tar.gz', '.tgz', '.tar.bz2', '.tar.xz')):
             with tarfile.open(str(pkg_file), 'r:*') as tf:
@@ -196,6 +193,11 @@ def _unpack_pkg(
             # tarfile_extractall_safe already filters symlinks; belt-and-suspenders.
             shared.remove_symlinks(target_dir)
             return 'sdist'
+    except shared.ArchiveSecurityError as exc:
+        # An ArchiveSecurityError (size limit, file count, path traversal, or
+        # symlink in a zip) is a strong indicator of a malicious package: benign
+        # packages do not contain zip bombs or path-traversal payloads.
+        failures.append(f'SECURITY_VIOLATION:{failure_key}: {exc}')
     except Exception as exc:
         failures.append(f'{failure_key}: {exc}')
     return 'unknown'

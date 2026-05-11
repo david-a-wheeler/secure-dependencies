@@ -114,6 +114,10 @@ class Hooks(shared.EcosystemHooks):
         'dynamic dispatch on external input, at_exit hooks'
     )
 
+    # ReDoS prevention (CWE-400): all patterns use bounded quantifiers so that
+    # worst-case PCRE backtracking is O(bound^2) rather than O(n^2) or worse.
+    # Unbounded character-class repetitions ([^x]+, [^x]*) are capped with
+    # {1,N} or {0,N}.  See AGENTS.md for the full policy.
     DANGEROUS_PATTERNS: list[tuple[str, str]] = [
         ('eval-variants',
          r'\b(?:eval|instance_eval|class_eval|module_eval|binding\.eval)\s*[\(\{]'),
@@ -130,23 +134,34 @@ class Hooks(shared.EcosystemHooks):
          r'ENV\s*\[\s*["\x27][A-Z_]*'
          r'(?:KEY|SECRET|TOKEN|PASSWORD|CREDENTIAL|AWS_|GH_|GITHUB_|CI_|NPM_|PYPI_|BUNDLE_)'
          r'[A-Z_]*["\x27]\s*\]'),
+        # [^,]{1,200} rather than [^,]+ to cap backtracking when no quote
+        # follows many non-comma characters (ReDoS: O(200^2) not O(n^2)).
         ('home-or-shell-write',
-         r'(?:File\.(?:write|open|binwrite)|IO\.write)\s*[^,]+'
+         r'(?:File\.(?:write|open|binwrite)|IO\.write)\s*[^,]{1,200}'
          r'["\x27](?:~\/|\/home\/|\.bashrc|\.zshrc|\.profile|\.bash_profile|\.ssh\/)'),
         ('dynamic-dispatch',
          r'\b(?:__send__|public_send|send)\s*\(\s*(?:params|request|user_input|ENV|ARGV|gets)\b'),
         ('at-exit-hooks',      r'^\s*at_exit\b'),
     ]
 
+    # ReDoS prevention: diff lines start with ^\+ so they are anchored, but
+    # .* before a keyword still causes O(n^2) backtracking on long lines.
+    # [^\n]{0,500} caps worst-case to O(500^2).  Two .* on the same pattern
+    # (keyword.*suffix) compounds to O(n^2) even for moderate line lengths;
+    # bounding both fixes it.
     DIFF_PATTERNS: list[tuple[str, str]] = [
+        # Two [^\n]{0,500} replace two .* to prevent the compounded O(n^2)
+        # backtracking of keyword.*suffix when neither keyword nor suffix appears.
         ('diff-sql-injection',
-         r'^\+.*\b(?:SELECT|INSERT|UPDATE|DELETE|WHERE|FROM|JOIN)\b.*["\x27]\s*\+'),
+         r'^\+[^\n]{0,500}\b(?:SELECT|INSERT|UPDATE|DELETE|WHERE|FROM|JOIN)\b[^\n]{0,500}["\x27]\s*\+'),
         ('diff-cmd-injection',
-         r'^\+.*(?:system|exec|spawn|popen|Open3)\s*\('),
+         r'^\+[^\n]{0,500}(?:system|exec|spawn|popen|Open3)\s*\('),
+        # [^"\x27]{6,200}: lower bound ensures a non-trivial value; upper bound
+        # prevents O(n^2) backtracking when no closing quote follows.
         ('diff-hardcoded-secrets',
-         r'^\+.*(?:password|passwd|secret|api_key|token)\s*=\s*["\x27][^"\x27]{6,}["\x27]'),
+         r'^\+[^\n]{0,500}(?:password|passwd|secret|api_key|token)\s*=\s*["\x27][^"\x27]{6,200}["\x27]'),
         ('diff-eval',
-         r'^\+.*(?:eval|instance_eval|class_eval|module_eval)\s*[\(\{]'),
+         r'^\+[^\n]{0,500}(?:eval|instance_eval|class_eval|module_eval)\s*[\(\{]'),
     ]
 
     def get_lockfile_path(self, project_root: Path) -> Path:
@@ -222,7 +237,11 @@ class Hooks(shared.EcosystemHooks):
         if unpacked_dir.is_dir():
             _n = shared.remove_symlinks(unpacked_dir)
             if _n:
-                failures.append(f'symlinks-removed({_n})')
+                # Symlinks in gem archives are a strong attack signal: legitimate
+                # gems do not contain symlinks pointing outside the package tree.
+                failures.append(
+                    f'SECURITY_VIOLATION:symlinks-in-gem({_n} symlinks removed)'
+                )
 
         # Fall back to `gem specification` for gemspec if not present
         # in the unpacked dir
@@ -521,7 +540,11 @@ class Hooks(shared.EcosystemHooks):
                 failures.append('gem-fetch-old')
 
         # Remove symlinks from whichever path populated old_dir_base.
-        shared.remove_symlinks(old_dir_base)
+        _n_old = shared.remove_symlinks(old_dir_base)
+        if _n_old:
+            failures.append(
+                f'SECURITY_VIOLATION:symlinks-in-old-gem({_n_old} symlinks removed)'
+            )
         (work / 'old-version-status.txt').write_text(
             f'OLD_VERSION_SOURCE: {source or "unavailable"}\n',
             encoding='utf-8'

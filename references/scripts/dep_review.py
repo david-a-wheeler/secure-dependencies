@@ -229,6 +229,9 @@ def write_signals(  # noqa: C901
         risk_parts.append('POST_INSTALL_MESSAGE')
     if diff_scan_matches > 0:
         risk_parts.append(f'DIFF_SCAN_MATCHES({diff_scan_matches})')
+    _security_violations = [f for f in failures if f.startswith('SECURITY_VIOLATION:')]
+    if _security_violations:
+        risk_parts.append(f'ARCHIVE_SECURITY_VIOLATION({len(_security_violations)})')
     if failures:
         risk_parts.append('STEP_FAILURES')
     if license_status == 'CRITICAL':
@@ -404,6 +407,14 @@ def write_signals(  # noqa: C901
         _lf_note = '  [unusually large transitive footprint; review each new dep]' if len(_not_in_lockfile) > 10 \
             else '  [not in lockfile; each is a new unreviewed code surface]'
         _concerns.append(('new_transitive_deps', f'{len(_not_in_lockfile)}{_lf_note}'))
+    if _security_violations:
+        _concerns.append((
+            'archive_security_violations',
+            f'CRITICAL: {len(_security_violations)} archive security violation(s) detected: '
+            + '; '.join(_security_violations[:3])
+            + '  [legitimate packages do not contain zip bombs, path-traversal payloads,'
+              ' or symlinks outside the archive; this is a strong attack signal]',
+        ))
     if failures:
         _concerns.append((
             'step_failures',

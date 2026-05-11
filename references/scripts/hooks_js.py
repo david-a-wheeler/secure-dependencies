@@ -126,6 +126,11 @@ def _unpack_tgz(
         # symlinks at the member level; this catches any edge cases.
         shared.remove_symlinks(target_dir)
         return True
+    except shared.ArchiveSecurityError as exc:
+        # An ArchiveSecurityError is a strong indicator of a malicious package:
+        # legitimate npm packages do not contain tar bombs or traversal payloads.
+        failures.append(f'SECURITY_VIOLATION:{key}: {exc}')
+        return False
     except Exception as exc:
         failures.append(f'{key}: {exc}')
         return False
@@ -160,6 +165,10 @@ class Hooks(shared.EcosystemHooks):
         '(Object.prototype assignment, __proto__ assignment)'
     )
 
+    # ReDoS prevention (CWE-400): all patterns use bounded quantifiers so that
+    # worst-case PCRE backtracking is O(bound^2) rather than O(n^2) or worse.
+    # Unbounded character-class repetitions ([^x]+, [^x]*) are capped with
+    # {1,N} or {0,N}.  See AGENTS.md for the full policy.
     DANGEROUS_PATTERNS: list[tuple[str, str]] = [
         ('eval-variants',
          r'\beval\s*\(|new\s+Function\s*\(|vm\.runIn(?:This|New)Context\s*\('),
@@ -181,26 +190,35 @@ class Hooks(shared.EcosystemHooks):
         ('dynamic-require',
          r'\brequire\s*\(\s*(?:process\.env\.|[^"\'`\)]{0,80}'
          r'(?:user|input|argv|env|request))'),
+        # [^\]]{1,200} rather than [^\]]+ to cap backtracking when no closing
+        # quote is found (ReDoS: O(200^2) worst case, not O(n^2)).
         ('prototype-pollution',
-         r'Object\.prototype\s*\[["\x27][^\]]+["\x27]\s*='
+         r'Object\.prototype\s*\[["\x27][^\]]{1,200}["\x27]\s*='
          r'|__proto__\s*[=:]\s*\{'),
         ('module-load-socket',
          r'^\s*new\s+(?:net\.Socket|tls\.TLSSocket|dgram\.Socket)\s*\('),
     ]
 
+    # ReDoS prevention: diff lines start with ^\+ so they are anchored, but
+    # .* before a keyword still causes O(n^2) backtracking on long lines such
+    # as minified JS (the whole file may be a single line).  [^\n]{0,500}
+    # caps worst-case to O(500^2).  Two .* on the same pattern (keyword.*suffix)
+    # compounds to O(n^2) even for moderate line lengths; bounding both fixes it.
     DIFF_PATTERNS: list[tuple[str, str]] = [
         ('diff-eval',
-         r'^\+.*\beval\s*\(|^\+.*new\s+Function\s*\('),
+         r'^\+[^\n]{0,500}\beval\s*\(|^\+[^\n]{0,500}new\s+Function\s*\('),
         ('diff-cmd-injection',
-         r'^\+.*child_process\.(?:exec|spawn|execSync|spawnSync)\s*\('),
+         r'^\+[^\n]{0,500}child_process\.(?:exec|spawn|execSync|spawnSync)\s*\('),
+        # [^"\x27]{6,200}: lower bound ensures it is a non-trivial value;
+        # upper bound prevents O(n^2) backtracking when no closing quote follows.
         ('diff-hardcoded-secrets',
-         r'^\+.*(?:password|passwd|secret|api_key|token|apikey)'
-         r'\s*[=:]\s*["\x27][^"\x27]{6,}["\x27]'),
+         r'^\+[^\n]{0,500}(?:password|passwd|secret|api_key|token|apikey)'
+         r'\s*[=:]\s*["\x27][^"\x27]{6,200}["\x27]'),
         ('diff-network-load',
          r'^\+\s*require\s*\(\s*["\x27](?:http|https)["\x27]\s*\)'
          r'\.(?:get|request)\s*\('),
         ('diff-prototype-pollution',
-         r'^\+.*__proto__\s*[=:]\s*\{|^\+.*Object\.prototype\s*\['),
+         r'^\+[^\n]{0,500}__proto__\s*[=:]\s*\{|^\+[^\n]{0,500}Object\.prototype\s*\['),
     ]
 
     def get_lockfile_path(self, project_root: Path) -> Path:
