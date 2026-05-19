@@ -36,6 +36,77 @@ _RE_REPRO_META = re.compile(
 # shell-special characters before they reach LLM-visible command strings.
 _NPM_NAME_RE = re.compile(r'^[@A-Za-z0-9][A-Za-z0-9._/-]{0,213}$')
 
+# Install-script command checks: applied against the preinstall/install/
+# postinstall command strings from package.json (not against JS source files).
+# Each entry is (signal_name, compiled_pattern).
+# ReDoS prevention: all patterns use anchored word boundaries or bounded
+# character classes; no nested unbounded quantifiers.
+_INSTALL_CMD_CHECKS: list[tuple[str, re.Pattern[str]]] = [
+    # Shai-Halud pattern: bootstrap a secondary JS runtime to evade npm policy.
+    # Known false positive: ts-node is also used by legitimate TypeScript build
+    # scripts (e.g. ts-node scripts/build.ts).  The AI should check context.
+    ('INSTALL_BOOTSTRAP_RUNTIME', re.compile(
+        r'\b(?:bun|deno|tsx|ts-node|pkgx)\s+(?:run\s+)?[\w./]{1,120}\.(?:js|ts|mjs)\b'
+        r'|\bsetup_bun\.js\b'
+        r'|\bbun_environment\.js\b',
+        re.IGNORECASE,
+    )),
+    # Worm propagation: publish other packages during install.
+    # Near-zero false-positive rate; rare legitimate cases (monorepo tooling)
+    # warrant human confirmation rather than auto-rejection.
+    # Known false positive: a string like 'echo run npm publish to release'
+    # will match because the pattern fires on the substring, not a shell parse.
+    # Practical risk is low since install scripts rarely echo publishing docs.
+    ('INSTALL_SELF_PUBLISH', re.compile(
+        r'\bnpm\s+(?:publish|unpublish|deprecate)\b'
+        r'|\b(?:pnpm|yarn)\s+publish\b'
+        r'|\bnpm\s+(?:token|adduser)\b'
+        r'|\bnpm\s+set\s+registry\b',
+        re.IGNORECASE,
+    )),
+    # Persistence: write to IDE or AI-tool config directories.
+    ('INSTALL_IDE_CONFIG_WRITE', re.compile(
+        r'(?:\.vscode|\.idea|\.claude|\.cursor)[/\\]'
+        r'(?:tasks|settings|extensions|launch)\.json\b'
+        r'|\.config[/\\](?:claude|copilot|cursor|codeium)[/\\]',
+        re.IGNORECASE,
+    )),
+    # Persistence: write to shell startup files.
+    ('INSTALL_SHELL_CONFIG_WRITE', re.compile(
+        r'(?:~|HOME)[^\n]{0,60}\.(?:bashrc|zshrc|profile|bash_profile)\b',
+        re.IGNORECASE,
+    )),
+    # Dead-man's-switch: destructive wipe commands.
+    ('INSTALL_DESTRUCTIVE_WIPE', re.compile(
+        r'\bdel\s+/[FQS]'
+        r'|\brm\s+-[rf]{1,3}\s+[~/]'
+        r'|\bshred\s+-[uvzn]{1,6}'
+        r'|\bcipher\s+/W:'
+        r'|\bdd\s+if=/dev/zero\s+of=',
+        re.IGNORECASE,
+    )),
+    # Credential harvesting via CLI tools (not env var reads).
+    # Note: detecting "gh auth token" in package source does NOT require
+    # the gh CLI to be installed on the reviewer's machine; we are scanning
+    # the malicious package's code, not invoking gh ourselves.
+    ('INSTALL_CREDENTIAL_CLI', re.compile(
+        r'\bgh\s+auth\s+token\b'
+        r'|\bgit\s+config\s+--get\b[^\n]{0,80}credential'
+        r'|\bnpm\s+token\s+(?:list|create)\b'
+        r'|\baws\s+configure\s+(?:get|list)\b'
+        r'|\bgcloud\s+auth\s+print-access-token\b'
+        r'|\baz\s+account\s+get-access-token\b',
+        re.IGNORECASE,
+    )),
+    # Credential harvesting via direct cloud secret-manager API calls.
+    ('INSTALL_CLOUD_SECRET_API', re.compile(
+        r'secretsmanager\.[a-z0-9-]{1,50}\.amazonaws\.com'
+        r'|secretmanager\.googleapis\.com'
+        r'|kms\.[a-z0-9-]{1,50}\.amazonaws\.com',
+        re.IGNORECASE,
+    )),
+]
+
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -305,7 +376,8 @@ class Hooks(shared.EcosystemHooks):
         Returns dict with keys: source_url, extensions, executables,
         executables_list, post_install_msg, has_build_hooks,
         has_install_scripts, runtime_dep_lines, manifest_license_raw,
-        manifest_text, manifest_extra_file, install_hook_context.
+        manifest_text, manifest_extra_file, install_hook_context,
+        install_cmd_warnings.
         """
         source_url = ''
         extensions = 'NO'
@@ -317,6 +389,7 @@ class Hooks(shared.EcosystemHooks):
         manifest_text = ''
         runtime_dep_lines: list[str] = []
         install_hook_context: list[str] = []
+        install_cmd_warnings: list[str] = []
 
         p(f'=== Manifest analysis: {pkgname} {version} ===')
         p('')
@@ -389,6 +462,27 @@ class Hooks(shared.EcosystemHooks):
                 post_install_msg = 'YES'
             if not (preinstall_val or install_val or postinstall_val):
                 p('HAS_BUILD_HOOKS: NO')
+
+            # Install-command security checks: scan lifecycle script command
+            # strings for attack patterns.  Each signal fires at most once even
+            # if the pattern matches in more than one hook.
+            _install_hooks = [
+                ('preinstall', preinstall_val),
+                ('install', install_val),
+                ('postinstall', postinstall_val),
+            ]
+            for _sig_name, _pat in _INSTALL_CMD_CHECKS:
+                for _hook_name, _hook_val in _install_hooks:
+                    if _hook_val and _pat.search(_hook_val):
+                        _short = shared.sanitize_line(_hook_val[:120])
+                        p(f'[!] {_sig_name}: detected in {_hook_name}: {_short}')
+                        install_hook_context.append(
+                            f'CRITICAL: {_sig_name} detected in {_hook_name} '
+                            f'script ({_short}). Supply chain attack indicator.'
+                        )
+                        install_cmd_warnings.append(
+                            f'{_sig_name}:{_hook_name}')
+                        break  # report each signal once only
 
             # Runtime dependencies
             p('')
@@ -499,6 +593,7 @@ class Hooks(shared.EcosystemHooks):
             'manifest_text': manifest_text,
             'manifest_extra_file': 'package-json.txt',
             'install_hook_context': install_hook_context,
+            'install_cmd_warnings': install_cmd_warnings,
         }
 
     def download_old(
