@@ -302,6 +302,14 @@ class Hooks(shared.EcosystemHooks):
          r'|from\s+google\.cloud\s+import\s+secretmanager\b'
          r'|azure\.keyvault\.secrets\b'
          r'|' + shared.CLOUD_SECRET_HOSTS_RE),
+        # Bulk env-var serialization: harvest pattern that dumps the entire
+        # environment to a string or structured object.  (?:dict\s*\(\s*)?
+        # is a short optional prefix (no backtracking cascade) that matches
+        # json.dumps(dict(os.environ)) as well as json.dumps(os.environ).
+        ('env-enumeration',
+         r'(?:json\.dumps|pprint\.pformat)\s*\(\s*(?:dict\s*\(\s*)?os\.environ\b'),
+        # Exfiltration relay services and known campaign C2 domains.
+        ('exfil-relay-domain', shared.EXFIL_RELAY_DOMAINS_RE),
     ]
 
     DIFF_PATTERNS: list[tuple[str, str]] = [

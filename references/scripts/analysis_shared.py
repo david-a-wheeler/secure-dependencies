@@ -1016,6 +1016,21 @@ HOME_PATHS_RE: str = (
     r'~\/|\/home\/|\.bashrc|\.zshrc|\.profile|\.bash_profile|\.ssh\/'
 )
 
+# Exfiltration relay services and known campaign C2 domains that appear as
+# string literals in package source.  These services have essentially no
+# legitimate use inside published packages; a match is a high-confidence
+# attack signal.  The alternation uses fixed-length domain segments to
+# avoid backtracking (each component is an anchored literal).
+EXFIL_RELAY_DOMAINS_RE: str = (
+    r'(?i)(?:webhook\.site'
+    r'|pipedream\.net'
+    r'|requestbin\.(?:com|net)'
+    r'|beeceptor\.com'
+    r'|ngrok\.(?:io|app)'
+    r'|burpcollaborator\.net'
+    r'|m-kosche\.com)'
+)
+
 
 def blind_scan(
     label: str,

@@ -302,6 +302,17 @@ class Hooks(shared.EcosystemHooks):
          r'|require\s*\(\s*["\x27]@google-cloud/secret-manager["\x27]'
          r'|require\s*\(\s*["\x27]@azure/keyvault-secrets["\x27]'
          r'|' + shared.CLOUD_SECRET_HOSTS_RE),
+        # Bulk env-var collection: harvest pattern that serializes or iterates
+        # all of process.env at once.  The existing credential-env-vars pattern
+        # catches named prefixes; this catches the bulk-collect variant worms
+        # use to avoid known-prefix detection.  \w{1,40} bounds the loop var.
+        ('env-enumeration',
+         r'(?:JSON\.stringify|Object\.(?:keys|values|entries|assign|fromEntries))'
+         r'\s*\(\s*process\.env\s*\)'
+         r'|for\s*\(\s*(?:const|let|var)\s+\w{1,40}\s+(?:in|of)\s+process\.env\s*\)'),
+        # Exfiltration relay services and known campaign C2 domains.
+        # Shared domain list from analysis_shared; no ecosystem-specific additions.
+        ('exfil-relay-domain', shared.EXFIL_RELAY_DOMAINS_RE),
     ]
 
     # ReDoS prevention: diff lines start with ^\+ so they are anchored, but

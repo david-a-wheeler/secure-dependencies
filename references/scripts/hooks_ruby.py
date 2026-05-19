@@ -155,6 +155,15 @@ class Hooks(shared.EcosystemHooks):
          r'\bAws::SecretsManager::Client\b'
          r'|\bAws::SSM::Client\b'
          r'|' + shared.CLOUD_SECRET_HOSTS_RE),
+        # Bulk env-var serialization: harvest pattern that converts the entire
+        # ENV hash to JSON or an Array of pairs.  ENV.to_h is excluded (very
+        # common for subprocess env copies); ENV.to_a and JSON serialization
+        # are the unambiguous bulk-collect forms.
+        ('env-enumeration',
+         r'JSON\.(?:dump|generate)\s*\(\s*ENV\b'
+         r'|ENV\.to_a\b'),
+        # Exfiltration relay services and known campaign C2 domains.
+        ('exfil-relay-domain', shared.EXFIL_RELAY_DOMAINS_RE),
     ]
 
     # ReDoS prevention: diff lines start with ^\+ so they are anchored, but
