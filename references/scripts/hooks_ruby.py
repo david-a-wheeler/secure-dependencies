@@ -147,20 +147,15 @@ class Hooks(shared.EcosystemHooks):
         ('self-publish',
          r'\bgem\s+push\b'),
         # Persistence: writing to IDE or AI-tool config directories.
-        ('ide-config-write',
-         r'(?:\.vscode|\.idea|\.claude|\.cursor)[/\\]'
-         r'(?:tasks|settings|extensions|launch)\.json\b'
-         r'|\.config[/\\](?:claude|copilot|cursor|codeium)[/\\]'),
+        ('ide-config-write', shared.PCRE_IDE_CONFIG_PATHS),
         # Credential harvesting via cloud secret-manager SDKs or direct API calls.
         # Aws::SecretsManager is not caught by network-at-load-scope (which checks
         # Net::HTTP and similar, not the AWS SDK).
+        # Shared provider hostnames come from shared.PCRE_CLOUD_SECRET_HOSTS.
         ('cloud-secret-api',
          r'\bAws::SecretsManager::Client\b'
          r'|\bAws::SSM::Client\b'
-         r'|secretsmanager\.[a-z0-9-]{1,50}\.amazonaws\.com'
-         r'|ssm\.[a-z0-9-]{1,50}\.amazonaws\.com'
-         r'|secretmanager\.googleapis\.com'
-         r'|vault\.azure\.net'),
+         r'|' + shared.PCRE_CLOUD_SECRET_HOSTS),
     ]
 
     # ReDoS prevention: diff lines start with ^\+ so they are anchored, but

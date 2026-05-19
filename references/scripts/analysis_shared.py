@@ -970,6 +970,35 @@ def safe_dir_component(name: str, version: str) -> str:
     return component
 
 
+# ---------------------------------------------------------------------------
+# Shared PCRE fragments for ecosystem DANGEROUS_PATTERNS
+# ---------------------------------------------------------------------------
+# Raw PCRE strings (suitable for grep -P) shared by two or more ecosystem
+# hooks.  Ecosystems use them directly when the pattern is identical, or
+# concatenate them as extra | alternatives when they also need SDK-specific
+# prefixes.
+#
+# ReDoS: all fragments use bounded quantifiers or fixed-length alternatives.
+
+# IDE and AI-tool config file paths.  The path string is language-neutral,
+# so the same PCRE works for Python, Ruby, and JavaScript source scans.
+PCRE_IDE_CONFIG_PATHS: str = (
+    r'(?:\.vscode|\.idea|\.claude|\.cursor)[/\\]'
+    r'(?:tasks|settings|extensions|launch)\.json\b'
+    r'|\.config[/\\](?:claude|copilot|cursor|codeium)[/\\]'
+)
+
+# Cloud secret-manager API hostnames.  These appear in HTTP calls and SDK
+# configs regardless of language.  Each ecosystem adds its own SDK-specific
+# alternatives on top of these shared provider hostnames.
+PCRE_CLOUD_SECRET_HOSTS: str = (
+    r'secretsmanager\.[a-z0-9-]{1,50}\.amazonaws\.com'
+    r'|ssm\.[a-z0-9-]{1,50}\.amazonaws\.com'
+    r'|secretmanager\.googleapis\.com'
+    r'|vault\.azure\.net'
+)
+
+
 def blind_scan(
     label: str,
     pattern: str,

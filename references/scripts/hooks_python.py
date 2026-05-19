@@ -292,22 +292,17 @@ class Hooks(shared.EcosystemHooks):
          r'|\bhatch\s+publish\b'
          r'|\bpython[^\n]{0,60}setup\.py[^\n]{0,40}\bupload\b'),
         # Persistence: writing to IDE or AI-tool config directories.
-        ('ide-config-write',
-         r'(?:\.vscode|\.idea|\.claude|\.cursor)[/\\]'
-         r'(?:tasks|settings|extensions|launch)\.json\b'
-         r'|\.config[/\\](?:claude|copilot|cursor|codeium)[/\\]'),
+        ('ide-config-write', shared.PCRE_IDE_CONFIG_PATHS),
         # Credential harvesting via cloud secret-manager SDKs or direct API calls.
         # boto3 calls are not caught by network-at-load-scope (which checks urllib etc.).
+        # Shared provider hostnames come from shared.PCRE_CLOUD_SECRET_HOSTS.
         ('cloud-secret-api',
          r'\bboto3\.client\s*\(\s*["\x27]secretsmanager["\x27]'
          r'|\bboto3\.client\s*\(\s*["\x27]ssm["\x27]'
-         r'|secretsmanager\.[a-z0-9-]{1,50}\.amazonaws\.com'
-         r'|ssm\.[a-z0-9-]{1,50}\.amazonaws\.com'
-         r'|secretmanager\.googleapis\.com'
          r'|google\.cloud\.secretmanager'
          r'|from\s+google\.cloud\s+import\s+secretmanager\b'
          r'|azure\.keyvault\.secrets\b'
-         r'|vault\.azure\.net'),
+         r'|' + shared.PCRE_CLOUD_SECRET_HOSTS),
     ]
 
     DIFF_PATTERNS: list[tuple[str, str]] = [

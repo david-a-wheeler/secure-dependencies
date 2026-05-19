@@ -248,7 +248,8 @@ class Hooks(shared.EcosystemHooks):
         '(AWS/GitHub/cloud keys at load time), '
         'dynamic require on external input, '
         'prototype pollution '
-        '(Object.prototype assignment, __proto__ assignment)'
+        '(Object.prototype assignment, __proto__ assignment), '
+        'IDE config writes, cloud secret-manager API calls'
     )
 
     # ReDoS prevention (CWE-400): all patterns use bounded quantifiers so that
@@ -283,6 +284,19 @@ class Hooks(shared.EcosystemHooks):
          r'|__proto__\s*[=:]\s*\{'),
         ('module-load-socket',
          r'^\s*new\s+(?:net\.Socket|tls\.TLSSocket|dgram\.Socket)\s*\('),
+        # Persistence: writing to IDE or AI-tool config directories.
+        ('ide-config-write', shared.PCRE_IDE_CONFIG_PATHS),
+        # Credential harvesting via cloud secret-manager SDKs or direct API calls.
+        # AWS SDK v3 require() calls are not caught by network-at-load-scope.
+        # Shared provider hostnames come from shared.PCRE_CLOUD_SECRET_HOSTS.
+        ('cloud-secret-api',
+         r'require\s*\(\s*["\x27]@aws-sdk/client-secrets-manager["\x27]'
+         r'|require\s*\(\s*["\x27]@aws-sdk/client-ssm["\x27]'
+         r'|new\s+SecretsManagerClient\s*\('
+         r'|new\s+SSMClient\s*\('
+         r'|require\s*\(\s*["\x27]@google-cloud/secret-manager["\x27]'
+         r'|require\s*\(\s*["\x27]@azure/keyvault-secrets["\x27]'
+         r'|' + shared.PCRE_CLOUD_SECRET_HOSTS),
     ]
 
     # ReDoS prevention: diff lines start with ^\+ so they are anchored, but
