@@ -61,18 +61,23 @@ three ecosystems (JS, Python, Ruby) using the shared `CLOUD_SECRET_HOSTS_RE`
 constant. Python adds boto3 SDK patterns; Ruby adds `Aws::SecretsManager`;
 JS adds AWS SDK v3 require/constructor patterns.
 
-**Cross-ecosystem shared constants (beyond the ideas document):** Four shared
+**Cross-ecosystem shared constants (beyond the ideas document):** Five shared
 PCRE fragment constants added to `analysis_shared.py`:
 `IDE_CONFIG_PATHS_RE`, `CLOUD_SECRET_HOSTS_RE`, `CRED_KEYWORDS_RE`,
-`HOME_PATHS_RE`. All ecosystem hooks compose their `DANGEROUS_PATTERNS`
-entries from these constants plus any ecosystem-specific additions. New
-threat intelligence added to any constant propagates to all ecosystems
-automatically.
+`HOME_PATHS_RE`, `EXFIL_RELAY_DOMAINS_RE`. All ecosystem hooks compose their
+`DANGEROUS_PATTERNS` entries from these constants plus any ecosystem-specific
+additions. New threat intelligence added to any constant propagates to all
+ecosystems automatically.
+
+**Ideas 7 and 9 (Group B remainder):** `env-enumeration` and
+`exfil-relay-domain` added to all three ecosystems. `EXFIL_RELAY_DOMAINS_RE`
+added to `analysis_shared.py` (webhook.site, pipedream.net, ngrok, requestbin,
+beeceptor, burpcollaborator.net, m-kosche.com). `env-enumeration` extended
+beyond JS-only: Python adds `json.dumps`/`pprint.pformat` on `os.environ`;
+Ruby adds `JSON.dump(ENV)` and `ENV.to_a` (ENV.to_h excluded as too common).
 
 ### Not yet implemented
 
-- Idea 7: `process.env` enumeration (Group B)
-- Idea 9: Exfiltration relay and C2 domains (Group B)
 - Ideas 10-11: File-tree scan for binaries and suspicious directories (Group C)
 - Ideas 12-13: Git-ref dependency and lockfile foreign URL detection (Group D)
 - Ideas 14-16: Publisher velocity, SLSA provenance, repo metadata (Group E)
@@ -339,7 +344,7 @@ case-insensitive matching, use inline `(?i)`. The pattern is PCRE, not Python
 re. Follow AGENTS.md: use bounded quantifiers `{0,N}`, no nested unbounded
 quantifiers, no catastrophic backtracking.
 
-### Idea 7: Process.env Enumeration [JS only] -- NOT YET IMPLEMENTED
+### Idea 7: Process.env Enumeration [extended to all ecosystems] -- DONE
 
 **Entry:**
 ```python
@@ -384,7 +389,7 @@ published open-source packages.
 
 ---
 
-### Idea 9: Exfiltration Relay and C2 Domains [cross-ecosystem] -- NOT YET IMPLEMENTED
+### Idea 9: Exfiltration Relay and C2 Domains [cross-ecosystem] -- DONE
 
 **Entry:**
 ```python
@@ -731,12 +736,11 @@ Implemented Ideas 1-6 (with improvements) in `hooks_js.py` via
 `_INSTALL_CMD_CHECKS`. Self-publish, ide-config-write, and cloud-secret-api
 also extended to Python and Ruby `DANGEROUS_PATTERNS`.
 
-### Group B: DANGEROUS_PATTERNS Additions (append to list in hooks_js.py)
-Idea 8 (cloud-secret-api) -- DONE, all ecosystems.
-Ideas 7 and 9 -- **not yet implemented**.
-Idea 7 (env enumeration) and Idea 9 (exfil domains): three new entries, no new
-code paths. Estimated effort: 30 minutes.
-Priority: **high** -- nearly zero implementation cost.
+### Group B: DANGEROUS_PATTERNS Additions -- DONE
+All three ideas implemented in all three ecosystems. `EXFIL_RELAY_DOMAINS_RE`
+shared constant added to `analysis_shared.py`. `env-enumeration` extended
+beyond the original JS-only spec to cover Python and Ruby bulk-serialization
+patterns. `exfil-relay-domain` uses the shared constant directly in all hooks.
 
 ### Group C: File-Tree Scan (one new helper shared between download_new and scan)
 Implements Ideas 10-11: binary magic bytes + suspicious directory names.
