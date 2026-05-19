@@ -133,12 +133,12 @@ class Hooks(shared.EcosystemHooks):
          r'|RestClient\.|HTTParty\.(?:get|post)|TCPSocket\.new|UDPSocket\.new)\b'),
         ('credential-env-vars',
          r'ENV\s*\[\s*["\x27][A-Z_]*(?:'
-         + shared.PCRE_CRED_KEYWORDS + r'|BUNDLE_)[A-Z_]*["\x27]\s*\]'),
+         + shared.CRED_KEYWORDS_RE + r'|BUNDLE_)[A-Z_]*["\x27]\s*\]'),
         # [^,]{1,200} rather than [^,]+ to cap backtracking when no quote
         # follows many non-comma characters (ReDoS: O(200^2) not O(n^2)).
         ('home-or-shell-write',
          r'(?:File\.(?:write|open|binwrite)|IO\.write)\s*[^,]{1,200}["\x27](?:'
-         + shared.PCRE_HOME_PATHS + r')'),
+         + shared.HOME_PATHS_RE + r')'),
         ('dynamic-dispatch',
          r'\b(?:__send__|public_send|send)\s*\(\s*(?:params|request|user_input|ENV|ARGV|gets)\b'),
         ('at-exit-hooks',      r'^\s*at_exit\b'),
@@ -146,15 +146,15 @@ class Hooks(shared.EcosystemHooks):
         ('self-publish',
          r'\bgem\s+push\b'),
         # Persistence: writing to IDE or AI-tool config directories.
-        ('ide-config-write', shared.PCRE_IDE_CONFIG_PATHS),
+        ('ide-config-write', shared.IDE_CONFIG_PATHS_RE),
         # Credential harvesting via cloud secret-manager SDKs or direct API calls.
         # Aws::SecretsManager is not caught by network-at-load-scope (which checks
         # Net::HTTP and similar, not the AWS SDK).
-        # Shared provider hostnames come from shared.PCRE_CLOUD_SECRET_HOSTS.
+        # Shared provider hostnames come from shared.CLOUD_SECRET_HOSTS_RE.
         ('cloud-secret-api',
          r'\bAws::SecretsManager::Client\b'
          r'|\bAws::SSM::Client\b'
-         r'|' + shared.PCRE_CLOUD_SECRET_HOSTS),
+         r'|' + shared.CLOUD_SECRET_HOSTS_RE),
     ]
 
     # ReDoS prevention: diff lines start with ^\+ so they are anchored, but

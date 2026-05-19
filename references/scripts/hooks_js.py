@@ -270,10 +270,10 @@ class Hooks(shared.EcosystemHooks):
          r'^\s*require\s*\(\s*["\x27](?:http|https|net|dgram|tls)["\x27]\s*\)'
          r'\.(?:get|request|connect|createServer|createConnection)\s*\('
          r'|^\s*fetch\s*\('),
-        # NPM_TOKEN is covered by NPM_ + [A-Z_]* from PCRE_CRED_KEYWORDS.
+        # NPM_TOKEN is covered by NPM_ + [A-Z_]* from CRED_KEYWORDS_RE.
         ('credential-env-vars',
          r'process\.env\s*(?:\.\s*|\[\s*["\x27])(?:'
-         + shared.PCRE_CRED_KEYWORDS + r'|HEROKU_|VERCEL_|NETLIFY_)[A-Z_]*'),
+         + shared.CRED_KEYWORDS_RE + r'|HEROKU_|VERCEL_|NETLIFY_)[A-Z_]*'),
         ('dynamic-require',
          r'\brequire\s*\(\s*(?:process\.env\.|[^"\'`\)]{0,80}'
          r'(?:user|input|argv|env|request))'),
@@ -288,12 +288,12 @@ class Hooks(shared.EcosystemHooks):
         # fs.open() is included because callers often follow with a write.
         ('home-or-shell-write',
          r'fs\.(?:writeFile(?:Sync)?|appendFile(?:Sync)?|open(?:Sync)?)\s*\([^,)]{0,100}["\x27](?:'
-         + shared.PCRE_HOME_PATHS + r')'),
+         + shared.HOME_PATHS_RE + r')'),
         # Persistence: writing to IDE or AI-tool config directories.
-        ('ide-config-write', shared.PCRE_IDE_CONFIG_PATHS),
+        ('ide-config-write', shared.IDE_CONFIG_PATHS_RE),
         # Credential harvesting via cloud secret-manager SDKs or direct API calls.
         # AWS SDK v3 require() calls are not caught by network-at-load-scope.
-        # Shared provider hostnames come from shared.PCRE_CLOUD_SECRET_HOSTS.
+        # Shared provider hostnames come from shared.CLOUD_SECRET_HOSTS_RE.
         ('cloud-secret-api',
          r'require\s*\(\s*["\x27]@aws-sdk/client-secrets-manager["\x27]'
          r'|require\s*\(\s*["\x27]@aws-sdk/client-ssm["\x27]'
@@ -301,7 +301,7 @@ class Hooks(shared.EcosystemHooks):
          r'|new\s+SSMClient\s*\('
          r'|require\s*\(\s*["\x27]@google-cloud/secret-manager["\x27]'
          r'|require\s*\(\s*["\x27]@azure/keyvault-secrets["\x27]'
-         r'|' + shared.PCRE_CLOUD_SECRET_HOSTS),
+         r'|' + shared.CLOUD_SECRET_HOSTS_RE),
     ]
 
     # ReDoS prevention: diff lines start with ^\+ so they are anchored, but

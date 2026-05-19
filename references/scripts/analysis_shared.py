@@ -982,7 +982,7 @@ def safe_dir_component(name: str, version: str) -> str:
 
 # IDE and AI-tool config file paths.  The path string is language-neutral,
 # so the same PCRE works for Python, Ruby, and JavaScript source scans.
-PCRE_IDE_CONFIG_PATHS: str = (
+IDE_CONFIG_PATHS_RE: str = (
     r'(?:\.vscode|\.idea|\.claude|\.cursor)[/\\]'
     r'(?:tasks|settings|extensions|launch)\.json\b'
     r'|\.config[/\\](?:claude|copilot|cursor|codeium)[/\\]'
@@ -991,7 +991,7 @@ PCRE_IDE_CONFIG_PATHS: str = (
 # Cloud secret-manager API hostnames.  These appear in HTTP calls and SDK
 # configs regardless of language.  Each ecosystem adds its own SDK-specific
 # alternatives on top of these shared provider hostnames.
-PCRE_CLOUD_SECRET_HOSTS: str = (
+CLOUD_SECRET_HOSTS_RE: str = (
     r'secretsmanager\.[a-z0-9-]{1,50}\.amazonaws\.com'
     r'|ssm\.[a-z0-9-]{1,50}\.amazonaws\.com'
     r'|secretmanager\.googleapis\.com'
@@ -1004,7 +1004,7 @@ PCRE_CLOUD_SECRET_HOSTS: str = (
 # language-specific env-access syntax and may append their own entries
 # (e.g. BUNDLE_ for Ruby, HEROKU_/VERCEL_/NETLIFY_ for JavaScript).
 # Note: NPM_ already matches NPM_TOKEN, NPM_SECRET, etc. via [A-Z_]*.
-PCRE_CRED_KEYWORDS: str = (
+CRED_KEYWORDS_RE: str = (
     r'KEY|SECRET|TOKEN|PASSWORD|CREDENTIAL'
     r'|AWS_|GH_|GITHUB_|CI_|NPM_|PYPI_'
 )
@@ -1012,7 +1012,7 @@ PCRE_CRED_KEYWORDS: str = (
 # Home-directory and shell-config path targets for persistence payloads.
 # Used inside (?:...) groups in file-write detection patterns.
 # The same paths are suspicious regardless of which language writes them.
-PCRE_HOME_PATHS: str = (
+HOME_PATHS_RE: str = (
     r'~\/|\/home\/|\.bashrc|\.zshrc|\.profile|\.bash_profile|\.ssh\/'
 )
 
