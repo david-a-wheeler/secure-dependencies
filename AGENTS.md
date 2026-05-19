@@ -1,8 +1,23 @@
 # AGENTS.md
 
+## Size, reuse, and ecosystem sharing
+
+Try to keep implementation short and simple
+while still providing functionality and security.
+
+In particular, define and use methods instead of repeating
+code constructs where reasonable.
+
+Try to share constructs between ecosystems, such as patterns to search for,
+so lessons learned from one ecosystem are more likely to be shared.
+
+## Style
+
 Do not use long dashes (em dashes or en dashes).
 A `--` should only be used to introduce long-name options.
 Instead use other constructs such as colons, semicolons, or parentheses.
+
+Where reasonable, keep text lines at 78 or fewer characters.
 
 ## Command injection prevention (verify on every subprocess call)
 
