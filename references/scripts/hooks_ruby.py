@@ -111,7 +111,8 @@ class Hooks(shared.EcosystemHooks):
         'eval/exec variants, shell execution, obfuscated execution, '
         'Marshal.load, '
         'network at load scope, credential env-var access, home-dir writes, '
-        'dynamic dispatch on external input, at_exit hooks'
+        'dynamic dispatch on external input, at_exit hooks, '
+        'self-publish (worm propagation), IDE config writes, cloud secret-manager API calls'
     )
 
     # ReDoS prevention (CWE-400): all patterns use bounded quantifiers so that
@@ -142,6 +143,24 @@ class Hooks(shared.EcosystemHooks):
         ('dynamic-dispatch',
          r'\b(?:__send__|public_send|send)\s*\(\s*(?:params|request|user_input|ENV|ARGV|gets)\b'),
         ('at-exit-hooks',      r'^\s*at_exit\b'),
+        # Worm propagation: publishing to RubyGems from inside an install hook.
+        ('self-publish',
+         r'\bgem\s+push\b'),
+        # Persistence: writing to IDE or AI-tool config directories.
+        ('ide-config-write',
+         r'(?:\.vscode|\.idea|\.claude|\.cursor)[/\\]'
+         r'(?:tasks|settings|extensions|launch)\.json\b'
+         r'|\.config[/\\](?:claude|copilot|cursor|codeium)[/\\]'),
+        # Credential harvesting via cloud secret-manager SDKs or direct API calls.
+        # Aws::SecretsManager is not caught by network-at-load-scope (which checks
+        # Net::HTTP and similar, not the AWS SDK).
+        ('cloud-secret-api',
+         r'\bAws::SecretsManager::Client\b'
+         r'|\bAws::SSM::Client\b'
+         r'|secretsmanager\.[a-z0-9-]{1,50}\.amazonaws\.com'
+         r'|ssm\.[a-z0-9-]{1,50}\.amazonaws\.com'
+         r'|secretmanager\.googleapis\.com'
+         r'|vault\.azure\.net'),
     ]
 
     # ReDoS prevention: diff lines start with ^\+ so they are anchored, but

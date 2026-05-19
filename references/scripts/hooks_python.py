@@ -246,7 +246,8 @@ class Hooks(shared.EcosystemHooks):
         'eval/exec variants, shell execution (os.system, subprocess with shell=True), '
         'obfuscated execution, unsafe deserialization (pickle, yaml.load, marshal), '
         'network calls at import scope, credential env-var access, home-dir writes, '
-        'dynamic imports on external input, atexit/registration hooks'
+        'dynamic imports on external input, atexit/registration hooks, '
+        'self-publish (worm propagation), IDE config writes, cloud secret-manager API calls'
     )
 
     DANGEROUS_PATTERNS: list[tuple[str, str]] = [
@@ -281,6 +282,32 @@ class Hooks(shared.EcosystemHooks):
          r'(?:request|user|input|argv|environ|getenv)\b'),
         ('atexit-hooks',
          r'^\s*(?:import\s+atexit\b|atexit\.register\s*\()'),
+        # Worm propagation: publishing to PyPI from inside an install hook.
+        # Two twine forms: shell string "twine upload" and list ["twine","upload"].
+        ('self-publish',
+         r'\btwine\s+upload\b'
+         r'|["\x27]twine["\x27][^)\n]{0,80}["\x27]upload["\x27]'
+         r'|\bpoetry\s+publish\b'
+         r'|\bflit\s+publish\b'
+         r'|\bhatch\s+publish\b'
+         r'|\bpython[^\n]{0,60}setup\.py[^\n]{0,40}\bupload\b'),
+        # Persistence: writing to IDE or AI-tool config directories.
+        ('ide-config-write',
+         r'(?:\.vscode|\.idea|\.claude|\.cursor)[/\\]'
+         r'(?:tasks|settings|extensions|launch)\.json\b'
+         r'|\.config[/\\](?:claude|copilot|cursor|codeium)[/\\]'),
+        # Credential harvesting via cloud secret-manager SDKs or direct API calls.
+        # boto3 calls are not caught by network-at-load-scope (which checks urllib etc.).
+        ('cloud-secret-api',
+         r'\bboto3\.client\s*\(\s*["\x27]secretsmanager["\x27]'
+         r'|\bboto3\.client\s*\(\s*["\x27]ssm["\x27]'
+         r'|secretsmanager\.[a-z0-9-]{1,50}\.amazonaws\.com'
+         r'|ssm\.[a-z0-9-]{1,50}\.amazonaws\.com'
+         r'|secretmanager\.googleapis\.com'
+         r'|google\.cloud\.secretmanager'
+         r'|from\s+google\.cloud\s+import\s+secretmanager\b'
+         r'|azure\.keyvault\.secrets\b'
+         r'|vault\.azure\.net'),
     ]
 
     DIFF_PATTERNS: list[tuple[str, str]] = [
