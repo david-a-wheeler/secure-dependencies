@@ -43,12 +43,20 @@ _NPM_NAME_RE = re.compile(r'^[@A-Za-z0-9][A-Za-z0-9._/-]{0,213}$')
 # character classes; no nested unbounded quantifiers.
 _INSTALL_CMD_CHECKS: list[tuple[str, re.Pattern[str]]] = [
     # Shai-Halud pattern: bootstrap a secondary JS runtime to evade npm policy.
-    # Known false positive: ts-node is also used by legitimate TypeScript build
-    # scripts (e.g. ts-node scripts/build.ts).  The AI should check context.
+    # bun/deno/pkgx are rarely legitimate in install hooks; high suspicion.
+    # bunx is Bun's npx equivalent and equally suspicious here.
     ('INSTALL_BOOTSTRAP_RUNTIME', re.compile(
-        r'\b(?:bun|deno|tsx|ts-node|pkgx)\s+(?:run\s+)?[\w./]{1,120}\.(?:js|ts|mjs)\b'
+        r'\b(?:bun|deno|pkgx)\s+(?:run\s+)?[\w./]{1,120}\.(?:js|ts|mjs|cjs)\b'
+        r'|\bbunx\s+[\w@/-]{1,120}\b'
         r'|\bsetup_bun\.js\b'
         r'|\bbun_environment\.js\b',
+        re.IGNORECASE,
+    )),
+    # ts-node/tsx are common TypeScript runners used in legitimate build scripts
+    # (e.g. ts-node scripts/build.ts), so they get a separate lower-urgency
+    # signal rather than being grouped with bun/deno above.
+    ('INSTALL_TSRUNNER_IN_HOOK', re.compile(
+        r'\b(?:tsx|ts-node)\s+(?:run\s+)?[\w./]{1,120}\.(?:ts|mjs|cjs)\b',
         re.IGNORECASE,
     )),
     # Worm propagation: publish other packages during install.
@@ -72,14 +80,17 @@ _INSTALL_CMD_CHECKS: list[tuple[str, re.Pattern[str]]] = [
         re.IGNORECASE,
     )),
     # Persistence: write to shell startup files.
+    # Require a write operator (>> or tee) to avoid false positives from
+    # packages that echo instructions like 'Add this to your ~/.bashrc'.
     ('INSTALL_SHELL_CONFIG_WRITE', re.compile(
-        r'(?:~|HOME)[^\n]{0,60}\.(?:bashrc|zshrc|profile|bash_profile)\b',
+        r'>>\s*(?:~|\$\{?HOME\}?)[^\n]{0,60}\.(?:bashrc|zshrc|profile|bash_profile)\b'
+        r'|\btee\s+(?:-a\s+)?(?:~|\$\{?HOME\}?)[^\n]{0,60}\.(?:bashrc|zshrc|profile|bash_profile)\b',
         re.IGNORECASE,
     )),
     # Dead-man's-switch: destructive wipe commands.
     ('INSTALL_DESTRUCTIVE_WIPE', re.compile(
         r'\bdel\s+/[FQS]'
-        r'|\brm\s+-[rf]{1,3}\s+[~/]'
+        r'|\brm\s+-[rf]{1,3}\s+(?:[~/]|\$\{?HOME\}?)'
         r'|\bshred\s+-[uvzn]{1,6}'
         r'|\bcipher\s+/W:'
         r'|\bdd\s+if=/dev/zero\s+of=',
@@ -90,19 +101,23 @@ _INSTALL_CMD_CHECKS: list[tuple[str, re.Pattern[str]]] = [
     # the gh CLI to be installed on the reviewer's machine; we are scanning
     # the malicious package's code, not invoking gh ourselves.
     ('INSTALL_CREDENTIAL_CLI', re.compile(
-        r'\bgh\s+auth\s+token\b'
+        r'\bgh\s+auth\s+(?:token|status)\b'
         r'|\bgit\s+config\s+--get\b[^\n]{0,80}credential'
         r'|\bnpm\s+token\s+(?:list|create)\b'
         r'|\baws\s+configure\s+(?:get|list)\b'
         r'|\bgcloud\s+auth\s+print-access-token\b'
-        r'|\baz\s+account\s+get-access-token\b',
+        r'|\baz\s+account\s+get-access-token\b'
+        r'|\bcat\s+[^\n]{0,40}\.npmrc\b'
+        r'|\bcat\s+[^\n]{0,40}\.netrc\b',
         re.IGNORECASE,
     )),
     # Credential harvesting via direct cloud secret-manager API calls.
     ('INSTALL_CLOUD_SECRET_API', re.compile(
         r'secretsmanager\.[a-z0-9-]{1,50}\.amazonaws\.com'
+        r'|ssm\.[a-z0-9-]{1,50}\.amazonaws\.com'
         r'|secretmanager\.googleapis\.com'
-        r'|kms\.[a-z0-9-]{1,50}\.amazonaws\.com',
+        r'|kms\.[a-z0-9-]{1,50}\.amazonaws\.com'
+        r'|vault\.azure\.net',
         re.IGNORECASE,
     )),
 ]
