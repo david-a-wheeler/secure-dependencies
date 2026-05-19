@@ -132,14 +132,13 @@ class Hooks(shared.EcosystemHooks):
          r'^\s*(?:Net::HTTP|require\s+["\x27]open-uri["\x27]|URI\.open|Faraday\.new'
          r'|RestClient\.|HTTParty\.(?:get|post)|TCPSocket\.new|UDPSocket\.new)\b'),
         ('credential-env-vars',
-         r'ENV\s*\[\s*["\x27][A-Z_]*'
-         r'(?:KEY|SECRET|TOKEN|PASSWORD|CREDENTIAL|AWS_|GH_|GITHUB_|CI_|NPM_|PYPI_|BUNDLE_)'
-         r'[A-Z_]*["\x27]\s*\]'),
+         r'ENV\s*\[\s*["\x27][A-Z_]*(?:'
+         + shared.PCRE_CRED_KEYWORDS + r'|BUNDLE_)[A-Z_]*["\x27]\s*\]'),
         # [^,]{1,200} rather than [^,]+ to cap backtracking when no quote
         # follows many non-comma characters (ReDoS: O(200^2) not O(n^2)).
         ('home-or-shell-write',
-         r'(?:File\.(?:write|open|binwrite)|IO\.write)\s*[^,]{1,200}'
-         r'["\x27](?:~\/|\/home\/|\.bashrc|\.zshrc|\.profile|\.bash_profile|\.ssh\/)'),
+         r'(?:File\.(?:write|open|binwrite)|IO\.write)\s*[^,]{1,200}["\x27](?:'
+         + shared.PCRE_HOME_PATHS + r')'),
         ('dynamic-dispatch',
          r'\b(?:__send__|public_send|send)\s*\(\s*(?:params|request|user_input|ENV|ARGV|gets)\b'),
         ('at-exit-hooks',      r'^\s*at_exit\b'),

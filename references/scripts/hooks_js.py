@@ -249,7 +249,7 @@ class Hooks(shared.EcosystemHooks):
         'dynamic require on external input, '
         'prototype pollution '
         '(Object.prototype assignment, __proto__ assignment), '
-        'IDE config writes, cloud secret-manager API calls'
+        'home-dir writes, IDE config writes, cloud secret-manager API calls'
     )
 
     # ReDoS prevention (CWE-400): all patterns use bounded quantifiers so that
@@ -270,10 +270,10 @@ class Hooks(shared.EcosystemHooks):
          r'^\s*require\s*\(\s*["\x27](?:http|https|net|dgram|tls)["\x27]\s*\)'
          r'\.(?:get|request|connect|createServer|createConnection)\s*\('
          r'|^\s*fetch\s*\('),
+        # NPM_TOKEN is covered by NPM_ + [A-Z_]* from PCRE_CRED_KEYWORDS.
         ('credential-env-vars',
-         r'process\.env\s*(?:\.\s*|\[\s*["\x27])'
-         r'(?:AWS_|GITHUB_|GH_|NPM_TOKEN|CI_|PYPI_|HEROKU_|VERCEL_|NETLIFY_)'
-         r'[A-Z_]*'),
+         r'process\.env\s*(?:\.\s*|\[\s*["\x27])(?:'
+         + shared.PCRE_CRED_KEYWORDS + r'|HEROKU_|VERCEL_|NETLIFY_)[A-Z_]*'),
         ('dynamic-require',
          r'\brequire\s*\(\s*(?:process\.env\.|[^"\'`\)]{0,80}'
          r'(?:user|input|argv|env|request))'),
@@ -284,6 +284,11 @@ class Hooks(shared.EcosystemHooks):
          r'|__proto__\s*[=:]\s*\{'),
         ('module-load-socket',
          r'^\s*new\s+(?:net\.Socket|tls\.TLSSocket|dgram\.Socket)\s*\('),
+        # Persistence: writing to home-dir or shell-config paths.
+        # fs.open() is included because callers often follow with a write.
+        ('home-or-shell-write',
+         r'fs\.(?:writeFile(?:Sync)?|appendFile(?:Sync)?|open(?:Sync)?)\s*\([^,)]{0,100}["\x27](?:'
+         + shared.PCRE_HOME_PATHS + r')'),
         # Persistence: writing to IDE or AI-tool config directories.
         ('ide-config-write', shared.PCRE_IDE_CONFIG_PATHS),
         # Credential harvesting via cloud secret-manager SDKs or direct API calls.

@@ -271,12 +271,11 @@ class Hooks(shared.EcosystemHooks):
         ('network-at-load-scope',
          r'^\s*(?:urllib\.request\.|requests\.|http\.client\.|httpx\.|aiohttp\.|socket\.|ftplib\.|smtplib\.)'),
         ('credential-env-vars',
-         r'os\.environ\s*(?:\[|\s*\.get\s*\()\s*["\']'
-         r'[A-Z_]*(?:KEY|SECRET|TOKEN|PASSWORD|CREDENTIAL|AWS_|GH_|GITHUB_|CI_|NPM_|PYPI_)'
-         r'[A-Z_]*["\']'),
+         r'os\.environ\s*(?:\[|\s*\.get\s*\()\s*["\'][A-Z_]*(?:'
+         + shared.PCRE_CRED_KEYWORDS + r')[A-Z_]*["\']'),
         ('home-or-shell-write',
-         r'(?:open|io\.open|pathlib\.Path)\s*\([^)]*["\']'
-         r'(?:~\/|\/home\/|\.bashrc|\.zshrc|\.profile|\.bash_profile|\.ssh\/)'),
+         r'(?:open|io\.open|pathlib\.Path)\s*\([^)]*["\'](?:'
+         + shared.PCRE_HOME_PATHS + r')'),
         ('dynamic-import',
          r'\b(?:importlib\.import_module|__import__)\s*\([^)]*'
          r'(?:request|user|input|argv|environ|getenv)\b'),

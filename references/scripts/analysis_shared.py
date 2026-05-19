@@ -998,6 +998,24 @@ PCRE_CLOUD_SECRET_HOSTS: str = (
     r'|vault\.azure\.net'
 )
 
+# Credential keyword fragment for credential-env-vars patterns.
+# Covers generic secret names (KEY, SECRET, TOKEN...) and provider-specific
+# prefixes (AWS_, GH_, NPM_, ...).  Ecosystems wrap this in their
+# language-specific env-access syntax and may append their own entries
+# (e.g. BUNDLE_ for Ruby, HEROKU_/VERCEL_/NETLIFY_ for JavaScript).
+# Note: NPM_ already matches NPM_TOKEN, NPM_SECRET, etc. via [A-Z_]*.
+PCRE_CRED_KEYWORDS: str = (
+    r'KEY|SECRET|TOKEN|PASSWORD|CREDENTIAL'
+    r'|AWS_|GH_|GITHUB_|CI_|NPM_|PYPI_'
+)
+
+# Home-directory and shell-config path targets for persistence payloads.
+# Used inside (?:...) groups in file-write detection patterns.
+# The same paths are suspicious regardless of which language writes them.
+PCRE_HOME_PATHS: str = (
+    r'~\/|\/home\/|\.bashrc|\.zshrc|\.profile|\.bash_profile|\.ssh\/'
+)
+
 
 def blind_scan(
     label: str,
