@@ -227,6 +227,9 @@ def write_signals(  # noqa: C901
         risk_parts.append('NATIVE_EXTENSION')
     if manifest.get('post_install_msg') == 'YES':
         risk_parts.append('POST_INSTALL_MESSAGE')
+    _install_cmd_warns = manifest.get('install_cmd_warnings', [])
+    if _install_cmd_warns:
+        risk_parts.append(f'INSTALL_CMD_ATTACK({len(_install_cmd_warns)})')
     if diff_scan_matches > 0:
         risk_parts.append(f'DIFF_SCAN_MATCHES({diff_scan_matches})')
     _security_violations = [f for f in failures if f.startswith('SECURITY_VIOLATION:')]
@@ -396,6 +399,14 @@ def write_signals(  # noqa: C901
         _concerns.append((
             'executables',
             'YES  [new executables added to PATH; risk of persistence or path hijacking]',
+        ))
+    for _icw in manifest.get('install_cmd_warnings', []):
+        _icw_sig = _icw.split(':')[0]
+        _icw_hook = _icw.split(':')[1] if ':' in _icw else 'install script'
+        _concerns.append((
+            _icw_sig.lower(),
+            f'detected in {_icw_hook}  '
+            '[supply chain attack indicator; see manifest-analysis.txt]',
         ))
     if diff_mode and diff_lines > 500:
         _concerns.append((

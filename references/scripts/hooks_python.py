@@ -246,7 +246,8 @@ class Hooks(shared.EcosystemHooks):
         'eval/exec variants, shell execution (os.system, subprocess with shell=True), '
         'obfuscated execution, unsafe deserialization (pickle, yaml.load, marshal), '
         'network calls at import scope, credential env-var access, home-dir writes, '
-        'dynamic imports on external input, atexit/registration hooks'
+        'dynamic imports on external input, atexit/registration hooks, '
+        'self-publish (worm propagation), IDE config writes, cloud secret-manager API calls'
     )
 
     DANGEROUS_PATTERNS: list[tuple[str, str]] = [
@@ -270,17 +271,45 @@ class Hooks(shared.EcosystemHooks):
         ('network-at-load-scope',
          r'^\s*(?:urllib\.request\.|requests\.|http\.client\.|httpx\.|aiohttp\.|socket\.|ftplib\.|smtplib\.)'),
         ('credential-env-vars',
-         r'os\.environ\s*(?:\[|\s*\.get\s*\()\s*["\']'
-         r'[A-Z_]*(?:KEY|SECRET|TOKEN|PASSWORD|CREDENTIAL|AWS_|GH_|GITHUB_|CI_|NPM_|PYPI_)'
-         r'[A-Z_]*["\']'),
+         r'os\.environ\s*(?:\[|\s*\.get\s*\()\s*["\'][A-Z_]*(?:'
+         + shared.CRED_KEYWORDS_RE + r')[A-Z_]*["\']'),
         ('home-or-shell-write',
-         r'(?:open|io\.open|pathlib\.Path)\s*\([^)]*["\']'
-         r'(?:~\/|\/home\/|\.bashrc|\.zshrc|\.profile|\.bash_profile|\.ssh\/)'),
+         r'(?:open|io\.open|pathlib\.Path)\s*\([^)]*["\'](?:'
+         + shared.HOME_PATHS_RE + r')'),
         ('dynamic-import',
          r'\b(?:importlib\.import_module|__import__)\s*\([^)]*'
          r'(?:request|user|input|argv|environ|getenv)\b'),
         ('atexit-hooks',
          r'^\s*(?:import\s+atexit\b|atexit\.register\s*\()'),
+        # Worm propagation: publishing to PyPI from inside an install hook.
+        # Two twine forms: shell string "twine upload" and list ["twine","upload"].
+        ('self-publish',
+         r'\btwine\s+upload\b'
+         r'|["\x27]twine["\x27][^)\n]{0,80}["\x27]upload["\x27]'
+         r'|\bpoetry\s+publish\b'
+         r'|\bflit\s+publish\b'
+         r'|\bhatch\s+publish\b'
+         r'|\bpython[^\n]{0,60}setup\.py[^\n]{0,40}\bupload\b'),
+        # Persistence: writing to IDE or AI-tool config directories.
+        ('ide-config-write', shared.IDE_CONFIG_PATHS_RE),
+        # Credential harvesting via cloud secret-manager SDKs or direct API calls.
+        # boto3 calls are not caught by network-at-load-scope (which checks urllib etc.).
+        # Shared provider hostnames come from shared.CLOUD_SECRET_HOSTS_RE.
+        ('cloud-secret-api',
+         r'\bboto3\.client\s*\(\s*["\x27]secretsmanager["\x27]'
+         r'|\bboto3\.client\s*\(\s*["\x27]ssm["\x27]'
+         r'|google\.cloud\.secretmanager'
+         r'|from\s+google\.cloud\s+import\s+secretmanager\b'
+         r'|azure\.keyvault\.secrets\b'
+         r'|' + shared.CLOUD_SECRET_HOSTS_RE),
+        # Bulk env-var serialization: harvest pattern that dumps the entire
+        # environment to a string or structured object.  (?:dict\s*\(\s*)?
+        # is a short optional prefix (no backtracking cascade) that matches
+        # json.dumps(dict(os.environ)) as well as json.dumps(os.environ).
+        ('env-enumeration',
+         r'(?:json\.dumps|pprint\.pformat)\s*\(\s*(?:dict\s*\(\s*)?os\.environ\b'),
+        # Exfiltration relay services and known campaign C2 domains.
+        ('exfil-relay-domain', shared.EXFIL_RELAY_DOMAINS_RE),
     ]
 
     DIFF_PATTERNS: list[tuple[str, str]] = [

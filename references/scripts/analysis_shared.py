@@ -970,6 +970,68 @@ def safe_dir_component(name: str, version: str) -> str:
     return component
 
 
+# ---------------------------------------------------------------------------
+# Shared PCRE fragments for ecosystem DANGEROUS_PATTERNS
+# ---------------------------------------------------------------------------
+# Raw PCRE strings (suitable for grep -P) shared by two or more ecosystem
+# hooks.  Ecosystems use them directly when the pattern is identical, or
+# concatenate them as extra | alternatives when they also need SDK-specific
+# prefixes.
+#
+# ReDoS: all fragments use bounded quantifiers or fixed-length alternatives.
+
+# IDE and AI-tool config file paths.  The path string is language-neutral,
+# so the same PCRE works for Python, Ruby, and JavaScript source scans.
+IDE_CONFIG_PATHS_RE: str = (
+    r'(?:\.vscode|\.idea|\.claude|\.cursor)[/\\]'
+    r'(?:tasks|settings|extensions|launch)\.json\b'
+    r'|\.config[/\\](?:claude|copilot|cursor|codeium)[/\\]'
+)
+
+# Cloud secret-manager API hostnames.  These appear in HTTP calls and SDK
+# configs regardless of language.  Each ecosystem adds its own SDK-specific
+# alternatives on top of these shared provider hostnames.
+CLOUD_SECRET_HOSTS_RE: str = (
+    r'secretsmanager\.[a-z0-9-]{1,50}\.amazonaws\.com'
+    r'|ssm\.[a-z0-9-]{1,50}\.amazonaws\.com'
+    r'|secretmanager\.googleapis\.com'
+    r'|vault\.azure\.net'
+)
+
+# Credential keyword fragment for credential-env-vars patterns.
+# Covers generic secret names (KEY, SECRET, TOKEN...) and provider-specific
+# prefixes (AWS_, GH_, NPM_, ...).  Ecosystems wrap this in their
+# language-specific env-access syntax and may append their own entries
+# (e.g. BUNDLE_ for Ruby, HEROKU_/VERCEL_/NETLIFY_ for JavaScript).
+# Note: NPM_ already matches NPM_TOKEN, NPM_SECRET, etc. via [A-Z_]*.
+CRED_KEYWORDS_RE: str = (
+    r'KEY|SECRET|TOKEN|PASSWORD|CREDENTIAL'
+    r'|AWS_|GH_|GITHUB_|CI_|NPM_|PYPI_'
+)
+
+# Home-directory and shell-config path targets for persistence payloads.
+# Used inside (?:...) groups in file-write detection patterns.
+# The same paths are suspicious regardless of which language writes them.
+HOME_PATHS_RE: str = (
+    r'~\/|\/home\/|\.bashrc|\.zshrc|\.profile|\.bash_profile|\.ssh\/'
+)
+
+# Exfiltration relay services and known campaign C2 domains that appear as
+# string literals in package source.  These services have essentially no
+# legitimate use inside published packages; a match is a high-confidence
+# attack signal.  The alternation uses fixed-length domain segments to
+# avoid backtracking (each component is an anchored literal).
+EXFIL_RELAY_DOMAINS_RE: str = (
+    r'(?i)(?:webhook\.site'
+    r'|pipedream\.net'
+    r'|requestbin\.(?:com|net)'
+    r'|beeceptor\.com'
+    r'|ngrok\.(?:io|app)'
+    r'|burpcollaborator\.net'
+    r'|m-kosche\.com)'
+)
+
+
 def blind_scan(
     label: str,
     pattern: str,

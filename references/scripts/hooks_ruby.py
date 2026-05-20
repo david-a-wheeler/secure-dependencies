@@ -111,7 +111,8 @@ class Hooks(shared.EcosystemHooks):
         'eval/exec variants, shell execution, obfuscated execution, '
         'Marshal.load, '
         'network at load scope, credential env-var access, home-dir writes, '
-        'dynamic dispatch on external input, at_exit hooks'
+        'dynamic dispatch on external input, at_exit hooks, '
+        'self-publish (worm propagation), IDE config writes, cloud secret-manager API calls'
     )
 
     # ReDoS prevention (CWE-400): all patterns use bounded quantifiers so that
@@ -131,17 +132,38 @@ class Hooks(shared.EcosystemHooks):
          r'^\s*(?:Net::HTTP|require\s+["\x27]open-uri["\x27]|URI\.open|Faraday\.new'
          r'|RestClient\.|HTTParty\.(?:get|post)|TCPSocket\.new|UDPSocket\.new)\b'),
         ('credential-env-vars',
-         r'ENV\s*\[\s*["\x27][A-Z_]*'
-         r'(?:KEY|SECRET|TOKEN|PASSWORD|CREDENTIAL|AWS_|GH_|GITHUB_|CI_|NPM_|PYPI_|BUNDLE_)'
-         r'[A-Z_]*["\x27]\s*\]'),
+         r'ENV\s*\[\s*["\x27][A-Z_]*(?:'
+         + shared.CRED_KEYWORDS_RE + r'|BUNDLE_)[A-Z_]*["\x27]\s*\]'),
         # [^,]{1,200} rather than [^,]+ to cap backtracking when no quote
         # follows many non-comma characters (ReDoS: O(200^2) not O(n^2)).
         ('home-or-shell-write',
-         r'(?:File\.(?:write|open|binwrite)|IO\.write)\s*[^,]{1,200}'
-         r'["\x27](?:~\/|\/home\/|\.bashrc|\.zshrc|\.profile|\.bash_profile|\.ssh\/)'),
+         r'(?:File\.(?:write|open|binwrite)|IO\.write)\s*[^,]{1,200}["\x27](?:'
+         + shared.HOME_PATHS_RE + r')'),
         ('dynamic-dispatch',
          r'\b(?:__send__|public_send|send)\s*\(\s*(?:params|request|user_input|ENV|ARGV|gets)\b'),
         ('at-exit-hooks',      r'^\s*at_exit\b'),
+        # Worm propagation: publishing to RubyGems from inside an install hook.
+        ('self-publish',
+         r'\bgem\s+push\b'),
+        # Persistence: writing to IDE or AI-tool config directories.
+        ('ide-config-write', shared.IDE_CONFIG_PATHS_RE),
+        # Credential harvesting via cloud secret-manager SDKs or direct API calls.
+        # Aws::SecretsManager is not caught by network-at-load-scope (which checks
+        # Net::HTTP and similar, not the AWS SDK).
+        # Shared provider hostnames come from shared.CLOUD_SECRET_HOSTS_RE.
+        ('cloud-secret-api',
+         r'\bAws::SecretsManager::Client\b'
+         r'|\bAws::SSM::Client\b'
+         r'|' + shared.CLOUD_SECRET_HOSTS_RE),
+        # Bulk env-var serialization: harvest pattern that converts the entire
+        # ENV hash to JSON or an Array of pairs.  ENV.to_h is excluded (very
+        # common for subprocess env copies); ENV.to_a and JSON serialization
+        # are the unambiguous bulk-collect forms.
+        ('env-enumeration',
+         r'JSON\.(?:dump|generate)\s*\(\s*ENV\b'
+         r'|ENV\.to_a\b'),
+        # Exfiltration relay services and known campaign C2 domains.
+        ('exfil-relay-domain', shared.EXFIL_RELAY_DOMAINS_RE),
     ]
 
     # ReDoS prevention: diff lines start with ^\+ so they are anchored, but
