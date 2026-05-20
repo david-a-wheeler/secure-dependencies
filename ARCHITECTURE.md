@@ -154,6 +154,40 @@ injection instructions is treated as an attack, not as something to be
 analyzed further. These can only detect fairly naive attacks, but
 nevertheless they provide some limited protection against naive attacks.
 
+## Mitigations for supply chain attacks like Shai-Halud
+
+The Shai-Halud npm supply-chain worm (late 2025, major waves May 2026)
+used several techniques for persistence and
+propagation. This skill includes specific deterministic patterns and
+heuristics to detect and counter Shai-Halud and similar attacks:
+
+- **Alternative-runtime bootstrapping**: Detects when an install script
+  invokes a secondary runtime (like Bun, Deno, or `tsx`) to evade the
+  standard environment's security model.
+- **Self-propagation patterns**: Flags attempts to run `npm publish`,
+  `gem push`, or `twine upload` during installation. This is a clear signal of
+  a worm attempting to infect the developer's other packages.
+- **IDE and AI-tool configuration poisoning**: Monitors for unauthorized
+  writes to sensitive configuration paths like `.vscode/tasks.json`,
+  `.idea/`, or `.claude/settings.json`. These are used for persistence
+  or to subvert the developer's AI assistant.
+- **CLI credential harvesting**: Specifically scans for calls to credential
+  management tools (e.g., `gh auth token`, `aws configure get`,
+  `gcloud auth print-access-token`) inside install hooks.
+- **Exfiltration relay detection**: Maintains a blocklist of known C2
+  and exfiltration relay domains (e.g., `webhook.site`, `pipedream.net`,
+  `m-kosche.com`) frequently used by attackers.
+- **Bulk environment enumeration**: Detects patterns that attempt to
+  serialize the entire environment (e.g., `JSON.stringify(process.env)`
+  or `json.dumps(os.environ)`), which is a common precursor to
+  credential exfiltration.
+- **Destructive "dead man's switch" payloads**: Scans for commands that
+  wipe the filesystem (e.g., `shred`, `rm -rf ~/`) if the attack is detected
+  or its token is revoked.
+
+These checks are integrated into the basic analysis phase and apply
+across all supported ecosystems (JavaScript, Python, and Ruby).
+
 ## Output sanitization
 
 The `Printer` class in `analysis_shared.py` wraps all writes to output files

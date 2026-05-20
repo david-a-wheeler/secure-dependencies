@@ -41,7 +41,8 @@ In all three modes, the skill guards against:
 - **Long-term risk**: abandoned projects, missing or proprietary licenses
   (license health is a leading indicator of security abandonment)
 - **Supply chain attacks**: typosquatting, slopsquatting, compromised
-  maintainer accounts, malicious package developers
+  maintainer accounts, malicious package developers (including lessons
+  learned from the Shai-Halud attacks)
 - **Adversarial content**: package files crafted to manipulate AI reviewers
 
 ## Requirements
@@ -184,7 +185,8 @@ We take active steps to counter subverted AI agents, but since we use
 AI agents to read potentially-malicious text, there's only so much we can do.
 
 See [ARCHITECTURE.md](./ARCHITECTURE.md) for how we work to counter
-attacks.
+attacks, including specific mitigations for patterns observed in
+Shai-Halud.
 
 See [SECURITY.md](./SECURITY.md) for how to report vulnerabilities in
 this program.
