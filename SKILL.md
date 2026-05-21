@@ -1,24 +1,21 @@
 ---
 name: secure-dependencies
 description: |
-  Use this skill for any task involving dependency security: evaluating
-  potential new dependencies before adding them, updating existing
-  dependencies safely, or auditing the health and license status of
-  current dependencies.
+  Use this skill for any task involving the security of software
+  dependencies: evaluating packages before adding them, updating
+  dependencies safely, applying Dependabot or Renovate alerts, or
+  auditing the health and license status of currently installed packages.
 
-  Triggered by phrases like:
-  - "update dependencies", "bundle update", "upgrade X"
-  - "apply Dependabot alerts"
-  - "add dependency X", "should I use X", "evaluate X", "is X safe to add"
-  - "audit our dependencies", "are our deps healthy", "check our licenses",
-    "review what we're using", "how maintained are our gems"
-  - "securely update", "check for vulnerabilities in our dependencies"
+  Use it whenever the user works with a package manager (pip, npm, yarn,
+  bundler/gem, cargo, composer, go mod) or asks about a specific library,
+  even if they do not use the words "dependency" or "security." Common
+  cases: npm install, bundle update, pip install, yarn upgrade, checking
+  if a package is maintained or licensed, or asking "should I use X."
 
-  This skill guards against both unintentional vulnerabilities
-  (insecure defaults, unmaintained projects, licensing problems that predict
-  long-term security abandonment) and supply chain attacks
-  (typosquatting, slopsquatting, package maintainer account takeovers,
-  and malicious package developers)
+  This skill guards against unintentional vulnerabilities (insecure
+  defaults, unmaintained packages, license problems) and supply chain
+  attacks (typosquatting, slopsquatting, compromised maintainer
+  accounts, malicious packages).
 license: MIT
 compatibility: Requires Python 3.10+ (standard library only, no extra install
   needed). Works with any Agent Skills-compatible agent. Optional tools for
