@@ -1,6 +1,6 @@
 PYTHON ?= python3
 
-all: test syntax_valid emdash
+all: test syntax_valid emdash validate
 	@echo Verification complete
 
 test:
@@ -22,4 +22,8 @@ emdash:
 	        -e "$$(printf '\342\200\223')"
 	@echo 'OK, no issues found'
 
-.PHONY: all test syntax_valid emdash
+validate:
+	@echo "Validating SKILL.md frontmatter:"
+	$(PYTHON) scripts/validate_skill.py
+
+.PHONY: all test syntax_valid emdash validate

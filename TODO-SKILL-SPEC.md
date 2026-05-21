@@ -382,12 +382,15 @@ spec requirements we care about directly:
 
 ### Phase 6: Investigate packaging (before implementing)
 
-- [ ] Check the agentskills GitHub repo for a `.skill` packaging format
-- [ ] If it exists: implement a packaging script that excludes `.git/`,
-  `archives/`, `NOTES`, `result`, `docs/`, and `__pycache__`
-- [ ] If it does not exist: close this item as not applicable
+**Closed as N/A (verified 2026-05-20).** The spec page and agentskills GitHub
+repo confirm that skills are directories, not binary archives. There is no
+`.skill` packaging format defined anywhere in the spec. No packaging script
+is needed.
 
 ### Phase 7: Optional -- `allowed-tools` field
+
+Spec (verified 2026-05-20): space-separated tool list; experimental, support
+varies by agent. Fine-grained syntax is supported: `Bash(git:*) Read`.
 
 - [ ] Test whether Claude Code acts on the `allowed-tools` frontmatter
   field when running this skill
