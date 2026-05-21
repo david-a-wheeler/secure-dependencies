@@ -2702,7 +2702,7 @@ def _oss_rebuild_list_versions(ecosystem: str, pkg_key: str) -> list[str]:
 
     Try it:
         python3 -c "
-        import sys; sys.path.insert(0, 'references/scripts')
+        import sys; sys.path.insert(0, 'scripts')
         import analysis_shared as s
         print(s._oss_rebuild_list_versions('pypi', 'absl-py'))
         "
@@ -2750,7 +2750,7 @@ def _oss_rebuild_list_artifacts(ecosystem: str, pkg_key: str, version: str) -> l
 
     Try it:
         python3 -c "
-        import sys; sys.path.insert(0, 'references/scripts')
+        import sys; sys.path.insert(0, 'scripts')
         import analysis_shared as s
         print(s._oss_rebuild_list_artifacts('pypi', 'absl-py', '2.0.0'))
         "
@@ -2793,7 +2793,7 @@ def _oss_rebuild_fetch_verdict(
 
     Try it:
         python3 -c "
-        import sys; sys.path.insert(0, 'references/scripts')
+        import sys; sys.path.insert(0, 'scripts')
         import analysis_shared as s
         print(s._oss_rebuild_fetch_verdict(
             'pypi', 'absl-py', '2.0.0', 'absl_py-2.0.0-py3-none-any.whl'))
@@ -2947,12 +2947,12 @@ def lookup_oss_rebuild(
 
     Quick invocation (no work dir needed):
         python3 -c "
-        import sys; sys.path.insert(0, 'references/scripts')
+        import sys; sys.path.insert(0, 'scripts')
         import analysis_shared as shared
         shared.lookup_oss_rebuild('pypi', 'absl-py', '2.0.0')
         "
 
-    Or via __main__ (from the references/scripts directory):
+    Or via __main__ (from the scripts directory):
         python3 analysis_shared.py pypi absl-py 2.0.0
     """
     import tempfile as _tempfile
@@ -3434,7 +3434,7 @@ def run_ai_sandbox(
 #   from references.scripts.analysis_shared import lookup_oss_rebuild
 #   lookup_oss_rebuild('pypi', 'absl-py', '2.0.0')
 #
-# Or from the references/scripts directory:
+# Or from the scripts directory:
 #
 #   python3 -c "from analysis_shared import lookup_oss_rebuild; lookup_oss_rebuild('pypi','absl-py','2.0.0')"
 #   python3 -c "from analysis_shared import lookup_oss_rebuild; lookup_oss_rebuild('npm','lodash','4.18.1')"

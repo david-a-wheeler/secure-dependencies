@@ -419,7 +419,7 @@ pointers into those detail files.
 
 ## Scripts
 
-Scripts live in `references/scripts/`:
+Scripts live in `scripts/`:
 
 | Script | Purpose |
 |---|---|
