@@ -1,0 +1,66 @@
+PACKAGE: PKGNAME
+MODE: UPDATE | NEW | CURRENT
+VERSION: OLD_VERSION -> NEW_VERSION  (or just NEW_VERSION for NEW/CURRENT)
+ECOSYSTEM: ECOSYSTEM
+WORK_DIR: PROJECT_ROOT/temp/dep-review/PKGNAME-NEW_VERSION/
+PACKAGE_HASH: sha256:HASH
+
+LICENSE:
+  spdx: [identifier, or "MISSING", or "UNKNOWN"]
+  osi_approved: YES | NO | UNKNOWN
+  status: OK | CONCERN | CRITICAL
+  note: [if not OK: explain security implications. Missing license means no
+         legal basis for external security audits, no contributor incentive to
+         fix vulnerabilities, and predicts abandonment and unpatched vulnerabilities]
+
+PROJECT_HEALTH:
+  age_years: [N or unknown]
+  last_release_days_ago: [N or unknown]
+  owner_count: [N or unknown]
+  scorecard_score: [X.X/10 or "not found"]
+  version_stability: stable | pre-release | unknown
+  concerns: [list or "none"]
+
+SCAN_RESULTS:
+  [label: COUNT per scan; call out any matches in bidi/zero-width/prompt scans]
+
+SOURCE_COMPARISON:
+  repo_url: [URL or "not found"]
+  clone_status: OK | SKIPPED: reason | FAILED: reason
+  extra_files_in_package: [count; list non-metadata extras]
+  binary_files: [count and types, or "none"]
+  source_match: EXACT | CLOSE | DIVERGENT | UNKNOWN
+
+MANIFEST_FINDINGS:
+  [extensions, executables, post_install_message, new runtime deps]
+
+TRANSITIVE_DEPS:
+  total_new_packages: [N, or "n/a for UPDATE without new deps"]
+  not_in_lockfile: [list, or "none"]
+  concerns: [very new packages, low downloads, unusual names, or "none"]
+
+DIFF_SUMMARY:  (UPDATE mode only)
+  [changed/added/removed filenames, not file content]
+
+PROVENANCE_FINDINGS:
+  [MFA status, maintainer info, ownership changes]
+
+RISK_FACTORS:
+  increasing: [list or "none"]
+  decreasing: [list or "none"]
+
+DEEPER_ANALYSIS:
+  performed: YES | NO
+  reason: [if YES: trigger; if NO: why criteria not met]
+
+REPRODUCIBLE_BUILD:
+  result: EXACTLY REPRODUCIBLE | FUNCTIONALLY EQUIVALENT | UNEXPECTED DIFFERENCES | INCONCLUSIVE | SKIPPED
+  sandbox: [tool or "none" or "not run"]
+  code_diffs: [count or "n/a"]
+
+RISK_ASSESSMENT: LOW | MEDIUM | HIGH | CRITICAL
+SUMMARY_RECOMMENDATION: APPROVE | APPROVE_WITH_CAUTION | REVIEW_MANUALLY | DO_NOT_INSTALL
+SUMMARY: [2-6 sentences: findings and reason for recommendation.
+  Use risk-based language, never claim safety or give guarantees.
+  Good: "Update assessed as low risk." "No elevated risk factors found."
+  Bad: "Safe to update." "This package is safe." "No issues found."]
