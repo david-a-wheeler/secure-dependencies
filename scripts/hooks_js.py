@@ -30,6 +30,32 @@ _RE_REPRO_CODE = re.compile(r'^diff.*\.(js|mjs|cjs|ts|jsx|tsx)\b')
 _RE_REPRO_META = re.compile(
     r'^diff.*(package\.json|package-lock\.json|\.npmignore|\.gitignore)')
 
+# VCS dependency detection (Idea 12 for JS).
+# Matches dep specs that pull directly from a VCS host instead of the registry.
+# Composed from shared.VCS_SCHEMES_RE so coverage stays in sync with other
+# ecosystems when new VCS transports or hosting aliases are added there.
+_RE_GIT_DEP = re.compile(
+    r'^(?:github:|gitlab:|bitbucket:|' + shared.VCS_SCHEMES_RE + r')',
+    re.IGNORECASE,
+)
+# Commit hash: 7-40 hex chars after '#' fragment in a VCS URL.
+# Uses shared.COMMIT_HASH_RE so the range stays in sync with Python/Ruby.
+_RE_COMMIT_HASH = re.compile(
+    r'#' + shared.COMMIT_HASH_RE + r'$', re.IGNORECASE)
+
+# VCS/lockfile foreign URL detection (Ideas 12-13 for JS).
+# _RE_GIT_DEP uses shared.VCS_SCHEMES_RE and shared.VCS_HOSTNAMES_RE.
+# _RE_LOCKFILE_RESOLVED matches "resolved" fields in package-lock.json;
+# foreign hosts (not in _TRUSTED_REGISTRY_HOSTS or self.registry_url) are
+# flagged as LOCKFILE_FOREIGN_URL -- the same signal used by Python/Ruby.
+_RE_LOCKFILE_RESOLVED = re.compile(
+    r'"resolved"\s*:\s*"(https?://[^"]{1,300})"'
+)
+_TRUSTED_REGISTRY_HOSTS: frozenset[str] = frozenset({
+    'registry.npmjs.org',
+    'registry.yarnpkg.com',
+})
+
 # npm package name allowlist: letters, digits, '.', '-', '_', '/', '@'.
 # Scoped names start with '@' (e.g. @scope/name). Max 214 chars (npm spec).
 # Rejects names containing ';', '$', backticks, spaces, '..', or other
@@ -547,6 +573,32 @@ class Hooks(shared.EcosystemHooks):
             else:
                 p('  (none)')
 
+            # Git-reference dependency check: deps resolved from VCS refs
+            # bypass the registry entirely. Separate by severity: raw commit
+            # hashes are HIGH (unauditable pinned point); named refs MEDIUM.
+            _git_hash_deps: list[str] = []
+            _git_named_deps: list[str] = []
+            for _dep_name, _dep_spec in all_runtime.items():
+                if not isinstance(_dep_spec, str):
+                    continue
+                if _RE_GIT_DEP.match(_dep_spec):
+                    _safe = shared.sanitize_line(
+                        f'{_dep_name}@{_dep_spec}'[:200])
+                    if _RE_COMMIT_HASH.search(_dep_spec):
+                        _git_hash_deps.append(_safe)
+                    else:
+                        _git_named_deps.append(_safe)
+            for _s in _git_hash_deps:
+                p(f'[!] VCS_DEPENDENCY (commit hash): {_s}')
+            for _s in _git_named_deps:
+                p(f'[!] VCS_DEPENDENCY (named ref): {_s}')
+            if _git_hash_deps:
+                install_cmd_warnings.append(
+                    'VCS_DEPENDENCY:package.json (commit hash)')
+            if _git_named_deps:
+                install_cmd_warnings.append(
+                    'VCS_DEPENDENCY:package.json (named ref)')
+
             source_url = _extract_source_url(pkg_json)
             hp_display = (
                 shared.sanitize_line(source_url) if source_url
@@ -902,25 +954,55 @@ class Hooks(shared.EcosystemHooks):
         lockfile = self.get_lockfile_path(project_root)
         lockfile_lines: list[str] = ['=== Lockfile check ===']
 
-        if lockfile.is_file() and dep_lines_new:
+        if lockfile.is_file():
             lf_text = lockfile.read_text(encoding='utf-8', errors='replace')
             lockfile_format = self._detect_lockfile_format(lockfile.name)
             lockfile_lines.append(
                 f'LOCKFILE: {lockfile.name} (format: {lockfile_format})')
 
-            for dep_line in dep_lines_new:
-                # Extract name from "pkgname@^version"
-                # or "@scope/name@version"
-                m = re.match(r'^(@[^@]+|[^@]+)@', dep_line.strip())
-                dep_name = m.group(1) if m else dep_line.strip()
-                if not dep_name or not _NPM_NAME_RE.match(dep_name):
-                    continue
-                safe_dep = shared.sanitize_line(dep_name)
-                if self._dep_in_lockfile(dep_name, lf_text, lockfile_format):
-                    lockfile_lines.append(f'IN_LOCKFILE: {safe_dep}')
-                else:
-                    lockfile_lines.append(f'NOT_IN_LOCKFILE: {safe_dep}')
-                    not_in_lockfile.append(safe_dep)
+            if dep_lines_new:
+                for dep_line in dep_lines_new:
+                    # Extract name from "pkgname@^version"
+                    # or "@scope/name@version"
+                    m = re.match(r'^(@[^@]+|[^@]+)@', dep_line.strip())
+                    dep_name = m.group(1) if m else dep_line.strip()
+                    if not dep_name or not _NPM_NAME_RE.match(dep_name):
+                        continue
+                    safe_dep = shared.sanitize_line(dep_name)
+                    if self._dep_in_lockfile(dep_name, lf_text, lockfile_format):
+                        lockfile_lines.append(f'IN_LOCKFILE: {safe_dep}')
+                    else:
+                        lockfile_lines.append(f'NOT_IN_LOCKFILE: {safe_dep}')
+                        not_in_lockfile.append(safe_dep)
+
+            # Foreign resolved URL check (npm format only).
+            # package-lock.json v2/v3 "resolved" fields should all point to
+            # the npm registry (or the configured private registry); any other
+            # host is a potential supply-chain injection.
+            # Deduplicated and capped to avoid noise.
+            if lockfile_format == 'npm':
+                _trusted = set(_TRUSTED_REGISTRY_HOSTS)
+                if self.registry_url:
+                    _rh = urllib.parse.urlparse(
+                        self.registry_url).netloc.lower()
+                    if _rh:
+                        _trusted.add(_rh)
+                _foreign_urls: list[str] = []
+                _seen_foreign: set[str] = set()
+                for _m in _RE_LOCKFILE_RESOLVED.finditer(lf_text):
+                    _url = _m.group(1)
+                    _is_trusted = any(f'//{h}/' in _url for h in _trusted)
+                    if not _is_trusted and _url not in _seen_foreign:
+                        _seen_foreign.add(_url)
+                        _foreign_urls.append(_url)
+                for _furl in _foreign_urls[:10]:
+                    lockfile_lines.append(
+                        f'[!] LOCKFILE_FOREIGN_URL: '
+                        f'{shared.sanitize_line(_furl[:200])}')
+                if len(_foreign_urls) > 10:
+                    lockfile_lines.append(
+                        f'  ... and {len(_foreign_urls) - 10} more'
+                        f' foreign resolved URLs')
         else:
             lockfile_lines.append('(no lockfile found or no deps to check)')
 

@@ -19,13 +19,27 @@ import shutil
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).parent))
+import analysis_shared as shared
+
 # Pre-compiled patterns for reproducible-build diff classification.
 # Used in reproducible_build(); compiled once here to avoid repeated calls.
 _RE_REPRO_CODE = re.compile(r'^diff.*\.(rb|c|h|cpp|rs|js|sh)\b')
 _RE_REPRO_META = re.compile(r'^diff.*(\.gemspec|metadata|RECORD|METADATA|Gemfile)')
 
-sys.path.insert(0, str(Path(__file__).parent))
-import analysis_shared as shared
+# VCS dependency detection (Idea 12 analog for Ruby).
+# Gemfile.lock marks git-sourced gems with a "GIT" section; the "revision:"
+# line contains the pinned commit hash. A raw commit hash is HIGH risk
+# (unauditable pinned point); a branch-only reference is MEDIUM.
+# _RE_GEMLOCK_REVISION uses shared.COMMIT_HASH_RE for the hex char range.
+_RE_GEMLOCK_GIT_SECTION = re.compile(
+    r'^GIT\n((?:[ \t][^\n]*\n)+)', re.MULTILINE,
+)
+_RE_GEMLOCK_REVISION = re.compile(
+    r'^\s+revision:\s+(' + shared.COMMIT_HASH_RE + r')\s*$', re.MULTILINE,
+)
+_RE_GEMLOCK_REMOTE = re.compile(r'^\s+remote:\s+(\S+)', re.MULTILINE)
+_RE_GEMLOCK_SPECS = re.compile(r'^\s{4}(\S+)\s+\(', re.MULTILINE)
 
 
 # ---------------------------------------------------------------------------
@@ -798,21 +812,50 @@ class Hooks(shared.EcosystemHooks):
 
         lockfile = project_root / self.LOCKFILE_NAME
         lockfile_lines: list[str] = ['=== Lockfile check ===']
-        if lockfile.is_file() and dep_lines_new:
+        if lockfile.is_file():
             lf_text = lockfile.read_text(encoding='utf-8', errors='replace')
-            for dep_line in dep_lines_new:
-                m_dep = re.search(r"['\"]([a-z][a-z0-9_-]+)['\"]", dep_line)
-                if not m_dep:
-                    continue
-                dep_name = m_dep.group(1)
-                safe_dep = shared.sanitize_line(dep_name)
-                if re.search(
-                        rf'^    {re.escape(dep_name)} ',
-                        lf_text, re.MULTILINE):
-                    lockfile_lines.append(f'IN_LOCKFILE: {safe_dep}')
+            lockfile_lines.append(
+                f'LOCKFILE: {self.LOCKFILE_NAME} (format: bundler)')
+
+            if dep_lines_new:
+                for dep_line in dep_lines_new:
+                    m_dep = re.search(
+                        r"['\"]([a-z][a-z0-9_-]+)['\"]", dep_line)
+                    if not m_dep:
+                        continue
+                    dep_name = m_dep.group(1)
+                    safe_dep = shared.sanitize_line(dep_name)
+                    if re.search(
+                            rf'^    {re.escape(dep_name)} ',
+                            lf_text, re.MULTILINE):
+                        lockfile_lines.append(f'IN_LOCKFILE: {safe_dep}')
+                    else:
+                        lockfile_lines.append(f'NOT_IN_LOCKFILE: {safe_dep}')
+                        not_in_lockfile.append(safe_dep)
+
+            # VCS dependency check: GIT sections in Gemfile.lock mean deps
+            # are resolved from VCS instead of RubyGems (Idea 12 analog).
+            # Runs regardless of dep_lines_new.
+            for _git_block in _RE_GEMLOCK_GIT_SECTION.finditer(lf_text):
+                _block_text = _git_block.group(0)
+                _remote_m = _RE_GEMLOCK_REMOTE.search(_block_text)
+                _remote = (shared.sanitize_line(_remote_m.group(1)[:200])
+                           if _remote_m else '(unknown)')
+                _rev_m = _RE_GEMLOCK_REVISION.search(_block_text)
+                _specs = [
+                    shared.sanitize_line(m.group(1)[:80])
+                    for m in _RE_GEMLOCK_SPECS.finditer(_block_text)
+                ]
+                _gems = ', '.join(_specs[:5]) if _specs else '(unknown)'
+                if _rev_m:
+                    _rev = shared.sanitize_line(_rev_m.group(1))
+                    lockfile_lines.append(
+                        f'[!] VCS_DEPENDENCY (commit hash): {_gems}'
+                        f' from {_remote}@{_rev}')
                 else:
-                    lockfile_lines.append(f'NOT_IN_LOCKFILE: {safe_dep}')
-                    not_in_lockfile.append(safe_dep)
+                    lockfile_lines.append(
+                        f'[!] VCS_DEPENDENCY (named ref): {_gems}'
+                        f' from {_remote}')
         else:
             lockfile_lines.append('(lockfile or dep list unavailable)')
 

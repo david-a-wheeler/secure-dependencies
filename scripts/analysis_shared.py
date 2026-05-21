@@ -1031,6 +1031,21 @@ EXFIL_RELAY_DOMAINS_RE: str = (
     r'|m-kosche\.com)'
 )
 
+# VCS URL scheme fragment: matches git+https:// and git+ssh:// transports.
+# Used in manifest and lockfile dep checks across all ecosystems.
+# Compose with ecosystem-specific context: e.g. start-of-string anchor (JS),
+# @ separator (Python PEP 508), or line-start (pip requirements.txt).
+VCS_SCHEMES_RE: str = r'git\+(?:https?|ssh)://'
+
+# VCS hosting domains commonly used in direct-URL dependencies.
+# Ecosystems compose this into their own pattern as needed.
+VCS_HOSTNAMES_RE: str = r'(?:github|gitlab|bitbucket)\.com'
+
+# Commit hash character class: 7-40 hex chars (SHA-1 abbrev to full).
+# 64 chars covers SHA-256 (future git repos). Use {7,64} when both are
+# possible; use {7,40} when only SHA-1 is expected.
+COMMIT_HASH_RE: str = r'[0-9a-f]{7,40}'
+
 
 def blind_scan(
     label: str,
