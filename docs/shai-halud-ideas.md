@@ -76,10 +76,34 @@ beeceptor, burpcollaborator.net, m-kosche.com). `env-enumeration` extended
 beyond JS-only: Python adds `json.dumps`/`pprint.pformat` on `os.environ`;
 Ruby adds `JSON.dump(ENV)` and `ENV.to_a` (ENV.to_h excluded as too common).
 
+**Group C (Ideas 10-11):** `detect_binary_files()` in `analysis_shared.py`
+covers both ideas. Binary magic-byte detection (ELF, PE, Mach-O, Wasm, Java)
+plus named-tool detection (`SUSPICIOUS_BINARY_NAMES`) and attack-staging
+directory detection (`SUSPICIOUS_TOP_DIRS`). Called by all three ecosystems.
+Commit: `bb9adc6`.
+
+**Group D (Ideas 12-13):** VCS dependency and lockfile foreign URL detection
+implemented in all three ecosystems. Commit: `1a6a8b6`.
+
+- Idea 12 (VCS deps): JS checks `package.json` dep specs for `github:`,
+  `gitlab:`, `git+https://` etc. (`_RE_GIT_DEP`). Python checks `Requires-Dist`
+  for PEP 508 direct URL form (`_RE_PY_VCS_DEP`). Ruby parses GIT sections in
+  `Gemfile.lock` (`_RE_GEMLOCK_GIT_SECTION`). All emit `VCS_DEPENDENCY
+  (commit hash)` or `VCS_DEPENDENCY (named ref)` and populate
+  `install_cmd_warnings` so the driver shows them in the concerns table.
+- Idea 13 (lockfile foreign URLs): JS scans `package-lock.json` "resolved"
+  fields against trusted registry hosts. Python scans `requirements.txt` for
+  non-PyPI URL lines, `poetry.lock` for `type="git"` source entries, and
+  `uv.lock` for `source={git=...}` entries. Ruby GIT sections serve double duty
+  (they ARE the foreign-URL signal). All emit `LOCKFILE_FOREIGN_URL`.
+- Shared constants added to `analysis_shared.py`: `VCS_SCHEMES_RE`,
+  `VCS_HOSTNAMES_RE`, `COMMIT_HASH_RE`. Ecosystem patterns compose from these.
+- Private-registry false-positive fix: `self.registry_url` is incorporated into
+  the trusted-host set in both JS and Python so private npm/PyPI mirrors
+  don't produce noise.
+
 ### Not yet implemented
 
-- Ideas 10-11: File-tree scan for binaries and suspicious directories (Group C)
-- Ideas 12-13: Git-ref dependency and lockfile foreign URL detection (Group D)
 - Ideas 14-16: Publisher velocity, SLSA provenance, repo metadata (Group E)
 
 ---
@@ -742,15 +766,16 @@ shared constant added to `analysis_shared.py`. `env-enumeration` extended
 beyond the original JS-only spec to cover Python and Ruby bulk-serialization
 patterns. `exfil-relay-domain` uses the shared constant directly in all hooks.
 
-### Group C: File-Tree Scan (one new helper shared between download_new and scan)
-Implements Ideas 10-11: binary magic bytes + suspicious directory names.
-Estimated effort: 1-2 hours.
-Priority: **high** -- catches the embedded TruffleHog pattern.
+### Group C: File-Tree Scan -- DONE
+`detect_binary_files()` in `analysis_shared.py`. Binary magic-byte detection
+plus named attack-tool and staging-directory detection. All three ecosystems
+call it. Commit: `bb9adc6`.
 
-### Group D: Dependency Manifest Analysis (extend read_manifest / check_lockfile)
-Implements Ideas 12-13. Works on already-parsed data.
-Estimated effort: 1-2 hours.
-Priority: **medium** -- catches the git-ref dependency technique.
+### Group D: Dependency Manifest Analysis -- DONE
+All three ecosystems. VCS dep detection in manifests and lockfiles; lockfile
+foreign URL detection with private-registry false-positive suppression.
+Shared constants `VCS_SCHEMES_RE`, `VCS_HOSTNAMES_RE`, `COMMIT_HASH_RE` added
+to `analysis_shared.py`. Commit: `1a6a8b6`.
 
 ### Group E: Registry API Additions (new HTTP calls in fetch_all_registry_data)
 Implements Ideas 14-16. Adds 1-3 network calls per package.
