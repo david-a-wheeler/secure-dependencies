@@ -102,9 +102,40 @@ implemented in all three ecosystems. Commit: `1a6a8b6`.
   the trusted-host set in both JS and Python so private npm/PyPI mirrors
   don't produce noise.
 
-### Not yet implemented
+### Done (continued)
 
-- Ideas 14-16: Publisher velocity, SLSA provenance, repo metadata (Group E)
+**Group E (Ideas 14-16):** Registry and provenance API additions.
+
+- Idea 14 (`PUBLISHER_VELOCITY_ANOMALOUS`): `_check_publisher_velocity()` in
+  `hooks_js.py`. Queries `registry.npmjs.org/-/v1/search?text=maintainer:<user>&size=250`,
+  counts packages with `date` within the last 72 hours. Threshold: 10.
+  HIGH severity when publisher is also a new account (<90 days); MEDIUM otherwise.
+  Captures `npm_user_name` from the already-fetched version-specific endpoint.
+  Guarded by `_RE_NPM_USER` allowlist to prevent injection.
+
+- Idea 15 (`SIGSTORE_REPO_MISMATCH`): `_check_slsa_provenance()` in `hooks_js.py`.
+  Fetches `registry.npmjs.org/-/package/<name>/provenance`, extracts
+  `sourceRepositoryURI` from the SLSA attestation's `externalParameters.workflow`,
+  and compares against the declared source URL. URL normalisation strips `.git`,
+  scheme prefix, and trailing slash before comparing. Surfaced for AI review
+  (not hard-fail); monorepos may legitimately sign from a parent repo.
+
+- Idea 16 (`REPO_CAMPAIGN_MARKER`): `shared.github_repo_meta()` in
+  `analysis_shared.py`, called from all three ecosystems' `fetch_all_registry_data()`.
+  Fetches `api.github.com/repos/<owner>/<repo>` and checks `description` against
+  `shared.CAMPAIGN_STRINGS`. Also checks `contents/results` for a credential-staging
+  directory. ETag caching via `_github_etag_cache` avoids redundant calls and
+  stays within the 60 req/hr unauthenticated rate limit.
+
+Key implementation decisions:
+- `source_url` added as optional parameter (default `''`) to all three ecosystems'
+  `fetch_all_registry_data()` and to the abstract base class; driver passes it.
+- ETag caching is module-level (`_github_etag_cache` dict) rather than per-session;
+  this handles batch audits where multiple packages from the same repo are checked.
+- `_check_publisher_velocity` is JS-only and guarded by a check that
+  `api_base` contains `registry.npmjs.org` (skip for private registries).
+- SLSA check uses `predicate.buildDefinition.externalParameters.workflow.repository`
+  (the actual npm provenance schema path) rather than a top-level field.
 
 ---
 
@@ -777,10 +808,11 @@ foreign URL detection with private-registry false-positive suppression.
 Shared constants `VCS_SCHEMES_RE`, `VCS_HOSTNAMES_RE`, `COMMIT_HASH_RE` added
 to `analysis_shared.py`. Commit: `1a6a8b6`.
 
-### Group E: Registry API Additions (new HTTP calls in fetch_all_registry_data)
+### Group E: Registry API Additions -- DONE
 Implements Ideas 14-16. Adds 1-3 network calls per package.
-Estimated effort: 2-4 hours.
-Priority: **medium** -- adds breadth but requires network round-trips.
+- `_check_publisher_velocity()` (Idea 14, JS only)
+- `_check_slsa_provenance()` (Idea 15, JS only)
+- `shared.github_repo_meta()` + `CAMPAIGN_STRINGS` (Idea 16, all ecosystems)
 
 ---
 

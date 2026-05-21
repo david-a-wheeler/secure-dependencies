@@ -648,9 +648,11 @@ class Hooks(shared.EcosystemHooks):
         version: str,
         work: Path,
         p: 'shared.Printer',
+        source_url: str = '',
     ) -> dict:
         """Fetch RubyGems API: gems endpoint (MFA), versions endpoint
-        (age/stability), owners.
+        (age/stability), owners. Also checks GitHub repo metadata for
+        Shai-Halud campaign markers when source_url is a GitHub URL (Idea 16).
 
         self.registry_url overrides the default rubygems.org base URL
         for private registries. Most private gem servers (Gemfury,
@@ -780,6 +782,9 @@ class Hooks(shared.EcosystemHooks):
                     owner_count_int = len(owners)
             except (ValueError, TypeError):
                 pass
+
+        # Idea 16: GitHub repo campaign marker (cross-ecosystem shared helper).
+        shared.emit_github_repo_meta(source_url, p)
 
         return {
             'mfa_status': mfa_status,

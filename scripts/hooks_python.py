@@ -830,10 +830,13 @@ class Hooks(shared.EcosystemHooks):
         version: str,
         work: Path,
         p: 'shared.Printer',
+        source_url: str = '',
     ) -> dict:
         """Fetch PyPI JSON API: package info, version history, upload metadata.
 
-        self.registry_url overrides the default pypi.org base URL for private indices.
+        self.registry_url overrides the default pypi.org base URL for private
+        indices. Also checks GitHub repo metadata for Shai-Halud campaign
+        markers when source_url is a GitHub URL (Idea 16).
 
         Writes: provenance.txt (via p).
         Returns dict with keys: mfa_status, age_years_float, last_release_days,
@@ -936,6 +939,9 @@ class Hooks(shared.EcosystemHooks):
         p('')
         for vline in ver_info_lines:
             p(vline)
+
+        # Idea 16: GitHub repo campaign marker (cross-ecosystem shared helper).
+        shared.emit_github_repo_meta(source_url, p)
 
         return {
             'mfa_status': mfa_status,
