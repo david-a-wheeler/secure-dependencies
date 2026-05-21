@@ -230,6 +230,7 @@ class Hooks(shared.EcosystemHooks):
     ECOSYSTEM = 'javascript'
     OSV_ECOSYSTEM = 'npm'
     OSS_REBUILD_ECOSYSTEM = 'npm'
+    NATIVE_BINARY_SUFFIXES: frozenset[str] = frozenset({'.node'})
 
     # Multiple lockfile formats; LOCKFILE_NAME is None so the driver skips the
     # single-lockfile warning. LOCKFILE_NAMES lists candidates in

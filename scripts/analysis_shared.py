@@ -1774,15 +1774,47 @@ _EXEC_EXTENSIONS: dict[str, str] = {
     '.aar': 'Android Archive (compiled bytecode)',
 }
 
+# Stem names (no extension) of known credential-harvesting and offensive
+# security tools. Any package shipping a file with one of these stems is
+# almost certainly malicious. Case-insensitive comparison via .lower().
+SUSPICIOUS_BINARY_NAMES: frozenset[str] = frozenset({
+    'detect-secrets',
+    'gitleaks',
+    'lazagne',
+    'mimikatz',
+    'msfconsole',
+    'trufflehog',
+})
 
-def detect_binary_files(unpacked_dir: Path, work: Path, p: 'Printer') -> int:
-    """Find precompiled executable files in the unpacked package.
+# Directory names that have no legitimate role in published packages and
+# indicate attack staging or credential collection.
+SUSPICIOUS_TOP_DIRS: frozenset[str] = frozenset({
+    '.truffler-cache',
+    'exfil',
+    'loot',
+})
+
+
+def detect_binary_files(
+    unpacked_dir: Path,
+    work: Path,
+    p: 'Printer',
+    native_suffixes: frozenset[str] = frozenset(),
+) -> int:
+    """Find precompiled executables and attack-staging artifacts in the
+    unpacked package.
 
     Detection uses file extension first (for zip-container formats like .jar
     that cannot be identified by magic bytes), then falls back to magic-byte
     prefix matching. Detects ELF, PE (Windows), Mach-O, WebAssembly, Java
     .class files, and Java archives (.jar/.war/.ear/.aar). PNG, JPEG, zip,
     gzip, and other non-executable binaries are intentionally NOT flagged.
+
+    native_suffixes: ecosystem-specific suffixes for expected native addon
+    binaries (e.g. frozenset({'.node'}) for JS). Files with these suffixes
+    are reported as NATIVE_BINARY; all other executables as UNEXPECTED_BINARY.
+    Named attack tools are always reported as SUSPICIOUS_BINARY regardless of
+    suffix.
 
     Writes: binary-files.txt (via p), raw-binary-in-package.txt.
     Returns: count of embedded executables found.
@@ -1791,39 +1823,56 @@ def detect_binary_files(unpacked_dir: Path, work: Path, p: 'Printer') -> int:
         p('EMBEDDED_EXECUTABLES: N/A')
         return 0
 
-    hits: list[str] = []
-    for fp in sorted(unpacked_dir.rglob('*')):
-        if not fp.is_file() or fp.is_symlink():
-            continue
-        rel = sanitize_line(str(fp.relative_to(unpacked_dir)))
-        fmt = ''
+    dir_hits: list[str] = []
+    bin_hits: list[str] = []
 
-        # Check by file extension first (catches zip-container formats like .jar)
-        ext_fmt = _EXEC_EXTENSIONS.get(fp.suffix.lower())
-        if ext_fmt:
-            fmt = ext_fmt
-        else:
-            # Check magic bytes
+    for fp in sorted(unpacked_dir.rglob('*')):
+        if fp.is_symlink():
+            continue
+        if fp.is_dir():
+            if fp.name in SUSPICIOUS_TOP_DIRS:
+                rel_d = sanitize_line(str(fp.relative_to(unpacked_dir)))
+                dir_hits.append(f'SUSPICIOUS_DIRECTORY: {rel_d}')
+            continue
+        if not fp.is_file():
+            continue
+
+        rel = sanitize_line(str(fp.relative_to(unpacked_dir)))
+        suffix_lower = fp.suffix.lower()
+
+        # Detect executable format: extension first, then magic bytes.
+        fmt = _EXEC_EXTENSIONS.get(suffix_lower, '')
+        if not fmt:
             try:
                 header = fp.read_bytes()[:_EXEC_HEADER_LEN]
             except OSError:
-                continue
+                header = b''
             for magic, magic_fmt in _EXEC_MAGIC:
                 if header.startswith(magic):
                     fmt = magic_fmt
                     break
 
-        if fmt:
-            hits.append(f'{rel}: {fmt}')
+        # Categorize: named attack tool > native addon > unexpected binary.
+        if fp.stem.lower() in SUSPICIOUS_BINARY_NAMES:
+            fmt_note = f' ({fmt})' if fmt else ''
+            bin_hits.append(f'SUSPICIOUS_BINARY: {rel}{fmt_note}')
+        elif fmt:
+            if suffix_lower in native_suffixes:
+                bin_hits.append(f'NATIVE_BINARY: {rel} ({fmt})')
+            else:
+                bin_hits.append(f'UNEXPECTED_BINARY: {rel} ({fmt})')
+
+    for dh in dir_hits:
+        p(dh)
 
     (work / 'raw-binary-in-package.txt').write_text(
-        '\n'.join(hits) + '\n', encoding='utf-8'
+        '\n'.join(bin_hits) + '\n', encoding='utf-8'
     )
-    p(f'EMBEDDED_EXECUTABLES: {len(hits)}')
+    p(f'EMBEDDED_EXECUTABLES: {len(bin_hits)}')
     p('')
-    for hit in hits:
-        p(hit)
-    return len(hits)
+    for bh in bin_hits:
+        p(bh)
+    return len(bin_hits)
 
 
 # ---------------------------------------------------------------------------
@@ -3121,6 +3170,7 @@ class EcosystemHooks(ABC):
     DIFF_PATTERNS: list[tuple[str, str]]
     OSV_ECOSYSTEM: str
     OSS_REBUILD_ECOSYSTEM: str
+    NATIVE_BINARY_SUFFIXES: frozenset[str]
 
     def __init__(self, registry_url: str | None = None) -> None:
         self.registry_url = registry_url

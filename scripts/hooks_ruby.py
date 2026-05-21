@@ -102,6 +102,7 @@ class Hooks(shared.EcosystemHooks):
     LOCKFILE_NAME = 'Gemfile.lock'
     OSV_ECOSYSTEM = 'RubyGems'
     OSS_REBUILD_ECOSYSTEM = 'rubygems'
+    NATIVE_BINARY_SUFFIXES: frozenset[str] = frozenset({'.so', '.bundle'})
 
     # Name of the primary manifest file (copied to work dir during analysis).
     MANIFEST_FILE = 'gemspec.txt'

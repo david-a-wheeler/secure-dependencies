@@ -231,6 +231,7 @@ class Hooks(shared.EcosystemHooks):
     ECOSYSTEM = 'python'
     OSV_ECOSYSTEM = 'PyPI'
     OSS_REBUILD_ECOSYSTEM = 'pypi'
+    NATIVE_BINARY_SUFFIXES: frozenset[str] = frozenset({'.so', '.pyd'})
 
     # Python projects use one of several lockfile formats. LOCKFILE_NAME is None
     # so the driver skips the single-lockfile warning; LOCKFILE_NAMES lists the
