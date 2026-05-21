@@ -34,6 +34,7 @@ import tarfile
 import threading
 import unicodedata
 import subprocess
+import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
@@ -1031,6 +1032,21 @@ EXFIL_RELAY_DOMAINS_RE: str = (
     r'|m-kosche\.com)'
 )
 
+# VCS URL scheme fragment: matches git+https:// and git+ssh:// transports.
+# Used in manifest and lockfile dep checks across all ecosystems.
+# Compose with ecosystem-specific context: e.g. start-of-string anchor (JS),
+# @ separator (Python PEP 508), or line-start (pip requirements.txt).
+VCS_SCHEMES_RE: str = r'git\+(?:https?|ssh)://'
+
+# VCS hosting domains commonly used in direct-URL dependencies.
+# Ecosystems compose this into their own pattern as needed.
+VCS_HOSTNAMES_RE: str = r'(?:github|gitlab|bitbucket)\.com'
+
+# Commit hash character class: 7-40 hex chars (SHA-1 abbrev to full).
+# 64 chars covers SHA-256 (future git repos). Use {7,64} when both are
+# possible; use {7,40} when only SHA-1 is expected.
+COMMIT_HASH_RE: str = r'[0-9a-f]{7,40}'
+
 
 def blind_scan(
     label: str,
@@ -1093,6 +1109,136 @@ def http_get(url: str, timeout: int = 15) -> bytes | None:
             return resp.read(_HTTP_MAX_BYTES)
     except Exception:  # noqa: BLE001
         return None
+
+
+# ---------------------------------------------------------------------------
+# GitHub REST API helper (Ideas 14-16)
+# ---------------------------------------------------------------------------
+# ETag cache: maps URL to (etag, response_body). Prevents re-fetching
+# unchanged repo metadata within a single analysis session, keeping
+# unauthenticated usage within the 60 req/hr rate limit.
+_github_etag_cache: dict[str, tuple[str, bytes]] = {}
+
+# Matches owner/repo in github.com URLs or git@github.com:owner/repo URLs.
+# {1,100} bounds prevent ReDoS on adversarial source_url values.
+_RE_GITHUB_REPO = re.compile(
+    r'github\.com[/:]([A-Za-z0-9_.-]{1,100})/([A-Za-z0-9_.-]{1,100})'
+)
+
+# Campaign strings written by the Shai-Halud worm into GitHub repo
+# descriptions. Literal matches are zero-false-positive.
+CAMPAIGN_STRINGS: frozenset[str] = frozenset({
+    'niagA oG eW ereH :duluH-iahS',
+    'Sha1-Hulud',
+    'TeamPCP',
+})
+
+
+def _github_api_get(url: str, timeout: int = 15) -> bytes | None:
+    """Fetch a GitHub API URL with ETag caching; return bytes or None.
+
+    Sends If-None-Match with a cached ETag when available; on HTTP 304
+    returns the cached body without counting as a new request. On success
+    stores the new ETag for future calls.
+    """
+    if not url.startswith('https://'):
+        return None
+    headers: dict[str, str] = {'Accept': 'application/vnd.github+json'}
+    cached = _github_etag_cache.get(url)
+    if cached:
+        etag, _ = cached
+        headers['If-None-Match'] = etag
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read(_HTTP_MAX_BYTES)
+            new_etag = resp.headers.get('ETag', '')
+            if new_etag:
+                _github_etag_cache[url] = (new_etag, body)
+            return body
+    except urllib.error.HTTPError as exc:
+        if exc.code == 304 and cached:
+            return cached[1]
+        return None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def github_repo_meta(source_url: str) -> dict | None:
+    """Fetch GitHub repo metadata for a source URL.
+
+    Uses two GitHub REST API calls (repo metadata + contents/results);
+    both use ETag caching to stay within the 60 req/hr rate limit.
+
+    Returns dict with keys:
+      owner (str), repo (str), description (str), has_results_dir (bool)
+    or None if source_url is not a GitHub URL or the metadata request fails.
+    """
+    m = _RE_GITHUB_REPO.search(source_url)
+    if not m:
+        return None
+    owner = m.group(1)
+    repo = re.sub(r'\.git$', '', m.group(2))
+
+    meta_url = f'https://api.github.com/repos/{owner}/{repo}'
+    meta_data = _github_api_get(meta_url)
+    if not meta_data:
+        return None
+    try:
+        meta_json = json.loads(meta_data.decode('utf-8', errors='replace'))
+    except ValueError:
+        return None
+
+    description = str(meta_json.get('description', '') or '')
+
+    # Check for results/ credential-staging directory.
+    # GitHub returns a JSON array for a directory listing (200) and a
+    # JSON object for errors (404 -> None from _github_api_get).
+    contents_url = (
+        f'https://api.github.com/repos/{owner}/{repo}/contents/results'
+    )
+    contents_data = _github_api_get(contents_url)
+    has_results_dir = False
+    if contents_data:
+        try:
+            has_results_dir = isinstance(
+                json.loads(contents_data.decode('utf-8', errors='replace')),
+                list,
+            )
+        except ValueError:
+            pass
+
+    return {
+        'owner': owner,
+        'repo': repo,
+        'description': description,
+        'has_results_dir': has_results_dir,
+    }
+
+
+def emit_github_repo_meta(source_url: str, p: 'Printer') -> None:
+    """Emit REPO_CAMPAIGN_MARKER and REPO_RESULTS_DIR signals (Idea 16).
+
+    Shared across all three ecosystems. Skips silently when source_url is
+    empty or not a GitHub URL; emits N/A in the latter case for clarity.
+    """
+    if not source_url:
+        return
+    p('')
+    p('=== GitHub repo metadata ===')
+    meta = github_repo_meta(source_url)
+    if meta is None:
+        p('REPO_CAMPAIGN_MARKER: N/A (not a GitHub repository)')
+        return
+    markers = [s for s in CAMPAIGN_STRINGS if s in meta['description']]
+    if markers:
+        p('REPO_CAMPAIGN_MARKER: YES')
+        for marker in markers:
+            p(f'  campaign_string: {sanitize_line(marker)}')
+    else:
+        p('REPO_CAMPAIGN_MARKER: NO')
+    if meta['has_results_dir']:
+        p('REPO_RESULTS_DIR: YES (credential-staging directory detected)')
 
 
 def http_post(url: str, data: bytes, content_type: str = 'application/json', timeout: int = 15) -> bytes | None:
@@ -1774,15 +1920,47 @@ _EXEC_EXTENSIONS: dict[str, str] = {
     '.aar': 'Android Archive (compiled bytecode)',
 }
 
+# Stem names (no extension) of known credential-harvesting and offensive
+# security tools. Any package shipping a file with one of these stems is
+# almost certainly malicious. Case-insensitive comparison via .lower().
+SUSPICIOUS_BINARY_NAMES: frozenset[str] = frozenset({
+    'detect-secrets',
+    'gitleaks',
+    'lazagne',
+    'mimikatz',
+    'msfconsole',
+    'trufflehog',
+})
 
-def detect_binary_files(unpacked_dir: Path, work: Path, p: 'Printer') -> int:
-    """Find precompiled executable files in the unpacked package.
+# Directory names that have no legitimate role in published packages and
+# indicate attack staging or credential collection.
+SUSPICIOUS_TOP_DIRS: frozenset[str] = frozenset({
+    '.truffler-cache',
+    'exfil',
+    'loot',
+})
+
+
+def detect_binary_files(
+    unpacked_dir: Path,
+    work: Path,
+    p: 'Printer',
+    native_suffixes: frozenset[str] = frozenset(),
+) -> int:
+    """Find precompiled executables and attack-staging artifacts in the
+    unpacked package.
 
     Detection uses file extension first (for zip-container formats like .jar
     that cannot be identified by magic bytes), then falls back to magic-byte
     prefix matching. Detects ELF, PE (Windows), Mach-O, WebAssembly, Java
     .class files, and Java archives (.jar/.war/.ear/.aar). PNG, JPEG, zip,
     gzip, and other non-executable binaries are intentionally NOT flagged.
+
+    native_suffixes: ecosystem-specific suffixes for expected native addon
+    binaries (e.g. frozenset({'.node'}) for JS). Files with these suffixes
+    are reported as NATIVE_BINARY; all other executables as UNEXPECTED_BINARY.
+    Named attack tools are always reported as SUSPICIOUS_BINARY regardless of
+    suffix.
 
     Writes: binary-files.txt (via p), raw-binary-in-package.txt.
     Returns: count of embedded executables found.
@@ -1791,39 +1969,56 @@ def detect_binary_files(unpacked_dir: Path, work: Path, p: 'Printer') -> int:
         p('EMBEDDED_EXECUTABLES: N/A')
         return 0
 
-    hits: list[str] = []
-    for fp in sorted(unpacked_dir.rglob('*')):
-        if not fp.is_file() or fp.is_symlink():
-            continue
-        rel = sanitize_line(str(fp.relative_to(unpacked_dir)))
-        fmt = ''
+    dir_hits: list[str] = []
+    bin_hits: list[str] = []
 
-        # Check by file extension first (catches zip-container formats like .jar)
-        ext_fmt = _EXEC_EXTENSIONS.get(fp.suffix.lower())
-        if ext_fmt:
-            fmt = ext_fmt
-        else:
-            # Check magic bytes
+    for fp in sorted(unpacked_dir.rglob('*')):
+        if fp.is_symlink():
+            continue
+        if fp.is_dir():
+            if fp.name in SUSPICIOUS_TOP_DIRS:
+                rel_d = sanitize_line(str(fp.relative_to(unpacked_dir)))
+                dir_hits.append(f'SUSPICIOUS_DIRECTORY: {rel_d}')
+            continue
+        if not fp.is_file():
+            continue
+
+        rel = sanitize_line(str(fp.relative_to(unpacked_dir)))
+        suffix_lower = fp.suffix.lower()
+
+        # Detect executable format: extension first, then magic bytes.
+        fmt = _EXEC_EXTENSIONS.get(suffix_lower, '')
+        if not fmt:
             try:
                 header = fp.read_bytes()[:_EXEC_HEADER_LEN]
             except OSError:
-                continue
+                header = b''
             for magic, magic_fmt in _EXEC_MAGIC:
                 if header.startswith(magic):
                     fmt = magic_fmt
                     break
 
-        if fmt:
-            hits.append(f'{rel}: {fmt}')
+        # Categorize: named attack tool > native addon > unexpected binary.
+        if fp.stem.lower() in SUSPICIOUS_BINARY_NAMES:
+            fmt_note = f' ({fmt})' if fmt else ''
+            bin_hits.append(f'SUSPICIOUS_BINARY: {rel}{fmt_note}')
+        elif fmt:
+            if suffix_lower in native_suffixes:
+                bin_hits.append(f'NATIVE_BINARY: {rel} ({fmt})')
+            else:
+                bin_hits.append(f'UNEXPECTED_BINARY: {rel} ({fmt})')
+
+    for dh in dir_hits:
+        p(dh)
 
     (work / 'raw-binary-in-package.txt').write_text(
-        '\n'.join(hits) + '\n', encoding='utf-8'
+        '\n'.join(bin_hits) + '\n', encoding='utf-8'
     )
-    p(f'EMBEDDED_EXECUTABLES: {len(hits)}')
+    p(f'EMBEDDED_EXECUTABLES: {len(bin_hits)}')
     p('')
-    for hit in hits:
-        p(hit)
-    return len(hits)
+    for bh in bin_hits:
+        p(bh)
+    return len(bin_hits)
 
 
 # ---------------------------------------------------------------------------
@@ -3121,6 +3316,7 @@ class EcosystemHooks(ABC):
     DIFF_PATTERNS: list[tuple[str, str]]
     OSV_ECOSYSTEM: str
     OSS_REBUILD_ECOSYSTEM: str
+    NATIVE_BINARY_SUFFIXES: frozenset[str]
 
     def __init__(self, registry_url: str | None = None) -> None:
         self.registry_url = registry_url
@@ -3157,6 +3353,7 @@ class EcosystemHooks(ABC):
     @abstractmethod
     def fetch_all_registry_data(
         self, pkgname: str, version: str, work: Path, p: 'Printer',
+        source_url: str = '',
     ) -> dict: ...
 
     @abstractmethod

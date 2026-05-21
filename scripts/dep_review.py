@@ -1472,7 +1472,10 @@ def run_analysis(  # noqa: C901
     print('--- Embedded executable detection ---')
     if unpacked_dir:
         with Printer(work / 'binary-files.txt') as _p_bin:
-            binary_files = shared.detect_binary_files(unpacked_dir, work, _p_bin)
+            binary_files = shared.detect_binary_files(
+                unpacked_dir, work, _p_bin,
+                hooks.NATIVE_BINARY_SUFFIXES,
+            )
     else:
         binary_files = 0
     print(f'  Precompiled executables detected: {binary_files}')
@@ -1572,7 +1575,7 @@ def run_analysis(  # noqa: C901
     print()
     print('--- Registry / provenance data ---')
     with Printer(work / 'provenance.txt') as _p_prov:
-        registry = hooks.fetch_all_registry_data(pkgname, new_ver, work, _p_prov)
+        registry = hooks.fetch_all_registry_data(pkgname, new_ver, work, _p_prov, source_url)
     print(f'  MFA required: {registry.get("mfa_status", "unknown")}')
 
     # 9b. Vulnerability lookup

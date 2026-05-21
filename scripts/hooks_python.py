@@ -16,6 +16,7 @@
 import json
 import re
 import tarfile
+import urllib.parse
 from pathlib import Path
 import sys
 
@@ -27,6 +28,39 @@ import analysis_shared as shared
 _NORM_RE = re.compile(r'[-_.]+')
 _RE_REPRO_CODE = re.compile(r'^diff.*\.(py|pyx|pxd|c|h|cpp|rs|js)\b')
 _RE_REPRO_META = re.compile(r'^diff.*(METADATA|RECORD|PKG-INFO|\.dist-info|setup\.py|pyproject\.toml)')
+
+# VCS dependency detection (Idea 12 analog for Python).
+# PEP 508 direct URL format: "package @ git+https://..." bypasses PyPI.
+# Composed from shared.VCS_SCHEMES_RE and shared.VCS_HOSTNAMES_RE so that
+# a new VCS transport added to analysis_shared.py propagates here.
+_RE_PY_VCS_DEP = re.compile(
+    r'@\s*(?:' + shared.VCS_SCHEMES_RE
+    + r'|https?://(?:' + shared.VCS_HOSTNAMES_RE + r')/)',
+    re.IGNORECASE,
+)
+# Commit hash: 7-40 hex chars after '@' (pip/uv URL) or '#' (fragment).
+# Uses shared.COMMIT_HASH_RE so the range stays in sync with JS/Ruby.
+_RE_PY_COMMIT_HASH = re.compile(
+    r'[@#]' + shared.COMMIT_HASH_RE + r'(?:\s|$|[#/.])', re.IGNORECASE,
+)
+# Foreign URL in requirements.txt: lines starting with a VCS scheme or a
+# non-PyPI http URL bypass the registry. Anchored to start of line (no MULTILINE;
+# used with re.match on individual stripped lines).
+_RE_PIP_FOREIGN_URL = re.compile(
+    r'^(?:' + shared.VCS_SCHEMES_RE
+    + r'|(?:https?|ftp)://(?!(?:files\.pythonhosted\.org|pypi\.org)/))',
+    re.IGNORECASE,
+)
+# VCS source entries in poetry.lock (type = "git") and uv.lock
+# (source = { git = "..." }). Both bypass PyPI entirely.
+# Poetry uses a [package.source] section; uv uses an inline TOML table.
+_RE_POETRY_GIT_SOURCE = re.compile(r'type\s*=\s*"git"', re.IGNORECASE)
+_RE_POETRY_GIT_URL = re.compile(
+    r'url\s*=\s*"([^"]{1,300})"', re.IGNORECASE)
+_RE_POETRY_GIT_REF = re.compile(
+    r'resolved_reference\s*=\s*"([0-9a-f]{7,64})"', re.IGNORECASE)
+_RE_UV_GIT_SOURCE = re.compile(
+    r'source\s*=\s*\{\s*git\s*=\s*"([^"]{1,300})"', re.IGNORECASE)
 
 
 # ---------------------------------------------------------------------------
@@ -231,6 +265,7 @@ class Hooks(shared.EcosystemHooks):
     ECOSYSTEM = 'python'
     OSV_ECOSYSTEM = 'PyPI'
     OSS_REBUILD_ECOSYSTEM = 'pypi'
+    NATIVE_BINARY_SUFFIXES: frozenset[str] = frozenset({'.so', '.pyd'})
 
     # Python projects use one of several lockfile formats. LOCKFILE_NAME is None
     # so the driver skips the single-lockfile warning; LOCKFILE_NAMES lists the
@@ -544,6 +579,28 @@ class Hooks(shared.EcosystemHooks):
         else:
             p('  (none declared)')
 
+        # VCS dependency check: URL-based deps in Requires-Dist bypass PyPI.
+        install_cmd_warnings: list[str] = []
+        _vcs_hash_deps: list[str] = []
+        _vcs_named_deps: list[str] = []
+        for rdl in runtime_dep_lines:
+            if _RE_PY_VCS_DEP.search(rdl):
+                _safe = shared.sanitize_line(rdl[:200])
+                if _RE_PY_COMMIT_HASH.search(rdl):
+                    _vcs_hash_deps.append(_safe)
+                else:
+                    _vcs_named_deps.append(_safe)
+        for _s in _vcs_hash_deps:
+            p(f'[!] VCS_DEPENDENCY (commit hash): {_s}')
+        for _s in _vcs_named_deps:
+            p(f'[!] VCS_DEPENDENCY (named ref): {_s}')
+        if _vcs_hash_deps:
+            install_cmd_warnings.append(
+                'VCS_DEPENDENCY:Requires-Dist (commit hash)')
+        if _vcs_named_deps:
+            install_cmd_warnings.append(
+                'VCS_DEPENDENCY:Requires-Dist (named ref)')
+
         # Python version requirement
         py_req = meta.get('Requires-Python', '')
         if py_req and isinstance(py_req, str):
@@ -627,6 +684,7 @@ class Hooks(shared.EcosystemHooks):
             'manifest_text': manifest_text,
             'manifest_extra_file': 'pyproject-metadata.txt',
             'install_hook_context': install_hook_context,
+            'install_cmd_warnings': install_cmd_warnings,
         }
 
     def download_old(
@@ -772,10 +830,13 @@ class Hooks(shared.EcosystemHooks):
         version: str,
         work: Path,
         p: 'shared.Printer',
+        source_url: str = '',
     ) -> dict:
         """Fetch PyPI JSON API: package info, version history, upload metadata.
 
-        self.registry_url overrides the default pypi.org base URL for private indices.
+        self.registry_url overrides the default pypi.org base URL for private
+        indices. Also checks GitHub repo metadata for Shai-Halud campaign
+        markers when source_url is a GitHub URL (Idea 16).
 
         Writes: provenance.txt (via p).
         Returns dict with keys: mfa_status, age_years_float, last_release_days,
@@ -879,6 +940,9 @@ class Hooks(shared.EcosystemHooks):
         for vline in ver_info_lines:
             p(vline)
 
+        # Idea 16: GitHub repo campaign marker (cross-ecosystem shared helper).
+        shared.emit_github_repo_meta(source_url, p)
+
         return {
             'mfa_status': mfa_status,
             'age_years_float': age_years_float,
@@ -910,26 +974,84 @@ class Hooks(shared.EcosystemHooks):
         lockfile = self.get_lockfile_path(project_root)
         lockfile_lines: list[str] = ['=== Lockfile check ===']
 
-        if lockfile.is_file() and dep_lines_new:
+        if lockfile.is_file():
             lf_text = lockfile.read_text(encoding='utf-8', errors='replace')
             lockfile_format = self._detect_lockfile_format(lockfile.name)
-            lockfile_lines.append(f'LOCKFILE: {lockfile.name} (format: {lockfile_format})')
+            lockfile_lines.append(
+                f'LOCKFILE: {lockfile.name} (format: {lockfile_format})')
 
-            for dep_line in dep_lines_new:
-                # Extract just the package name from "requests>=2.0,<3" etc.
-                m_dep = re.match(r'([A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?)', dep_line.strip())
-                if not m_dep:
-                    continue
-                dep_name = m_dep.group(1)
-                safe_dep = shared.sanitize_line(dep_name)
-                norm_dep = _NORM_RE.sub('_',dep_name).lower()
+            if dep_lines_new:
+                for dep_line in dep_lines_new:
+                    # Extract just the package name from "requests>=2.0,<3".
+                    m_dep = re.match(
+                        r'([A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?)',
+                        dep_line.strip())
+                    if not m_dep:
+                        continue
+                    dep_name = m_dep.group(1)
+                    safe_dep = shared.sanitize_line(dep_name)
+                    norm_dep = _NORM_RE.sub('_', dep_name).lower()
+                    found = self._dep_in_lockfile(
+                        dep_name, norm_dep, lf_text, lockfile_format)
+                    if found:
+                        lockfile_lines.append(f'IN_LOCKFILE: {safe_dep}')
+                    else:
+                        lockfile_lines.append(f'NOT_IN_LOCKFILE: {safe_dep}')
+                        not_in_lockfile.append(safe_dep)
 
-                found = self._dep_in_lockfile(dep_name, norm_dep, lf_text, lockfile_format)
-                if found:
-                    lockfile_lines.append(f'IN_LOCKFILE: {safe_dep}')
-                else:
-                    lockfile_lines.append(f'NOT_IN_LOCKFILE: {safe_dep}')
-                    not_in_lockfile.append(safe_dep)
+            # Foreign URL check: non-PyPI lines in requirements.txt bypass
+            # the registry (Idea 13 analog for Python). Runs regardless of
+            # whether dep_lines_new is empty.
+            # Foreign URL / VCS source checks. Runs regardless of
+            # dep_lines_new so that pre-existing entries are also caught.
+            if lockfile_format == 'pip-requirements':
+                # Build the configured-registry host (if any) for
+                # false-positive suppression (private registry users).
+                _priv_host = ''
+                if self.registry_url:
+                    _priv_host = urllib.parse.urlparse(
+                        self.registry_url).netloc.lower()
+                for _line in lf_text.splitlines():
+                    _stripped = _line.strip()
+                    if _stripped and not _stripped.startswith('#'):
+                        if _RE_PIP_FOREIGN_URL.match(_stripped):
+                            if _priv_host and _priv_host in _stripped.lower():
+                                continue
+                            lockfile_lines.append(
+                                f'[!] LOCKFILE_FOREIGN_URL: '
+                                f'{shared.sanitize_line(_stripped[:200])}')
+
+            elif lockfile_format == 'poetry':
+                # poetry.lock: packages with [package.source] type = "git"
+                # are VCS deps that bypass PyPI.
+                for _sm in _RE_POETRY_GIT_SOURCE.finditer(lf_text):
+                    # Back up to the start of the surrounding [[package]]
+                    # block to extract the URL.
+                    _block_start = lf_text.rfind('[[package]]', 0, _sm.start())
+                    _block = lf_text[_block_start:_sm.end() + 300]
+                    _url_m = _RE_POETRY_GIT_URL.search(_block)
+                    _ref_m = _RE_POETRY_GIT_REF.search(_block)
+                    _url = (shared.sanitize_line(_url_m.group(1)[:200])
+                            if _url_m else '(unknown)')
+                    if _ref_m:
+                        lockfile_lines.append(
+                            f'[!] VCS_DEPENDENCY (commit hash): {_url}'
+                            f'@{shared.sanitize_line(_ref_m.group(1)[:64])}')
+                    else:
+                        lockfile_lines.append(
+                            f'[!] VCS_DEPENDENCY (named ref): {_url}')
+
+            elif lockfile_format == 'uv':
+                # uv.lock: source = { git = "url?rev=..." } entries.
+                for _um in _RE_UV_GIT_SOURCE.finditer(lf_text):
+                    _raw_url = _um.group(1)
+                    _safe_url = shared.sanitize_line(_raw_url[:200])
+                    if '?rev=' in _raw_url or '#rev=' in _raw_url:
+                        lockfile_lines.append(
+                            f'[!] VCS_DEPENDENCY (commit hash): {_safe_url}')
+                    else:
+                        lockfile_lines.append(
+                            f'[!] VCS_DEPENDENCY (named ref): {_safe_url}')
         else:
             lockfile_lines.append('(no lockfile found or no deps to check)')
 

@@ -19,6 +19,7 @@ import json
 import re
 import tarfile
 import urllib.parse
+from datetime import datetime, timezone
 from pathlib import Path
 import sys
 
@@ -29,6 +30,32 @@ import analysis_shared as shared
 _RE_REPRO_CODE = re.compile(r'^diff.*\.(js|mjs|cjs|ts|jsx|tsx)\b')
 _RE_REPRO_META = re.compile(
     r'^diff.*(package\.json|package-lock\.json|\.npmignore|\.gitignore)')
+
+# VCS dependency detection (Idea 12 for JS).
+# Matches dep specs that pull directly from a VCS host instead of the registry.
+# Composed from shared.VCS_SCHEMES_RE so coverage stays in sync with other
+# ecosystems when new VCS transports or hosting aliases are added there.
+_RE_GIT_DEP = re.compile(
+    r'^(?:github:|gitlab:|bitbucket:|' + shared.VCS_SCHEMES_RE + r')',
+    re.IGNORECASE,
+)
+# Commit hash: 7-40 hex chars after '#' fragment in a VCS URL.
+# Uses shared.COMMIT_HASH_RE so the range stays in sync with Python/Ruby.
+_RE_COMMIT_HASH = re.compile(
+    r'#' + shared.COMMIT_HASH_RE + r'$', re.IGNORECASE)
+
+# VCS/lockfile foreign URL detection (Ideas 12-13 for JS).
+# _RE_GIT_DEP uses shared.VCS_SCHEMES_RE and shared.VCS_HOSTNAMES_RE.
+# _RE_LOCKFILE_RESOLVED matches "resolved" fields in package-lock.json;
+# foreign hosts (not in _TRUSTED_REGISTRY_HOSTS or self.registry_url) are
+# flagged as LOCKFILE_FOREIGN_URL -- the same signal used by Python/Ruby.
+_RE_LOCKFILE_RESOLVED = re.compile(
+    r'"resolved"\s*:\s*"(https?://[^"]{1,300})"'
+)
+_TRUSTED_REGISTRY_HOSTS: frozenset[str] = frozenset({
+    'registry.npmjs.org',
+    'registry.yarnpkg.com',
+})
 
 # npm package name allowlist: letters, digits, '.', '-', '_', '/', '@'.
 # Scoped names start with '@' (e.g. @scope/name). Max 214 chars (npm spec).
@@ -223,6 +250,227 @@ def _unpack_tgz(
 
 
 # ---------------------------------------------------------------------------
+# Idea 14-16 helpers: registry and provenance API checks
+# ---------------------------------------------------------------------------
+
+
+
+def _slsa_signer_repo(attest: dict) -> tuple[str, str]:
+    """Extract (signer_repo_url, workflow_path) from one SLSA attestation.
+
+    Handles two provenance predicate formats:
+      SLSA v1  (predicateType .../provenance/v1):
+        predicate.buildDefinition.externalParameters.workflow.{repository,path}
+      SLSA v0.2 (predicateType .../provenance/v0.2):
+        predicate.materials[0].uri  (git+https://github.com/owner/repo@ref)
+    Returns ('', '') when no usable URI is found.
+    """
+    predicate = attest.get('predicate', {}) or {}
+
+    # SLSA v1 path
+    workflow = (
+        predicate
+        .get('buildDefinition', {})
+        .get('externalParameters', {})
+        .get('workflow', {})
+    )
+    if isinstance(workflow, dict):
+        repo = str(workflow.get('repository', '') or '')
+        if repo:
+            return repo, str(workflow.get('path', '') or '')
+
+    # SLSA v0.2 path: materials[0].uri contains "git+https://...@ref"
+    materials = predicate.get('materials', []) or []
+    if materials and isinstance(materials[0], dict):
+        uri = str(materials[0].get('uri', '') or '')
+        if uri.startswith('git+'):
+            # Strip git+ prefix and @ref suffix to get bare repo URL.
+            repo = re.sub(r'^git\+', '', uri)
+            repo = re.sub(r'@[^@]{0,200}$', '', repo)
+            if repo:
+                return repo, ''
+
+    return '', ''
+
+
+def _norm_repo_url(url: str) -> str:
+    """Normalise a source/signer repo URL for comparison.
+
+    Strips scheme prefix, git+ transport prefix, .git suffix, and trailing
+    slash, then lowercases. Two URLs that differ only in these ways refer
+    to the same repo.
+    """
+    url = re.sub(r'^git\+', '', url.strip().lower().rstrip('/'))
+    url = re.sub(r'^https?://', '', url)
+    url = re.sub(r'^ssh://git@', '', url)
+    url = re.sub(r'^git@([^:]+):', r'\1/', url)
+    url = re.sub(r'\.git$', '', url)
+    return url
+
+
+def _check_slsa_provenance(
+    api_base: str, encoded_name: str, source_url: str, p: 'shared.Printer',
+) -> None:
+    """Idea 15: compare SLSA provenance signer repo against declared source.
+
+    Fetches the npm provenance attestation and checks whether the signing
+    repository matches the package's declared source URL. A mismatch
+    is the Shai-Halud OIDC-token-theft signature (the signature appears
+    cryptographically valid but was produced by a different repo's workflow).
+    """
+    p('')
+    p('=== SLSA provenance ===')
+    prov_url = f'{api_base}/-/package/{encoded_name}/provenance'
+    prov_data = shared.http_get(prov_url)
+    if not prov_data:
+        p('SLSA_PROVENANCE: none (package not published with --provenance)')
+        return
+    try:
+        prov_json = json.loads(prov_data.decode('utf-8', errors='replace'))
+    except ValueError:
+        p('SLSA_PROVENANCE: parse error')
+        return
+
+    attestations = prov_json.get('attestations', []) or []
+    if not attestations:
+        p('SLSA_PROVENANCE: none (no attestations in registry response)')
+        return
+
+    signer_repo, workflow_path = '', ''
+    for attest in attestations:
+        signer_repo, workflow_path = _slsa_signer_repo(attest)
+        if signer_repo:
+            break
+
+    if not signer_repo:
+        p('SLSA_PROVENANCE: present but signer repository URI not found')
+        return
+
+    p(f'SLSA_SIGNER_REPO: {shared.sanitize_line(signer_repo[:300])}')
+    if workflow_path:
+        p(f'SLSA_WORKFLOW_PATH: {shared.sanitize_line(workflow_path[:200])}')
+
+    if not source_url:
+        p('SIGSTORE_REPO_MISMATCH: N/A (no declared source URL to compare)')
+        return
+
+    if _norm_repo_url(signer_repo) != _norm_repo_url(source_url):
+        p('SIGSTORE_REPO_MISMATCH: YES')
+        p(f'  declared: {shared.sanitize_line(source_url[:300])}')
+        p(f'  signer:   {shared.sanitize_line(signer_repo[:300])}')
+        p('  NOTE: surface for human review; monorepos may sign from a')
+        p('  parent repo. A mismatch combined with other signals is HIGH.')
+    else:
+        p('SIGSTORE_REPO_MISMATCH: NO')
+
+
+# npm username allowlist: letters, digits, hyphens, underscores, dots.
+# Used before constructing search API URLs (command-injection prevention).
+_RE_NPM_USER = re.compile(r'^[A-Za-z0-9._-]{1,80}$')
+# 72 hours in seconds; packages published more recently than this count
+# toward the velocity total.
+_VELOCITY_WINDOW_SECS = 72 * 3600
+# Packages published within 72 hours by a single user to qualify as anomalous.
+_VELOCITY_THRESHOLD = 10
+# Publisher tenure in days below which they are considered a "new" publisher.
+_NEW_PUBLISHER_DAYS = 90
+
+
+def _parse_npm_date(date_str: str) -> 'datetime | None':
+    """Parse an ISO-8601 date string (with or without trailing Z/offset).
+
+    Returns a timezone-aware datetime or None on failure.
+    """
+    try:
+        clean = date_str.rstrip('Z').split('+')[0].split('.')[0]
+        return datetime.fromisoformat(clean).replace(tzinfo=timezone.utc)
+    except (ValueError, OverflowError):
+        return None
+
+
+def _check_publisher_velocity(
+    api_base: str,
+    npm_user_name: str,
+    p: 'shared.Printer',
+) -> None:
+    """Idea 14: detect anomalous publish velocity for this package's publisher.
+
+    Queries the npm search API for all packages maintained by the publisher,
+    counts those published in the last 72 hours, and emits
+    PUBLISHER_VELOCITY_ANOMALOUS if the count exceeds the threshold.
+
+    Severity is HIGH when the publisher is also new (their oldest maintained
+    package is less than _NEW_PUBLISHER_DAYS days old); MEDIUM otherwise.
+    This uses the oldest package date from the search results as a proxy for
+    publisher tenure, since npm does not expose direct account creation dates.
+    """
+    if not npm_user_name or not _RE_NPM_USER.match(npm_user_name):
+        return
+    if 'registry.npmjs.org' not in api_base:
+        return
+
+    p('')
+    p(f'=== Publisher velocity: {shared.sanitize_line(npm_user_name)} ===')
+
+    search_url = (
+        'https://registry.npmjs.org/-/v1/search'
+        f'?text=maintainer:{urllib.parse.quote(npm_user_name, safe="")}'
+        '&size=250'
+    )
+    search_data = shared.http_get(search_url, timeout=20)
+    if not search_data:
+        p('PUBLISHER_VELOCITY: (search API unavailable)')
+        return
+
+    try:
+        search_json = json.loads(search_data.decode('utf-8', errors='replace'))
+    except ValueError:
+        p('PUBLISHER_VELOCITY: (parse error)')
+        return
+
+    now = datetime.now(timezone.utc)
+    recent_count = 0
+    oldest_dt: 'datetime | None' = None
+    objects = search_json.get('objects', []) or []
+    for obj in objects:
+        pkg = obj.get('package', {}) or {}
+        date_str = str(pkg.get('date', '') or '')
+        if not date_str:
+            continue
+        pub_dt = _parse_npm_date(date_str)
+        if pub_dt is None:
+            continue
+        age_secs = (now - pub_dt).total_seconds()
+        if 0 <= age_secs <= _VELOCITY_WINDOW_SECS:
+            recent_count += 1
+        if oldest_dt is None or pub_dt < oldest_dt:
+            oldest_dt = pub_dt
+
+    total_count = len(objects)
+    p(f'PUBLISHER_TOTAL_PACKAGES: {total_count}')
+    p(f'PUBLISHER_RECENT_72H: {recent_count}')
+
+    if recent_count >= _VELOCITY_THRESHOLD:
+        tenure_days = (
+            int((now - oldest_dt).total_seconds() / 86400)
+            if oldest_dt else None
+        )
+        is_new = tenure_days is not None and tenure_days < _NEW_PUBLISHER_DAYS
+        severity = 'HIGH' if is_new else 'MEDIUM'
+        p(f'PUBLISHER_VELOCITY_ANOMALOUS: YES ({severity})')
+        p(f'  {recent_count} packages published in last 72h '
+          f'(threshold: {_VELOCITY_THRESHOLD})')
+        if is_new:
+            p(f'  Publisher tenure: {tenure_days} days '
+              f'(<{_NEW_PUBLISHER_DAYS} days; new publisher + high velocity = HIGH)')
+        elif tenure_days is not None:
+            p(f'  Publisher tenure: {tenure_days} days '
+              f'(consider: may be a high-volume CI pipeline such as a monorepo)')
+    else:
+        p('PUBLISHER_VELOCITY_ANOMALOUS: NO')
+
+
+# ---------------------------------------------------------------------------
 # Public API: called by dep_review.py
 # ---------------------------------------------------------------------------
 
@@ -230,6 +478,7 @@ class Hooks(shared.EcosystemHooks):
     ECOSYSTEM = 'javascript'
     OSV_ECOSYSTEM = 'npm'
     OSS_REBUILD_ECOSYSTEM = 'npm'
+    NATIVE_BINARY_SUFFIXES: frozenset[str] = frozenset({'.node'})
 
     # Multiple lockfile formats; LOCKFILE_NAME is None so the driver skips the
     # single-lockfile warning. LOCKFILE_NAMES lists candidates in
@@ -546,6 +795,32 @@ class Hooks(shared.EcosystemHooks):
             else:
                 p('  (none)')
 
+            # Git-reference dependency check: deps resolved from VCS refs
+            # bypass the registry entirely. Separate by severity: raw commit
+            # hashes are HIGH (unauditable pinned point); named refs MEDIUM.
+            _git_hash_deps: list[str] = []
+            _git_named_deps: list[str] = []
+            for _dep_name, _dep_spec in all_runtime.items():
+                if not isinstance(_dep_spec, str):
+                    continue
+                if _RE_GIT_DEP.match(_dep_spec):
+                    _safe = shared.sanitize_line(
+                        f'{_dep_name}@{_dep_spec}'[:200])
+                    if _RE_COMMIT_HASH.search(_dep_spec):
+                        _git_hash_deps.append(_safe)
+                    else:
+                        _git_named_deps.append(_safe)
+            for _s in _git_hash_deps:
+                p(f'[!] VCS_DEPENDENCY (commit hash): {_s}')
+            for _s in _git_named_deps:
+                p(f'[!] VCS_DEPENDENCY (named ref): {_s}')
+            if _git_hash_deps:
+                install_cmd_warnings.append(
+                    'VCS_DEPENDENCY:package.json (commit hash)')
+            if _git_named_deps:
+                install_cmd_warnings.append(
+                    'VCS_DEPENDENCY:package.json (named ref)')
+
             source_url = _extract_source_url(pkg_json)
             hp_display = (
                 shared.sanitize_line(source_url) if source_url
@@ -725,12 +1000,17 @@ class Hooks(shared.EcosystemHooks):
         version: str,
         work: Path,
         p: 'shared.Printer',
+        source_url: str = '',
     ) -> dict:
         """Fetch npm registry API: full package metadata and
         version-specific data.
 
         Endpoint: registry.npmjs.org/{pkgname} (full doc) and
                   registry.npmjs.org/{pkgname}/{version} (version-specific).
+        Also checks:
+          - GitHub repo metadata for Shai-Halud campaign markers (Idea 16).
+          - npm provenance API for SLSA signer/repo mismatch (Idea 15).
+          - npm search API for publisher velocity anomaly (Idea 14).
 
         Writes: provenance.txt (via p).
         Returns dict with keys: mfa_status, age_years_float,
@@ -750,6 +1030,7 @@ class Hooks(shared.EcosystemHooks):
         version_stability = 'unknown'
         license_from_registry: list[str] = []
         ver_info_lines: list[str] = []
+        npm_user_name: str = ''   # publisher of this specific version (Idea 14)
 
         p(f'=== Provenance: {pkgname} {version} ===')
         p('')
@@ -832,6 +1113,11 @@ class Hooks(shared.EcosystemHooks):
                     ver_data.decode('utf-8', errors='replace'))
                 ver_info_lines.append('VERSION_INFO (selected fields):')
                 dist = ver_json.get('dist', {}) or {}
+                npm_user_raw = ver_json.get('_npmUser', '')
+                if isinstance(npm_user_raw, dict):
+                    npm_user_name = str(npm_user_raw.get('name', ''))
+                elif isinstance(npm_user_raw, str):
+                    npm_user_name = npm_user_raw
                 for key in ('version', '_npmUser', 'gitHead'):
                     val = ver_json.get(key, '')
                     if val:
@@ -869,6 +1155,18 @@ class Hooks(shared.EcosystemHooks):
         for vline in ver_info_lines:
             p(vline)
 
+        # Idea 16: GitHub repo campaign marker (cross-ecosystem shared helper).
+        shared.emit_github_repo_meta(source_url, p)
+
+        # Idea 15: SLSA provenance signer/repo mismatch (JS only).
+        # npm exposes provenance attestations without external tooling.
+        _check_slsa_provenance(api_base, encoded_name, source_url, p)
+
+        # Idea 14: Publisher velocity anomaly (JS only).
+        # A publisher who pushed many packages in the last 72 hours is a
+        # strong account-takeover or worm indicator.
+        _check_publisher_velocity(api_base, npm_user_name, p)
+
         return {
             'mfa_status': mfa_status,
             'age_years_float': age_years_float,
@@ -901,25 +1199,55 @@ class Hooks(shared.EcosystemHooks):
         lockfile = self.get_lockfile_path(project_root)
         lockfile_lines: list[str] = ['=== Lockfile check ===']
 
-        if lockfile.is_file() and dep_lines_new:
+        if lockfile.is_file():
             lf_text = lockfile.read_text(encoding='utf-8', errors='replace')
             lockfile_format = self._detect_lockfile_format(lockfile.name)
             lockfile_lines.append(
                 f'LOCKFILE: {lockfile.name} (format: {lockfile_format})')
 
-            for dep_line in dep_lines_new:
-                # Extract name from "pkgname@^version"
-                # or "@scope/name@version"
-                m = re.match(r'^(@[^@]+|[^@]+)@', dep_line.strip())
-                dep_name = m.group(1) if m else dep_line.strip()
-                if not dep_name or not _NPM_NAME_RE.match(dep_name):
-                    continue
-                safe_dep = shared.sanitize_line(dep_name)
-                if self._dep_in_lockfile(dep_name, lf_text, lockfile_format):
-                    lockfile_lines.append(f'IN_LOCKFILE: {safe_dep}')
-                else:
-                    lockfile_lines.append(f'NOT_IN_LOCKFILE: {safe_dep}')
-                    not_in_lockfile.append(safe_dep)
+            if dep_lines_new:
+                for dep_line in dep_lines_new:
+                    # Extract name from "pkgname@^version"
+                    # or "@scope/name@version"
+                    m = re.match(r'^(@[^@]+|[^@]+)@', dep_line.strip())
+                    dep_name = m.group(1) if m else dep_line.strip()
+                    if not dep_name or not _NPM_NAME_RE.match(dep_name):
+                        continue
+                    safe_dep = shared.sanitize_line(dep_name)
+                    if self._dep_in_lockfile(dep_name, lf_text, lockfile_format):
+                        lockfile_lines.append(f'IN_LOCKFILE: {safe_dep}')
+                    else:
+                        lockfile_lines.append(f'NOT_IN_LOCKFILE: {safe_dep}')
+                        not_in_lockfile.append(safe_dep)
+
+            # Foreign resolved URL check (npm format only).
+            # package-lock.json v2/v3 "resolved" fields should all point to
+            # the npm registry (or the configured private registry); any other
+            # host is a potential supply-chain injection.
+            # Deduplicated and capped to avoid noise.
+            if lockfile_format == 'npm':
+                _trusted = set(_TRUSTED_REGISTRY_HOSTS)
+                if self.registry_url:
+                    _rh = urllib.parse.urlparse(
+                        self.registry_url).netloc.lower()
+                    if _rh:
+                        _trusted.add(_rh)
+                _foreign_urls: list[str] = []
+                _seen_foreign: set[str] = set()
+                for _m in _RE_LOCKFILE_RESOLVED.finditer(lf_text):
+                    _url = _m.group(1)
+                    _is_trusted = any(f'//{h}/' in _url for h in _trusted)
+                    if not _is_trusted and _url not in _seen_foreign:
+                        _seen_foreign.add(_url)
+                        _foreign_urls.append(_url)
+                for _furl in _foreign_urls[:10]:
+                    lockfile_lines.append(
+                        f'[!] LOCKFILE_FOREIGN_URL: '
+                        f'{shared.sanitize_line(_furl[:200])}')
+                if len(_foreign_urls) > 10:
+                    lockfile_lines.append(
+                        f'  ... and {len(_foreign_urls) - 10} more'
+                        f' foreign resolved URLs')
         else:
             lockfile_lines.append('(no lockfile found or no deps to check)')
 
