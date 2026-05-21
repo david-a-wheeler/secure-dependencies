@@ -5,6 +5,10 @@ concrete approaches for improving detection in the secure-dependencies skill.
 Each idea is assessed for pros, cons, effectiveness enhancements, and
 implementation path in the deterministic scripts.
 
+We have since implemented these ideas. Where practical we've tried to
+generalize them to detect other similar attacks, even if they happen in
+other ecosystems.
+
 ---
 
 ## Attack Summary
