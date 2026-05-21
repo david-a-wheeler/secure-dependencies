@@ -1,60 +1,60 @@
 # Investigation: GitHub Internal Repository Breach via Malicious VS Code Extension
 
 ## Overview
-On May 18, 2026, GitHub confirmed a significant security breach resulting in the exfiltration of approximately **3,800 internal source code repositories** [2, 5]. The attack was executed by a threat group known as **TeamPCP** (tracked as **UNC6780**), who utilized a compromised version of the popular **Nx Console** Visual Studio Code extension to gain initial access to developer workstations [1, 4].
+On May 18, 2026, GitHub confirmed a significant security breach resulting in the exfiltration of approximately **3,800 internal source code repositories** [HackerNews2026, CybersecurityNews2026]. The attack was executed by a threat group known as **TeamPCP** (tracked as **UNC6780**), who utilized a compromised version of the popular **Nx Console** Visual Studio Code extension to gain initial access to developer workstations [StepSecurity2026, ThreatLocker2026].
 
-The attack delivered a sophisticated worm dubbed **"Mini Shai-Hulud,"** which was designed to harvest credentials, establish persistence, and propagate through internal networks and CI/CD pipelines [2, 9].
+The attack delivered a sophisticated worm dubbed **"Mini Shai-Hulud,"** which was designed to harvest credentials, establish persistence, and propagate through internal networks and CI/CD pipelines [HackerNews2026, EndorLabs2026].
 
 ## Timeline of the Compromise
-- **May 18, 2026:** Attackers used a stolen contributor token and marketplace credentials (`VSCE_PAT`) to publish a malicious version (**v18.95.0**) of the **Nx Console** extension (`nrwl.angular-console`) [1, 5].
-- **Exposure Window:** The malicious extension was live on the VS Code Marketplace for approximately **11–18 minutes** before being removed [1, 2].
-- **Execution:** Upon activation, the extension executed an obfuscated JavaScript payload fetched from a "dangling orphan commit" (`558b09d7`) in the official `nrwl/nx` repository [1, 2].
+- **May 18, 2026:** Attackers used a stolen contributor token and marketplace credentials (`VSCE_PAT`) to publish a malicious version (**v18.95.0**) of the **Nx Console** extension (`nrwl.angular-console`) [StepSecurity2026, CybersecurityNews2026].
+- **Exposure Window:** The malicious extension was live on the VS Code Marketplace for approximately **11–18 minutes** before being removed [StepSecurity2026, HackerNews2026].
+- **Execution:** Upon activation, the extension executed an obfuscated JavaScript payload fetched from a "dangling orphan commit" (`558b09d7`) in the official `nrwl/nx` repository [StepSecurity2026, HackerNews2026].
 
 ## Indicators of Compromise (IoCs)
 
 ### Malicious Artifacts
 - **Extension ID:** `nrwl.angular-console` (Nx Console)
-- **Compromised Version:** `18.95.0` [1, 2, 4]
-- **VSIX Hash (SHA-256):** `1a4afce34918bdc74ae3f31edaffffaa0ee074d83618f53edfd88137927340b8` [1, 2]
-- **`main.js` Hash (SHA-256):** `b0cefb66b953e5184b6adb3035e9e267335ac5eabfe1848e07834777b9397b74` [2]
-- **Payload Source:** Orphan commit `558b09d7ad0d1660e2a0fb8a06da81a6f42e06d2` on GitHub [1, 2].
+- **Compromised Version:** `18.95.0` [StepSecurity2026, HackerNews2026, ThreatLocker2026]
+- **VSIX Hash (SHA-256):** `1a4afce34918bdc74ae3f31edaffffaa0ee074d83618f53edfd88137927340b8` [StepSecurity2026, HackerNews2026]
+- **`main.js` Hash (SHA-256):** `b0cefb66b953e5184b6adb3035e9e267335ac5eabfe1848e07834777b9397b74` [HackerNews2026]
+- **Payload Source:** Orphan commit `558b09d7ad0d1660e2a0fb8a06da81a6f42e06d2` on GitHub [StepSecurity2026, HackerNews2026].
 
 ### Persistence & Filesystem Markers
-- **Backdoor Script:** `~/.local/share/kitty/cat.py` (Python-based backdoor) [1, 2].
-- **Persistence Mechanism:** `~/Library/LaunchAgents/com.user.kitty-monitor.plist` (macOS) [1].
+- **Backdoor Script:** `~/.local/share/kitty/cat.py` (Python-based backdoor) [StepSecurity2026, HackerNews2026].
+- **Persistence Mechanism:** `~/Library/LaunchAgents/com.user.kitty-monitor.plist` (macOS) [StepSecurity2026].
 - **AI/CLI Hooks:**
-    - `.claude/settings.json` (Targeted for secret harvesting) [1, 6].
-    - `.claude/router_runtime.js` [6].
-- **Hidden Configs:** `~/.config/sysmon`, `~/.config/audiomon` [7].
+    - `.claude/settings.json` (Targeted for secret harvesting) [StepSecurity2026, Qualysec2026].
+    - `.claude/router_runtime.js` [Qualysec2026].
+- **Hidden Configs:** `~/.config/sysmon`, `~/.config/audiomon` [OxSecurity2026].
 - **Staging/State Files:**
     - `/var/tmp/.gh_update_state`
     - `/tmp/kitty-*`
-    - Environment variable `__DAEMONIZED=1` [1].
+    - Environment variable `__DAEMONIZED=1` [StepSecurity2026].
 
 ### Network & Exfiltration
-- **C2 Subnet:** `83.142.209.0/24` [8].
-- **Known C2 Domains:** `git-service[.]com`, `git-tanstack[.]com`, `modesl[.]litellm[.]cloud`, `checkmarx[.]zone` [2].
-- **C2 Polling Query:** `api.github.com/search/commits?q=firedalazer` [1].
-- **Exfiltration Repositories:** Public repositories created on victim accounts named **"A Mini Shai-Hulud has Appeared"** [9, 10].
-- **Commit Messages:** Patterns including `EveryBoiWeBuildIsAWormyBoi:<base64-token>` [10].
+- **C2 Subnet:** `83.142.209.0/24` [PhoenixSecurity2026].
+- **Known C2 Domains:** `git-service[.]com`, `git-tanstack[.]com`, `modesl[.]litellm[.]cloud`, `checkmarx[.]zone` [HackerNews2026].
+- **C2 Polling Query:** `api.github.com/search/commits?q=firedalazer` [StepSecurity2026].
+- **Exfiltration Repositories:** Public repositories created on victim accounts named **"A Mini Shai-Hulud has Appeared"** [EndorLabs2026, Upwind2026].
+- **Commit Messages:** Patterns including `EveryBoiWeBuildIsAWormyBoi:<base64-token>` [Upwind2026].
 
 ## Detection & Prevention Strategies
 
 ### 1. Pre-Installation Review & Policies
 To detect and prevent malicious content *before* installation:
-- **Minimum Age Policy:** Implement a "quarantine" period (e.g., 48–72 hours) for new extension or package versions before they are allowed in production environments [1, 2].
-- **Publisher Whitelisting:** Use VS Code's `extensions.allowed` setting to restrict installations to verified, corporate-approved publishers [2].
-- **Disable Auto-Updates:** Set `"extensions.autoUpdate": false` in high-security environments to prevent "direct push" attacks from compromised publishers [1, 2].
+- **Minimum Age Policy:** Implement a "quarantine" period (e.g., 48–72 hours) for new extension or package versions before they are allowed in production environments [StepSecurity2026, HackerNews2026].
+- **Publisher Whitelisting:** Use VS Code's `extensions.allowed` setting to restrict installations to verified, corporate-approved publishers [HackerNews2026].
+- **Disable Auto-Updates:** Set `"extensions.autoUpdate": false` in high-security environments to prevent "direct push" attacks from compromised publishers [StepSecurity2026, HackerNews2026].
 - **Pre-Install Sandboxing:** Run new extensions in a sandboxed or containerized environment to monitor for unexpected network requests or shell executions.
 
 ### 2. Behavioral Detection (EDR/SIEM)
-- **Runtime Monitoring:** Monitor for the **Bun runtime** (`bun`) being executed by IDE processes, as the "Mini Shai-Hulud" worm used it to bypass Node.js-based security tools [9, 2].
-- **Shell Command Auditing:** Alert on VS Code child processes executing shell commands related to "MCP setup tasks" or hidden directory creation [1, 2].
-- **Credential Access:** Monitor for unauthorized access to `~/.aws/credentials`, `~/.ssh/`, or CLI tools like `op` (1Password) and `bw` (Bitwarden) [1, 2].
-- **DNS Tunneling Detection:** Monitor for high volumes of encoded subdomains, which the payload used as a redundant exfiltration path [2].
+- **Runtime Monitoring:** Monitor for the **Bun runtime** (`bun`) being executed by IDE processes, as the "Mini Shai-Hulud" worm used it to bypass Node.js-based security tools [EndorLabs2026, HackerNews2026].
+- **Shell Command Auditing:** Alert on VS Code child processes executing shell commands related to "MCP setup tasks" or hidden directory creation [StepSecurity2026, HackerNews2026].
+- **Credential Access:** Monitor for unauthorized access to `~/.aws/credentials`, `~/.ssh/`, or CLI tools like `op` (1Password) and `bw` (Bitwarden) [StepSecurity2026, HackerNews2026].
+- **DNS Tunneling Detection:** Monitor for high volumes of encoded subdomains, which the payload used as a redundant exfiltration path [HackerNews2026].
 
 ### 3. Immediate Remediation Warnings
-- **Dead-Man's Switch:** The worm includes logic to detect token revocation. If it detects its harvested tokens are revoked within 24 hours without the device being isolated, it may attempt to execute `rm -rf ~/` [6, 11].
+- **Dead-Man's Switch:** The worm includes logic to detect token revocation. If it detects its harvested tokens are revoked within 24 hours without the device being isolated, it may attempt to execute `rm -rf ~/` [Qualysec2026, Wiz2026].
 - **Isolation First:** Always isolate the compromised workstation from the network *before* revoking credentials.
 
 ## Generalized Risk Detection & Resilience Framework
@@ -172,14 +172,14 @@ When evaluating *any* signal from an unknown attack, the AI should apply the **"
 By grounding detection in these **Invariants**, we create a defense that remains effective even as attackers switch from JavaScript to Rust, or from VS Code to new AI-native IDEs.
 
 ## Sources
-- [1] [Nx Console VS Code Extension Compromised - StepSecurity](https://www.stepsecurity.io/blog/nx-console-vs-code-extension-compromised)
-- [2] [GitHub Internal Repositories Breached via Malicious Nx Console VS Code Extension - The Hacker News](https://thehackernews.com/2026/05/github-internal-repositories-breached.html)
-- [3] [GitHub Breached via VS Code Extension - Aikido](https://www.aikido.dev/blog/github-breached-vs-code-extension)
-- [4] [GitHub breach likely caused by Nx Console compromise - ThreatLocker](https://www.threatlocker.com/blog/github-breach-likely-caused-by-nx-console-compromise)
-- [5] [GitHub Internal Repositories Breached via Weaponized VS Code Extension - CybersecurityNews](https://cybersecuritynews.com/github-internal-repositories-breached/)
-- [6] [Mini Shai Hulud Worm Infects 170+ npm and PyPI Packages in Autonomous Supply Chain Attack - Qualysec](https://qualysec.com/mini-shai-hulud-worm-infects-170-npm-and-pypi-packages-in-autonomous-supply-chain-attack/)
-- [7] [The Mother of All AI Supply Chains - Ox Security](https://www.ox.security/blog/the-mother-of-all-ai-supply-chains/)
-- [8] [TeamPCP Wave Four: GitHub Breach via Poisoned VS Code Extension - Phoenix Security](https://phoenix.security/blog/teampcp-wave-four-github-breach-via-poisoned-vs-code-extension/)
-- [9] [Shai-Hulud 2 Malware Campaign Targets GitHub and Cloud Credentials Using Bun Runtime - Endor Labs](https://www.endorlabs.com/blog/shai-hulud-2-malware-campaign-targets-github-and-cloud-credentials-using-bun-runtime)
-- [10] [A Mini Shai-Hulud Has Appeared: Dissecting a Multi-Vector npm Supply Chain Worm - Upwind](https://www.upwind.io/blog/a-mini-shai-hulud-has-appeared)
-- [11] [Mini Shai-Hulud Strikes Again: TanStack + more npm Packages Compromised - Wiz](https://www.wiz.io/blog/mini-shai-hulud-strikes-again-tanstack-more-npm-packages-compromised)
+- [StepSecurity2026] [StepSecurity, May 2026, "Nx Console VS Code Extension Compromised"](https://www.stepsecurity.io/blog/nx-console-vs-code-extension-compromised)
+- [HackerNews2026] [The Hacker News, May 2026, "GitHub Internal Repositories Breached via Malicious Nx Console VS Code Extension"](https://thehackernews.com/2026/05/github-internal-repositories-breached.html)
+- [Aikido2026] [Aikido, May 2026, "GitHub Breached via VS Code Extension"](https://www.aikido.dev/blog/github-breached-vs-code-extension)
+- [ThreatLocker2026] [ThreatLocker, May 2026, "GitHub breach likely caused by Nx Console compromise"](https://www.threatlocker.com/blog/github-breach-likely-caused-by-nx-console-compromise)
+- [CybersecurityNews2026] [CybersecurityNews, May 2026, "GitHub Internal Repositories Breached via Weaponized VS Code Extension"](https://cybersecuritynews.com/github-internal-repositories-breached/)
+- [Qualysec2026] [Qualysec, May 2026, "Mini Shai Hulud Worm Infects 170+ npm and PyPI Packages in Autonomous Supply Chain Attack"](https://qualysec.com/mini-shai-hulud-worm-infects-170-npm-and-pypi-packages-in-autonomous-supply-chain-attack/)
+- [OxSecurity2026] [Ox Security, May 2026, "The Mother of All AI Supply Chains"](https://www.ox.security/blog/the-mother-of-all-ai-supply-chains/)
+- [PhoenixSecurity2026] [Phoenix Security, May 2026, "TeamPCP Wave Four: GitHub Breach via Poisoned VS Code Extension"](https://phoenix.security/blog/teampcp-wave-four-github-breach-via-poisoned-vs-code-extension/)
+- [EndorLabs2026] [Endor Labs, May 2026, "Shai-Hulud 2 Malware Campaign Targets GitHub and Cloud Credentials Using Bun Runtime"](https://www.endorlabs.com/blog/shai-hulud-2-malware-campaign-targets-github-and-cloud-credentials-using-bun-runtime)
+- [Upwind2026] [Upwind, May 2026, "A Mini Shai-Hulud Has Appeared: Dissecting a Multi-Vector npm Supply Chain Worm"](https://www.upwind.io/blog/a-mini-shai-hulud-has-appeared)
+- [Wiz2026] [Wiz, May 2026, "Mini Shai-Hulud Strikes Again: TanStack + more npm Packages Compromised"](https://www.wiz.io/blog/mini-shai-hulud-strikes-again-tanstack-more-npm-packages-compromised)

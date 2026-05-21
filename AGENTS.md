@@ -16,6 +16,15 @@ or processes to apply.
 As much as practical, we want a lesson learned from any ecosystem
 to be applied to all ecosystems.
 
+## Citations
+
+Record citations of external material, especially when doing research.
+Use [AuthorDate] citation reference format, and in the list of citations
+use the format `[AuthorDate] [Author(s), Date, "Title", Publication](URL)`
+where `Author` the primary author's last name.
+If no individual author is found, use publishing organization name.
+Double-check all URLs to prevent hallucination of citations or URLs.
+
 ## Style
 
 Do not use long dashes (em dashes or en dashes).
