@@ -1,6 +1,6 @@
 # AGENTS.md
 
-## Size, reuse, and ecosystem sharing
+## Size and reuse
 
 Try to keep implementation short and simple
 while still providing functionality and security.
@@ -8,8 +8,13 @@ while still providing functionality and security.
 In particular, define and use methods instead of repeating
 code constructs where reasonable.
 
-Try to share constructs between ecosystems, such as patterns to search for,
-so lessons learned from one ecosystem are more likely to be shared.
+## Ecosystem sharing
+
+Try to share constructs between ecosystems, such as patterns to search for
+or processes to apply.
+
+As much as practical, we want a lesson learned from any ecosystem
+to be applied to all ecosystems.
 
 ## Style
 
