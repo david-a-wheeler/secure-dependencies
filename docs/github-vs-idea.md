@@ -44,9 +44,10 @@ The attack delivered a sophisticated worm dubbed **"Mini Shai-Hulud,"** which wa
 To detect and prevent malicious content *before* installation:
 - **Minimum Age Policy:** Implement a "quarantine" period (e.g., 48-72 hours) for new extension or
   package versions before they are allowed in production environments [Kurmi2026, Lakshmanan2026].
-  - *(Tool: (3) worth implementing -- we check `last_release_days` but not the age of a specific
-    new version. Add a flag when `ver.published_at` is within the last 72 hours; applies to all
-    ecosystems via the registry API.)*
+  - *(Tool: (1) implemented -- `version_published_days` added to all three ecosystems
+    (npm, PyPI, RubyGems). Versions published within 72 hours trigger a `version_age`
+    concern in CONCERN_SUMMARY and a health concern in project-health.txt, with
+    explanatory context about why a brief delay is often wise.)*
 - **Publisher Whitelisting:** Use VS Code's `extensions.allowed` setting to restrict installations
   to verified, corporate-approved publishers [Lakshmanan2026].
   - *(Tool: (2) not applicable -- VS Code policy, not a package registry scanner.)*
