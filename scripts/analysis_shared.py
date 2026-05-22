@@ -1047,6 +1047,18 @@ VCS_HOSTNAMES_RE: str = r'(?:github|gitlab|bitbucket)\.com'
 # possible; use {7,40} when only SHA-1 is expected.
 COMMIT_HASH_RE: str = r'[0-9a-f]{7,40}'
 
+# Mini Shai-Hulud worm: persistence and dead-man's-switch path markers.
+# These appear in file-write or subprocess calls inside malicious packages.
+# kitty/cat.py: Python backdoor disguised as the kitty terminal's data dir.
+# kitty-monitor: LaunchAgent plist name used for macOS persistence.
+# gh-token-monitor: dead-man's-switch script fired when tokens are revoked.
+# Sources: [Kurmi2026, Lakshmanan2026]
+MINI_SHAI_HULUD_PATHS_RE: str = (
+    r'\.local[/\\]share[/\\]kitty[/\\]cat\.py'
+    r'|kitty-monitor'
+    r'|gh-token-monitor'
+)
+
 
 def blind_scan(
     label: str,
@@ -1305,6 +1317,23 @@ ADVERSARIAL_PATTERNS: list[tuple[str, str]] = [
     # 1000+ spaces/tabs followed by a non-whitespace character: content hidden
     # after padding that won't be visible in most editors or diff views.
     ('whitespace-hiding', r'[ \t]{1000,}[^ \t\r\n]'),
+    # Mini Shai-Hulud campaign fingerprints: zero-false-positive strings with
+    # no known legitimate use in package code. Finding any of these is definitive
+    # evidence of the May 2026 GitHub/Nx-Console supply-chain worm.
+    # firedalazer: unique dead-drop keyword for the GitHub commit-search C2 channel.
+    # WormyBoi: prefix of exfiltration commit messages (EveryBoiWeBuildIsAWormyBoi).
+    # niagA oG eW ereH: reversed Dune-theme string used in repo descriptions
+    #   and exfiltration logs to evade simple text filters.
+    # firedalazer C2 URL: hardcoded polling endpoint embedded in worm code.
+    # Sources: [Kurmi2026, Machluf2026, Lakshmanan2026]
+    ('mini-shai-hulud-firedalazer',
+     r'firedalazer'),
+    ('mini-shai-hulud-wormyboi',
+     r'WormyBoi'),
+    ('mini-shai-hulud-reversed-string',
+     r'niagA oG eW ereH'),
+    ('mini-shai-hulud-c2-url',
+     r'api\.github\.com/search/commits\?q=firedalazer'),
 ]
 
 # Labels that trigger ADVERSARIAL_GATE: ABORT.  These represent unambiguous
@@ -1317,6 +1346,8 @@ ADVERSARIAL_PATTERNS: list[tuple[str, str]] = [
 #     instructed to ignore such claims. Primary defenses: sub-agent isolation
 #     and never reading raw-* files.
 #   - whitespace-hiding hides content after 1000+ spaces, invisible in editors
+#   - mini-shai-hulud-*: fingerprints of the May 2026 GitHub/Nx-Console worm;
+#     zero-false-positive strings with no known legitimate use in any package.
 #
 # non-ascii-in-identifiers is NOT in this set: accented characters and
 # non-Latin scripts are common in documentation, comments, and string literals
@@ -1328,6 +1359,10 @@ ADVERSARIAL_ABORT_LABELS: frozenset[str] = frozenset({
     'zero-width-chars',
     'prompt-injection',
     'whitespace-hiding',
+    'mini-shai-hulud-firedalazer',
+    'mini-shai-hulud-wormyboi',
+    'mini-shai-hulud-reversed-string',
+    'mini-shai-hulud-c2-url',
 })
 
 # Source-code file globs used to scope bidi/zero-width scans.

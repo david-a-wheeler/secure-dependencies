@@ -215,31 +215,32 @@ found in production code or install hooks.
 
 | Indicator | Type | Logic/Pattern | Why High-Fidelity? | Tool Status |
 | :--- | :--- | :--- | :--- | :--- |
-| **`firedalazer`** | C2 String | Search for the string `firedalazer` in any JS/Python source. | Unique "dead-drop" keyword for GitHub commit search C2. No known legitimate use. | *(3) Not yet in `ADVERSARIAL_PATTERNS`. Easy add: literal string match in `analysis_shared.py`.* |
-| **`WormyBoi`** | Commit Template | `EveryBoiWeBuildIsAWormyBoi` | Unique exfiltration prefix for stolen tokens. Highly specific. | *(3) Not yet in `ADVERSARIAL_PATTERNS`. Easy add: literal string match in `analysis_shared.py`.* |
-| **`Kitty/cat.py`** | Persistence Path | `~/.local/share/kitty/cat.py` or `.kitty-monitor` | Specific persistence path for the Python backdoor. Legitimate kitty terminal does not use this subpath for Python scripts. | *(3) Not yet implemented. Add as a `DANGEROUS_PATTERNS` entry in all ecosystems (path is language-neutral); add to `HOME_PATHS_RE` or as a standalone pattern.* |
-| **`gh-token-monitor`** | Dead-man's Switch | `gh-token-monitor.sh` or `com.user.gh-token-monitor` | Part of the destructive dead-man's switch. Specifically targets token revocation events. | *(3) Not yet implemented. Add to `DANGEROUS_PATTERNS` in all ecosystem hooks; also add `gh-token-monitor` path scan to shared adversarial patterns.* |
-| **`niagA oG eW ereH`** | Reversed String | `niagA oG eW ereH :duluH-iahS` | Reversed Dune-themed strings to evade simple text filters. | *(1/3) Already in `CAMPAIGN_STRINGS` (`analysis_shared.py`) for GitHub repo description checks. NOT yet in `ADVERSARIAL_PATTERNS` for package source scanning. Worth adding there too for zero-FP source detection.* |
-| **`firedalazer` Query** | Network URL | `api.github.com/search/commits?q=firedalazer` | Hardcoded C2 polling URL. Definitively malicious when found in a package. | *(3) Not yet implemented. Add the full URL string to `ADVERSARIAL_PATTERNS` (zero-FP signal) and the hostname prefix to `DANGEROUS_PATTERNS`/`EXFIL_RELAY_DOMAINS_RE`.* |
+| **`firedalazer`** | C2 String | Search for the string `firedalazer` in any JS/Python source. | Unique "dead-drop" keyword for GitHub commit search C2. No known legitimate use. | *(1) IMPLEMENTED: `mini-shai-hulud-firedalazer` in `ADVERSARIAL_PATTERNS` + `ADVERSARIAL_ABORT_LABELS` (`analysis_shared.py`). Triggers gate abort on match.* |
+| **`WormyBoi`** | Commit Template | `EveryBoiWeBuildIsAWormyBoi` | Unique exfiltration prefix for stolen tokens. Highly specific. | *(1) IMPLEMENTED: `mini-shai-hulud-wormyboi` in `ADVERSARIAL_PATTERNS` + `ADVERSARIAL_ABORT_LABELS` (`analysis_shared.py`). Triggers gate abort on match.* |
+| **`Kitty/cat.py`** | Persistence Path | `~/.local/share/kitty/cat.py` or `.kitty-monitor` | Specific persistence path for the Python backdoor. Legitimate kitty terminal does not use this subpath for Python scripts. | *(1) IMPLEMENTED: `mini-shai-hulud-paths` entry in `DANGEROUS_PATTERNS` for all three ecosystems, referencing `MINI_SHAI_HULUD_PATHS_RE` in `analysis_shared.py`.* |
+| **`gh-token-monitor`** | Dead-man's Switch | `gh-token-monitor.sh` or `com.user.gh-token-monitor` | Part of the destructive dead-man's switch. Specifically targets token revocation events. | *(1) IMPLEMENTED: covered by `MINI_SHAI_HULUD_PATHS_RE` and `mini-shai-hulud-paths` in all ecosystem `DANGEROUS_PATTERNS` (`analysis_shared.py`).* |
+| **`niagA oG eW ereH`** | Reversed String | `niagA oG eW ereH :duluH-iahS` | Reversed Dune-themed strings to evade simple text filters. | *(1) IMPLEMENTED: `mini-shai-hulud-reversed-string` in `ADVERSARIAL_PATTERNS` + `ADVERSARIAL_ABORT_LABELS` (`analysis_shared.py`). Also already in `CAMPAIGN_STRINGS` for GitHub repo description checks.* |
+| **`firedalazer` Query** | Network URL | `api.github.com/search/commits?q=firedalazer` | Hardcoded C2 polling URL. Definitively malicious when found in a package. | *(1) IMPLEMENTED: `mini-shai-hulud-c2-url` in `ADVERSARIAL_PATTERNS` + `ADVERSARIAL_ABORT_LABELS` (`analysis_shared.py`). The `firedalazer` literal also catches abbreviated forms.* |
 
 ### 5. Implementation in Deterministic Scans
 1.  **`ADVERSARIAL_PATTERNS` Expansion:** Add `firedalazer` and `WormyBoi` to the global
     `shared.ADVERSARIAL_PATTERNS`.
-    - *(3) Worth implementing -- both are zero-false-positive literals. Two-line additions
-      to the `ADVERSARIAL_PATTERNS` list in `analysis_shared.py`. Add to
-      `ADVERSARIAL_ABORT_LABELS` so they trigger an immediate gate.*
+    - *(1) IMPLEMENTED: `mini-shai-hulud-firedalazer`, `mini-shai-hulud-wormyboi`,
+      `mini-shai-hulud-reversed-string`, and `mini-shai-hulud-c2-url` added to
+      `ADVERSARIAL_PATTERNS` and `ADVERSARIAL_ABORT_LABELS` in `analysis_shared.py`.*
 2.  **`DANGEROUS_PATTERNS` Expansion:** Add the "Kitty" and "Token-Monitor" patterns to
     language-specific hooks (`hooks_js.py`, `hooks_python.py`).
-    - *(3) Worth implementing -- path strings are language-neutral; add a shared constant
-      `MINI_SHAI_HULUD_PATHS_RE` in `analysis_shared.py` (covering
-      `\.local/share/kitty/cat\.py`, `kitty-monitor`, `gh-token-monitor`) and reference it from
-      all three ecosystem `DANGEROUS_PATTERNS` lists.*
+    - *(1) IMPLEMENTED: `MINI_SHAI_HULUD_PATHS_RE` constant added to `analysis_shared.py`
+      covering `\.local/share/kitty/cat\.py`, `kitty-monitor`, `gh-token-monitor`. Referenced
+      as `mini-shai-hulud-paths` in all three ecosystem `DANGEROUS_PATTERNS` lists.*
 3.  **AI Signaling:** If these specific patterns match, the deterministic report should explicitly
     label them as "MINI_SHAI_HULUD_FINGERPRINT," allowing the AI to bypass general heuristic
     analysis and jump straight to a CRITICAL/DO_NOT_INSTALL recommendation.
-    - *(3) Worth implementing -- the label name should be added as a constant and the AI prompt
-      should be told to treat it as an `ADVERSARIAL_GATE` abort signal, the same way
-      `ADVERSARIAL_ABORT_LABELS` is currently handled.*
+    - *(1) Partially implemented: the four `mini-shai-hulud-*` labels in `ADVERSARIAL_ABORT_LABELS`
+      already trigger gate abort, which signals CRITICAL to the AI reviewer. The specific label
+      prefix `mini-shai-hulud-` in the report output identifies these as campaign fingerprints.
+      A dedicated named constant `MINI_SHAI_HULUD_FINGERPRINT` is not needed; the abort gate
+      mechanism already provides the right behavior.*
 
 ## Future-Proofing: Detection via Behavioral Invariants
 

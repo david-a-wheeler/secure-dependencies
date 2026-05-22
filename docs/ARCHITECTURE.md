@@ -142,17 +142,23 @@ while the AI sandbox is for *AI review of adversarial text*.
 ## Adversarial content detection and gating
 
 Before any content is processed, the deterministic scripts scan for known
-prompt-injection patterns: text that explicitly tries to override AI
-instructions, impersonate the `NEXT_ACTION` system, or manipulate the AI into
-approving the package. If a high-confidence injection pattern is detected,
-the script writes `ADVERSARIAL_GATE: ABORT` to `signals.txt`, which causes
-the tier 2 agent to stop the analysis and escalate immediately without
-reading further content.
+adversarial patterns. If a high-confidence pattern is detected, the script
+writes `ADVERSARIAL_GATE: ABORT` to `signals.txt`, which causes the tier 2
+agent to stop the analysis and escalate immediately without reading further
+content. The gate covers two categories:
+
+- **Prompt-injection text**: text that explicitly tries to override AI
+  instructions, impersonate the `NEXT_ACTION` system, or manipulate the AI
+  into approving the package.
+- **Campaign fingerprints**: zero-false-positive literal strings specific to
+  known malware campaigns. Currently includes Mini Shai-Hulud indicators:
+  `firedalazer` (C2 dead-drop keyword), `WormyBoi` (exfiltration commit
+  prefix), `niagA oG eW ereH` (reversed campaign string), and the hardcoded
+  C2 polling URL `api.github.com/search/commits?q=firedalazer`.
 
 This gate fires *before* tier 3 is invoked: a package that contains explicit
-injection instructions is treated as an attack, not as something to be
-analyzed further. These can only detect fairly naive attacks, but
-nevertheless they provide some limited protection against naive attacks.
+injection instructions or a known campaign fingerprint is treated as an
+attack, not as something to be analyzed further.
 
 ## Mitigations for supply chain attacks like Shai-Halud
 
@@ -184,6 +190,12 @@ heuristics to detect and counter Shai-Halud and similar attacks:
 - **Destructive "dead man's switch" payloads**: Scans for commands that
   wipe the filesystem (e.g., `shred`, `rm -rf ~/`) if the attack is detected
   or its token is revoked.
+- **Campaign-specific fingerprints**: Scans for unique literal strings from
+  the Mini Shai-Hulud worm (May 2026 GitHub/Nx-Console breach): the C2
+  dead-drop keyword `firedalazer`, the exfiltration commit prefix `WormyBoi`,
+  the backdoor persistence path `~/.local/share/kitty/cat.py`, and the
+  dead-man's-switch script name `gh-token-monitor`. These are zero-false-positive
+  abort signals; any match halts the analysis immediately.
 
 These checks are integrated into the basic analysis phase and apply
 across all supported ecosystems (JavaScript, Python, and Ruby).
@@ -322,8 +334,9 @@ package it:
 
 - Downloads the published package and computes a SHA-256 hash
 - Scans for suspicious content: Unicode bidi controls, zero-width characters,
-  homoglyph attacks, and prompt-injection text aimed at AI reviewers.
-  If it detects likely attacks on AI reviewers it stops immediately.
+  homoglyph attacks, prompt-injection text aimed at AI reviewers, and
+  campaign-specific fingerprints (Mini Shai-Hulud and similar).
+  If any abort-gate pattern is detected, analysis stops immediately.
 - Runs language-specific dangerous-pattern detection against the full
   package source: patterns include `eval` variants, shell execution calls,
   obfuscated exec (Base64-decode-then-eval style), `Marshal.load`,

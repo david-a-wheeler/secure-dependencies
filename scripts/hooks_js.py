@@ -559,6 +559,9 @@ class Hooks(shared.EcosystemHooks):
          r'(?:JSON\.stringify|Object\.(?:keys|values|entries|assign|fromEntries))'
          r'\s*\(\s*process\.env\s*\)'
          r'|for\s*\(\s*(?:const|let|var)\s+\w{1,40}\s+(?:in|of)\s+process\.env\s*\)'),
+        # Mini Shai-Hulud campaign: backdoor install path, LaunchAgent name,
+        # and dead-man's-switch script. No legitimate use in package code.
+        ('mini-shai-hulud-paths', shared.MINI_SHAI_HULUD_PATHS_RE),
         # Exfiltration relay services and known campaign C2 domains.
         # Shared domain list from analysis_shared; no ecosystem-specific additions.
         ('exfil-relay-domain', shared.EXFIL_RELAY_DOMAINS_RE),

@@ -177,6 +177,9 @@ class Hooks(shared.EcosystemHooks):
         ('env-enumeration',
          r'JSON\.(?:dump|generate)\s*\(\s*ENV\b'
          r'|ENV\.to_a\b'),
+        # Mini Shai-Hulud campaign: backdoor install path, LaunchAgent name,
+        # and dead-man's-switch script. No legitimate use in package code.
+        ('mini-shai-hulud-paths', shared.MINI_SHAI_HULUD_PATHS_RE),
         # Exfiltration relay services and known campaign C2 domains.
         ('exfil-relay-domain', shared.EXFIL_RELAY_DOMAINS_RE),
     ]
