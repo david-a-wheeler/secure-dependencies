@@ -84,4 +84,4 @@ Identify where the data is going:
 
 [Ohm2020] [Ohm et al, 2020, "Backstabber's Knife Collection: A Review of Open Source Software Supply Chain Attacks"](https://arxiv.org/abs/2005.09535)
 
-[Census III] [Linux Foundation, 2024, "Census III of Free and Open Source Software – Application Libraries"](https://www.linuxfoundation.org/resources/publications/census-iii-of-free-and-open-source-software-application-libraries)
+[Census III] [Linux Foundation, 2024, "Census III of Free and Open Source Software - Application Libraries"](https://www.linuxfoundation.org/resources/publications/census-iii-of-free-and-open-source-software-application-libraries)
