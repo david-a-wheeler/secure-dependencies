@@ -36,14 +36,20 @@ This skill helps with three types of dependency work:
 
 In all three modes, the skill guards against:
 
-- **Unintentional vulnerabilities**: insecure code patterns, dangerous
-  defaults, known CVEs in installed versions
-- **Long-term risk**: abandoned projects, missing or proprietary licenses
-  (license health is a leading indicator of security abandonment)
-- **Supply chain attacks**: typosquatting, slopsquatting, compromised
-  maintainer accounts, malicious package developers (including lessons
-  learned from the Shai-Halud attacks)
-- **Adversarial content**: package files crafted to manipulate AI reviewers
+- **Unintentional vulnerabilities**: For example,
+  insecure code patterns, dangerous
+  defaults, and known vulnerabilities (e.g., CVEs) in installed versions.
+- **Long-term risk**: For example,
+  abandoned projects and missing/problematic licenses.
+- **Supply chain attacks**: For example,
+  typosquatting, slopsquatting, compromised
+  maintainer accounts, and malicious package developers.
+  We build on lessons learned from various places such as
+  the Shai-Halud attacks and the
+  [Backstabber's Knife Collection analysis](https://arxiv.org/abs/2005.09535).
+- **AI Adversarial content**: These are
+  package files crafted to manipulate AI reviewers, for example, packages
+  with embedded "ignore previous instructions" statements.
 
 ## Requirements
 
@@ -67,7 +73,7 @@ Add `temp/` to your `.gitignore`.
 ## How it works
 
 See [ARCHITECTURE.md](./ARCHITECTURE.md) for information on
-how this skill works. It uses deterministic scripts to gather data
+how this skill works. This skill uses deterministic scripts to gather data
 where possible, and uses AI to analyze their results or do tasks that
 only AI can do. Sandboxes reduce risk during execution.
 
@@ -209,7 +215,8 @@ to an AI sub-agent". There's also not a lot of code in the first place.
 The point of nearly all of the deterministic code is to provide
 a rich source of data for an AI sub-agent to review
 and heuristically summarize. So for a vibe-coding task this is a
-relatively easy task. That doesn't mean we can just trust the vibe-coded
+relatively easy task that it's more likely to get correct.
+That doesn't mean we can just trust the vibe-coded
 code; that's something that needs to be reviewed.
 
 ## License of this skill
