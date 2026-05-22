@@ -1,125 +1,157 @@
 # Proposed Code Simplifications for Dependency Analysis
 
-This document outlines a variety of ways to simplify the dependency analysis codebase, reduce technical debt, and improve maintainability across ecosystems. The primary focus is on reducing the extreme complexity of `dep_review.py` and the redundancies in the ecosystem hooks (`hooks_js.py`, `hooks_python.py`, `hooks_ruby.py`).
+This document reviews a set of proposed simplifications for the dependency
+analysis codebase, with assessments grounded in the actual code state.
+The primary focus is reducing complexity in `dep_review.py` and eliminating
+structural redundancy across the ecosystem hooks
+(`hooks_js.py`, `hooks_python.py`, `hooks_ruby.py`).
 
 ## 1. Summary of Current Issues
 
-*   **Monolithic Reporting**: `write_signals()` in `dep_review.py` is nearly 1,900 lines long. It manually handles every single data point, flag, and concern, making it extremely difficult to review and extend.
-*   **Massive Redundancy**: Ecosystem hooks repeat dozens of high-level dangerous and diff patterns (e.g., IDE config writes, cloud secret APIs, exfiltration relays).
-*   **Fragmented Logic**: Advanced security checks (like SLSA provenance and publisher velocity) are currently JS-only, even though they are conceptually universal.
-*   **Complex Argument Passing**: The driver passes 30+ arguments to `write_signals()`, leading to fragile interfaces.
+Actual measurements (as of 2026-05-22):
+
+*   `dep_review.py`: 2,400 lines total; `write_signals()` alone is ~970 lines
+    with 47 arguments.
+*   `hooks_js.py`: 1,869 lines; `hooks_python.py`: 1,689; `hooks_ruby.py`: 1,415
+*   `analysis_shared.py`: 4,003 lines
+
+Real problems worth solving:
+
+*   **Wide interface**: `write_signals()` takes 47 arguments, making it fragile
+    to extend and hard to test in isolation.
+*   **Structural pattern duplication**: 20 of ~26 DANGEROUS_PATTERNS labels
+    appear in all three hook files. The regex bodies reference `shared.XYZ_RE`
+    constants, but each hook still re-declares the full entry. A new ecosystem
+    (Go, Rust) must copy-paste all 20 shared entries before adding its own.
+*   **JS-only advanced checks**: SLSA provenance and publisher velocity checks
+    (`_check_slsa_provenance`, `_check_publisher_velocity`) live in
+    `hooks_js.py` even though the concepts apply to all ecosystems.
+
+Already solved (do not re-implement):
+
+*   **Health thresholds**: `compute_health_concerns()` in `analysis_shared.py`
+    already centralizes all health-concern logic (staleness, age, owner count,
+    Scorecard score, etc.). The doc's example of threshold repetition across
+    hooks does not reflect current code.
+*   **Shared regex constants**: Common patterns are defined as `shared.XYZ_RE`
+    and referenced from each hook; the regex bodies are not literally repeated.
+*   **`EcosystemHooks` ABC**: Already exists in `analysis_shared.py` with all
+    required abstract methods.
 
 ## 2. Proposed Architectural Changes
 
-### A. Introduce a `SignalAccumulator` Class
-Instead of a giant function that prints line-by-line, we should use an object that accumulates findings and knows how to report them.
+### A. Narrow the `write_signals()` Interface (ACCEPTED, with adjustments)
 
-**Example Implementation (`analysis_shared.py`):**
+**Problem**: 47 arguments is genuinely hard to manage. Adding one new signal
+requires changing both the caller and the callee.
 
-```python
-class SignalAccumulator:
-    def __init__(self, hooks: EcosystemHooks):
-        self.hooks = hooks
-        self.data = {}        # Neutral objective data (size, version, etc.)
-        self.alerts = []      # [!] High-urgency binary security triggers (e.g. SCAN_MATCHES)
-        self.warnings = []    # [?] Contextual health concerns (e.g. STALE_PACKAGE)
-        self.positives = []   # [v] Positive signals (e.g. MFA_ENABLED, REPRODUCED)
-
-    def add_data(self, key: str, value: Any):
-        """Add neutral objective data for the AI's core context."""
-        self.data[key] = value
-
-    def add_alert(self, flag: str):
-        """Trigger a binary security alert."""
-        self.alerts.append(flag)
-
-    def add_warning(self, label: str, value: str, annotation: str):
-        """Add a contextual health warning with an explanatory annotation."""
-        self.warnings.append((label, f"{value}  [{annotation}]"))
-
-    def write_report(self, p: Printer):
-        # 1. Neutral Data first (The Foundation)
-        p("=== Data & Metadata ===")
-        for k, v in self.data.items():
-            p(f"{k}: {v}")
-
-        # 2. Alerts (The Critical Red Flags)
-        p("\n=== Security Alerts ===")
-        # ... logic to write [!] alerts ...
-
-        # 3. Warnings (The Contextual Evidence)
-        p("\n=== Health Warnings ===")
-        # ... logic to write [?] warnings ...
-```
-
-**Example (Using the new terminology):**
+**Recommendation**: Bundle all inputs into a `@dataclass`. This narrows the
+interface without requiring a full OOP reporting pipeline.
 
 ```python
-acc.add_data("package_size_bytes", 102456)
-acc.add_alert("NATIVE_EXTENSION")
-acc.add_alert("SCAN_MATCHES(2)")
-acc.add_warning("last_release", "730 days ago", "exceeds 18-month threshold")
-```
+@dataclass
+class SignalContext:
+    work: Path
+    pkgname: str
+    old_ver: str
+    new_ver: str
+    diff_mode: bool
+    manifest: dict          # or PackageManifest once C is done
+    scan_details: list[tuple[str, int]]
+    total_matches: int
+    # ... remaining fields
+    hooks: EcosystemHooks
 ```
 
-**Example (Accumulating diverse data types):**
+The function signature becomes:
 
 ```python
-acc.add_data("package_size_bytes", 102456)
-acc.add_data("publish_date", "2026-05-22")
-acc.add_data("has_native_code", True)
-acc.add_data("author_count", 3)
-```
+def write_signals(ctx: SignalContext, p: Printer) -> None:
 ```
 
-### B. Declarative Hook & Pattern Registration
-Instead of manual list concatenation and hardcoded maps in `dep_review.py`, use a decorator-based registry where the base class provides **concrete security policies** that subclasses can extend.
+**Why prefer `@dataclass` over a full `SignalAccumulator` class:**
 
-**Example (`analysis_shared.py`):**
+The original proposal included `add_alert()`, `add_warning()`, `add_data()`
+methods and a `write_report()` method all on the same class. This conflates
+two concerns: (1) bundling inputs and (2) generating the report. Keeping them
+separate is cleaner: the dataclass holds inputs, and `write_signals()` still
+owns the rendering logic. That makes both independently testable.
+
+If we later want structured collections of alerts/warnings as outputs (not
+just inputs), a separate lightweight struct makes sense:
+
+```python
+@dataclass
+class SignalReport:
+    alerts: list[str] = field(default_factory=list)      # SCAN_MATCHES, etc.
+    warnings: list[tuple[str, str]] = field(default_factory=list)
+    positives: list[str] = field(default_factory=list)
+```
+
+The terminology shift (data/alerts/warnings/positives) is sound and worth
+keeping; it accurately reflects that these are inputs to a risk judgment, not
+the judgment itself.
+
+### B. Base Class Patterns (PARTIALLY ACCEPTED)
+
+**Split into two sub-proposals with different verdicts:**
+
+#### B1. `BASE_DANGEROUS_PATTERNS` in `EcosystemHooks` (ACCEPTED)
+
+Currently, 20 DANGEROUS_PATTERNS labels are structurally repeated across all
+three hook files. Each hook re-declares entries like `exfil-relay-domain`,
+`reverse-shell`, `cron-persistence`, etc., even though they reference the
+same `shared.XYZ_RE` constant.
+
+Defining `BASE_DANGEROUS_PATTERNS` in the base class means each new ecosystem
+only declares its own additions:
 
 ```python
 class EcosystemHooks(ABC):
-    # Default thresholds and base patterns
-    STALE_THRESHOLD_DAYS = 548
-    BASE_DANGEROUS_PATTERNS = [('exfil-relay', EXFIL_RELAY_DOMAINS_RE)]
+    BASE_DANGEROUS_PATTERNS: list[tuple[str, str]] = [
+        ('exfil-relay-domain', shared.EXFIL_RELAY_DOMAINS_RE),
+        ('reverse-shell',      shared.REVERSE_SHELL_RE),
+        ('cron-persistence',   shared.CRON_PERSISTENCE_RE),
+        # ... all 20 shared entries ...
+    ]
+    DANGEROUS_PATTERNS: list[tuple[str, str]] = []  # ecosystem-specific only
 
-    def evaluate_health(self, acc: SignalAccumulator, registry_data: dict):
-        """Universal health policy. Subclasses override and call super() to extend."""
-        days = registry_data.get('last_release_days')
-        if days and days > self.STALE_THRESHOLD_DAYS:
-            acc.add_warning('last_release', f"{days} days ago", "exceeds threshold")
-
-class SignalAccumulator:
-    def __init__(self, hooks: EcosystemHooks):
-        self.hooks = hooks
-        # ... categories as defined in 2A ...
+    def all_dangerous_patterns(self) -> list[tuple[str, str]]:
+        return self.BASE_DANGEROUS_PATTERNS + self.DANGEROUS_PATTERNS
 ```
 
-**Example Hook Override (`hooks_js.py`):**
+This is the most direct win: adding Go or Rust becomes ~5 ecosystem-specific
+entries instead of re-copying 25+.
+
+#### B2. `evaluate_health()` virtual method (MINOR, LOW PRIORITY)
+
+The current `compute_health_concerns()` function in `analysis_shared.py`
+already centralizes health thresholds, so this is partially done. If an
+ecosystem needs to override a threshold (e.g., a different staleness window),
+making `evaluate_health()` a virtual method on `EcosystemHooks` with a
+`super()` call is cleaner than a separate function with an extra argument.
+This is a minor, low-urgency cleanup.
+
+#### B3. Decorator-based `EcosystemRegistry` (REJECTED)
+
+The original proposal included:
 
 ```python
 @shared.EcosystemRegistry.register('javascript')
 class Hooks(shared.EcosystemHooks):
-    STALE_THRESHOLD_DAYS = 365  # JS specific threshold
-
-    def evaluate_health(self, acc: SignalAccumulator, registry_data: dict):
-        # 1. Run the universal checks (stale, etc.)
-        super().evaluate_health(acc, registry_data)
-
-        # 2. Add JS-specific checks (e.g. publisher velocity)
-        if self._has_velocity_anomaly(registry_data):
-            acc.add_warning('publisher_velocity', 'ANOMALOUS', 'high release volume')
+    ...
 ```
 
-**The Simplification Win:**
-*   **Standard Idiomatic Python**: No "magic" callbacks or unusual naming conventions. Every Python developer knows how `super()` works.
-*   **Encapsulation**: The policy lives with the ecosystem it belongs to, but common ground is shared automatically.
-*   **Clean Driver**: The driver just calls `acc.hooks.evaluate_health(acc, data)`, and the right thing happens regardless of the ecosystem.
+This adds metaclass/registry machinery that provides nothing over Python's
+existing module system. The driver already selects the right hooks module by
+name. A decorator that duplicates what `import` already does is fad
+architecture: it looks organized but adds indirection and failure modes with
+no benefit.
 
-### C. Standardized Manifest Data Objects
-Instead of returning giant dictionaries with 15+ keys from `read_manifest()`, use a `dataclass`. This provides type safety and prevents "key-name drift" between ecosystems.
+### C. Standardized Manifest Data Objects (ACCEPTED, HIGH VALUE)
 
-**Example (`analysis_shared.py`):**
+`read_manifest()` in each hook returns an untyped `dict` with 15+ keys.
+Key names can drift between ecosystems silently. A `@dataclass` fixes this:
 
 ```python
 @dataclass
@@ -129,102 +161,90 @@ class PackageManifest:
     executables: str = "NO"
     runtime_deps: list[str] = field(default_factory=list)
     license_raw: str = ""
-    # ... etc
+    install_cmd_warnings: list[str] = field(default_factory=list)
+    post_install_msg: str = "NO"
+    # ... etc.
 ```
 
-### D. Generalized Registry/Provenance Checks
-Move "Idea 14-16" checks (publisher velocity, SLSA provenance, repo metadata) to `analysis_shared.py` so all ecosystems benefit.
+Benefits:
+*   Type errors caught at definition time, not at `dict.get()` call sites
+*   IDE completion across all callers
+*   A new ecosystem that forgets a field gets a type error, not a silent None
 
-**Example (`analysis_shared.py`):**
+Migration cost is real (all hook `read_manifest()` implementations and all
+driver callers need updating), but the long-term benefit is proportional.
+This is the highest-value cleanup that doesn't require restructuring control
+flow.
 
-```python
-def check_publisher_velocity(p: Printer, registry_data: dict):
-    # Move the JS-only logic here and make it use
-    # standardized registry_data fields.
-```
-## 3. Specific Simplification Examples
+### D. Generalize SLSA Provenance and Velocity Checks (ACCEPTED)
 
-The "Proposed" implementation in `analysis_shared.py` might look slightly longer for a *single* check, but the goal is to simplify the **Hook Code** and the **Driver Code**, which are the parts we expect to grow.
+`_check_slsa_provenance()` and `_check_publisher_velocity()` are currently
+in `hooks_js.py` only. PyPI has introduced provenance too, so Python could
+benefit immediately. The right approach:
 
-### Example: Consolidating Registry Logic
-Currently, every ecosystem (JS, Python, Ruby) has to "know" our security policies (e.g., that 18 months is the stale threshold).
+1.  Define abstract/optional hook methods in `EcosystemHooks`:
 
-**Current (Code repeated in every hook or the driver):**
-```python
-# Hook/Driver must remember the threshold, label, and exact annotation string
-_last_rel = registry.get('last_release_days')
-if _last_rel is not None and _last_rel > 548:
-    _concerns.append(('last_release', f'{_last_rel} days ago [exceeds 18-month...]'))
-# ... then repeat this pattern for 40 other flags ...
-```
+    ```python
+    def check_provenance(self, registry_data: dict, p: Printer) -> None:
+        pass  # default: no-op
 
-**Proposed (Hook Code becomes a single line):**
-```python
-# The hook developer doesn't need to know the policy. They just pass the data.
-shared.evaluate_health(registry, accumulator)
-```
+    def check_publisher_velocity(self, registry_data: dict, p: Printer) -> None:
+        pass  # default: no-op
+    ```
 
-**The Simplification Win:**
-*   **Centralized Policy**: If we decide to change the "stale" threshold from 18 to 24 months, we change it in **one** place in `analysis_shared.py`, and all 10+ ecosystems (JS, Python, Ruby, etc.) are updated automatically.
-*   **Reduced Hook Complexity**: The hook for a new ecosystem (e.g., Go or Rust) becomes a simple "data provider" rather than having to re-implement 40+ security checks.
-*   **Collapsing `dep_review.py`**: The giant `write_signals` function (1,900 lines) is replaced by a few dozen calls to these shared evaluators.
+2.  Move the npm-specific implementation to `hooks_js.py` as an override.
+3.  Add a PyPI provenance implementation to `hooks_python.py`.
+4.  The driver calls `hooks.check_provenance(registry, p)` for all ecosystems.
 
-### Example: Eliminating Fragile Argument Lists
-Currently, the interface between the driver and the reporting logic is extremely "wide" and fragile.
+This is straightforward because the check already lives in a helper function;
+it just needs to be called through the right hook dispatch instead of
+conditionally in `dep_review.py`.
 
-**Current (`dep_review.py`):**
-```python
-# The function signature has 35+ arguments.
-# Adding ONE signal requires changing this and the call site.
-def write_signals(
-    work, p, pkgname, old_ver, new_ver, diff_mode, deeper, sha256, manifest,
-    scan_details, total_matches, diff_scan_details, diff_scan_matches,
-    clone_ok, version_tag, commit_guessed, source_url, badge, # ... and 15 more
-):
-```
+## 3. Pattern Deduplication: The Actual Opportunity
 
-**Proposed:**
-```python
-# The interface is "narrow" and stable.
-def write_signals(accumulator: SignalAccumulator):
-    # The accumulator already contains all findings gathered during the run.
-```
+The Section 3 example in the original proposal used `compute_health_concerns()`
+as an example of repeated logic, but that function already exists and
+centralizes the health policy. The real remaining duplication is in
+`DANGEROUS_PATTERNS`.
+
+Current state:
+- 20 pattern labels appear in all 3 hook files
+- 2 labels appear in Python + Ruby only (`self-publish`, `shell-exec`)
+- 7 labels are Python-only, 3 Ruby-only, 4 JS-only
+
+Moving the 20 shared entries to `BASE_DANGEROUS_PATTERNS` (proposal B1) is
+the actual deduplication win here.
 
 ## 4. Expected Benefits
 
-1.  **Reduced LOC**: `dep_review.py` could likely be reduced from 2,400 lines to under 1,000.
-2.  **Universal Features**: Every ecosystem will automatically get features like SLSA provenance and velocity checks.
-3.  **Easier Review**: Adding a new security check will involve adding a single entry to a list or a small helper function, rather than modifying a 1,900-line monolithic block.
-4.  **Consistency**: The format of `signals.txt` will be more consistent across ecosystems because it's generated by shared code.
+1.  **Interface stability**: `write_signals(ctx: SignalContext, p)` can absorb
+    new signals without changing the call site.
+2.  **Easier new ecosystems**: Go or Rust hooks need only their ~5 unique
+    patterns; the 20 shared ones come from the base class automatically.
+3.  **Universal provenance**: SLSA and velocity checks become available to all
+    ecosystems via hook dispatch.
+4.  **Type safety**: `PackageManifest` makes key-name drift a compile-time
+    error rather than a runtime KeyError.
 
-## 6. Terminology Shift: From "Risks" to "Alerts & Warnings"
+## 5. Implementation Roadmap
 
-This refactor introduces a deliberate shift in terminology to better reflect the role of these signals in the security assessment:
+Ordered by value-to-effort ratio:
 
-*   **Old Model**: Used "Risks" and "Concerns" somewhat interchangeably, which was confusing and conflated **findings** with the **final assessment**.
-*   **New Model (Alert Model)**: Uses **Data**, **Alerts**, and **Warnings**.
-    *   These are the **inputs** to the risk determination process.
-    *   An "Alert" (like a scan match) or a "Warning" (like a stale package) is a piece of evidence.
-    *   The **Risk Assessment** (LOW/MEDIUM/HIGH/CRITICAL) remains the **output**—the final judgment made by the AI after weighing all these inputs.
+1.  **Phase 1**: Add `BASE_DANGEROUS_PATTERNS` to `EcosystemHooks` (proposal
+    B1). Each hook removes its 20 shared entries and calls
+    `all_dangerous_patterns()`. Immediate structural win, no behavior change.
 
-This separation of "finding" from "judgment" makes the system's logic clearer and more aligned with professional security auditing workflows.
+2.  **Phase 2**: Promote SLSA provenance and velocity checks to hook dispatch
+    (proposal D). Move `_check_slsa_provenance` and `_check_publisher_velocity`
+    out of the JS-only path in `dep_review.py` and add PyPI provenance.
 
-## 8. Simplification Metric: Why the Refactor Overhead is Worth It
+3.  **Phase 3**: Introduce `PackageManifest` dataclass (proposal C). Migrate
+    one hook at a time; this is mechanical but requires touching many callers.
 
-While this reorg adds a few new classes and methods, it is a net win for the following reasons:
+4.  **Phase 4**: Bundle `write_signals()` inputs into `SignalContext` (proposal
+    A). Replace the 47-argument signature. This is the highest-impact cleanup
+    for `dep_review.py` but requires updating every call site in the driver.
 
-1.  **Deduplication (Radical Line Count Reduction)**: The current 1,900-line monolith contains dozens of near-identical `if/elif` blocks for checking thresholds. By parametersizing these in shared evaluators, we eliminate hundreds of lines of redundant string-formatting and annotation boilerplate.
-2.  **Cost of Extension**:
-    *   **Current**: Adding a new ecosystem (e.g., Go) requires adding hundreds of lines of logic to both the hook and the driver's monolithic reporter.
-    *   **Proposed**: Adding a new ecosystem adds **zero** lines to the shared reporting logic. The hook only provides the raw data.
-3.  **Narrow Interfaces**: Replacing a 35+ argument function with a single `SignalAccumulator` object makes the code radically easier to test and debug. You can test a single security policy (like `evaluate_health`) in isolation without setting up the entire driver state.
-
-The goal is not just to "move" the 1,900 lines, but to **collapse** the redundant parts and **isolate** the ecosystem-specific parts, making the system's "surface area for bugs" much smaller.
-
-## 9. Implementation Roadmap
-
-1.  **Phase 1**: Move Idea 14-16 checks (publisher velocity, SLSA provenance, repo metadata) to `analysis_shared.py`. This provides immediate value by enabling these advanced checks for all ecosystems, regardless of whether the larger refactor proceeds.
-2.  **Phase 2**: Extract universal `DANGEROUS_PATTERNS` and `DIFF_PATTERNS` into `analysis_shared.py`.
-3.  **Phase 3**: Implement the `SignalAccumulator` and migrate the first 10-20 flags from `write_signals()` to use the new structured reporting.
-4.  **Phase 4**: Refactor `dep_review.py` main loop and `EcosystemHooks` to use the new registry and narrowed interfaces.
-5.  **Phase 5**: Update all remaining ecosystem hooks to use the new simplified patterns and data objects.
+5.  **Phase 5**: Add `SignalReport` output struct if the output structure needs
+    to be programmatically consumed (e.g., for structured JSON output).
+    Skip if not needed: the current line-by-line printer is fine for AI input.
