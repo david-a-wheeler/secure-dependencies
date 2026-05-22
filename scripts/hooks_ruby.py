@@ -107,6 +107,18 @@ def _extract_gemspec_license(gemspec_text: str) -> str:
     return lic_match.group(1).strip() if lic_match else ''
 
 
+# Size thresholds for Ruby install scripts, keyed by filename.
+# extconf.rb: nokogiri is ~500 lines; > 1000 lines is extremely unusual.
+# Rakefile: complex gems rarely exceed 300 install-related lines;
+#   the whole Rakefile is checked, so 500 lines is the threshold.
+# 'default' covers any other install-time file (Makefile.in, etc.).
+_INSTALL_SCRIPT_WARN: dict[str, tuple[int, int]] = {
+    'extconf.rb': (40_000, 1_000),
+    'Rakefile':   (20_000,   500),
+    'default':    (20_000,   500),
+}
+
+
 # ---------------------------------------------------------------------------
 # Public API: called by dep_review.py
 # ---------------------------------------------------------------------------
@@ -326,6 +338,7 @@ class Hooks(shared.EcosystemHooks):
         source_url = ''
         gemspec_text = ''
         runtime_dep_lines: list[str] = []
+        install_cmd_warnings: list[str] = []
 
         # Locate gemspec: prefer in-package file, fall back to
         # extracted gemspec.txt
@@ -456,6 +469,12 @@ class Hooks(shared.EcosystemHooks):
                 ]
                 for fname, fpath in install_script_files:
                     raw = fpath.read_text(encoding='utf-8', errors='replace')
+                    warn_b, warn_l = _INSTALL_SCRIPT_WARN.get(
+                        fname, _INSTALL_SCRIPT_WARN['default'])
+                    _sz_warn = shared.report_install_script_size(
+                        raw, fname, p, warn_b, warn_l)
+                    if _sz_warn:
+                        install_cmd_warnings.append(_sz_warn)
                     script_lines.append(f'--- {fname} ---')
                     script_lines.append(shared.sanitize_line(raw))
                     script_lines.append('')
@@ -499,6 +518,7 @@ class Hooks(shared.EcosystemHooks):
             'manifest_text': gemspec_text,
             'manifest_extra_file': 'gemspec.txt',
             'install_hook_context': install_hook_context,
+            'install_cmd_warnings': install_cmd_warnings,
         }
 
     def download_old(

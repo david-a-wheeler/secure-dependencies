@@ -411,13 +411,22 @@ def write_signals(  # noqa: C901
             'YES  [new executables added to PATH; risk of persistence or path hijacking]',
         ))
     for _icw in manifest.get('install_cmd_warnings', []):
-        _icw_sig = _icw.split(':')[0]
-        _icw_hook = _icw.split(':')[1] if ':' in _icw else 'install script'
-        _concerns.append((
-            _icw_sig.lower(),
-            f'detected in {_icw_hook}  '
-            '[supply chain attack indicator; see manifest-analysis.txt]',
-        ))
+        _icw_sig, _, _icw_rest = _icw.partition(':')
+        _icw_hook = _icw_rest or 'install script'
+        if _icw_sig == 'INSTALL_SCRIPT_LARGE':
+            _icw_desc = (
+                f'{_icw_hook}: unusually large'
+                '  [see INSTALL_SCRIPT_SIZE in manifest-analysis.txt;'
+                ' large install scripts are extremely rare in legitimate'
+                ' packages and may embed obfuscated payloads]'
+            )
+        else:
+            _icw_desc = (
+                f'detected in {_icw_hook}'
+                '  [supply chain attack indicator;'
+                ' see manifest-analysis.txt]'
+            )
+        _concerns.append((_icw_sig.lower(), _icw_desc))
     if diff_mode and diff_lines > 500:
         _concerns.append((
             'diff_lines',

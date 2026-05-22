@@ -149,6 +149,13 @@ _INSTALL_CMD_CHECKS: list[tuple[str, re.Pattern[str]]] = [
     )),
 ]
 
+# Size thresholds for install hook command strings (combined preinstall +
+# install + postinstall). Inline hook commands in package.json are almost
+# always a short shell invocation; 10 KB or 50 lines is extremely unusual
+# even for the most complex legitimate packages.
+_INSTALL_HOOK_WARN_BYTES = 10_000
+_INSTALL_HOOK_WARN_LINES = 50
+
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -780,6 +787,24 @@ class Hooks(shared.EcosystemHooks):
                         install_cmd_warnings.append(
                             f'{_sig_name}:{_hook_name}')
                         break  # report each signal once only
+
+            # Install hook size check (combined inline hook content).
+            # Inline hook strings > 10 KB or > 50 lines are extremely unusual;
+            # attackers sometimes embed base64-encoded payloads directly here.
+            _hook_combined = '\n'.join(
+                v for _, v in install_script_content if v)
+            if _hook_combined:
+                _size_warn = shared.report_install_script_size(
+                    _hook_combined, 'install hooks (combined)',
+                    p, _INSTALL_HOOK_WARN_BYTES, _INSTALL_HOOK_WARN_LINES,
+                )
+                if _size_warn:
+                    install_cmd_warnings.append(_size_warn)
+                    install_hook_context.append(
+                        f'CRITICAL: {_size_warn.split(":", 1)[1]}'
+                        ' install hook content is unusually large.'
+                        ' Review for embedded payloads.'
+                    )
 
             # Runtime dependencies
             p('')

@@ -2237,6 +2237,53 @@ def git_diff_between_tags(
 
 
 # ---------------------------------------------------------------------------
+# Install-script size reporting
+# ---------------------------------------------------------------------------
+
+def report_install_script_size(
+    content: str,
+    script_name: str,
+    p: 'Printer',
+    warn_bytes: int,
+    warn_lines: int,
+) -> 'str | None':
+    """Emit install-script size metrics; return warning key if over limit.
+
+    Prints INSTALL_SCRIPT_SIZE to p(). If byte_count > warn_bytes OR
+    line_count > warn_lines, also prints a [!] warning and returns an
+    'INSTALL_SCRIPT_LARGE:<script_name>' string for install_cmd_warnings.
+    Returns None when the script is within normal bounds.
+
+    Thresholds are intentionally high (ecosystem-specific) to fire only
+    on extremely unusual scripts; false positives waste reviewer attention.
+
+    >>> report_install_script_size('x\\n' * 5, 't.py', lambda x: None, 1000, 20)
+    >>> report_install_script_size('x\\n' * 30, 't.py', lambda x: None, 1000, 20)
+    'INSTALL_SCRIPT_LARGE:t.py'
+    """
+    byte_count = len(content.encode('utf-8'))
+    line_count = content.count('\n') + 1 if content.strip() else 0
+    p(f'INSTALL_SCRIPT_SIZE ({script_name}):'
+      f' {byte_count} bytes, {line_count} lines')
+    over_bytes = byte_count > warn_bytes
+    over_lines = warn_lines > 0 and line_count > warn_lines
+    if over_bytes or over_lines:
+        reasons: list[str] = []
+        if over_bytes:
+            reasons.append(
+                f'{byte_count} bytes exceeds {warn_bytes}-byte threshold')
+        if over_lines:
+            reasons.append(
+                f'{line_count} lines exceeds {warn_lines}-line threshold')
+        p(f'[!] INSTALL_SCRIPT_UNUSUALLY_LARGE ({script_name}):'
+          f' {"; ".join(reasons)}')
+        p('    Legitimate install scripts rarely exceed these sizes;'
+          ' review for embedded payloads or obfuscated code.')
+        return f'INSTALL_SCRIPT_LARGE:{script_name}'
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Project health concerns
 # ---------------------------------------------------------------------------
 

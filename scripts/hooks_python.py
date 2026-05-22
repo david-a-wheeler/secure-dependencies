@@ -257,6 +257,13 @@ def _get_pkg_file(directory: Path, pkgname: str, version: str) -> Path | None:
     return None
 
 
+# Size thresholds for Python install scripts (setup.py).
+# Even numpy's historically large setup.py was under 1000 lines;
+# 40 KB or 1000 lines is extremely unusual for any legitimate package.
+_SETUP_PY_WARN_BYTES = 40_000
+_SETUP_PY_WARN_LINES = 1_000
+
+
 # ---------------------------------------------------------------------------
 # Public API: called by dep_review.py
 # ---------------------------------------------------------------------------
@@ -555,6 +562,12 @@ class Hooks(shared.EcosystemHooks):
                     r'|open\s*\(|exec\s*\(|eval\s*\(|__import__|importlib)\b',
                     sp_text,
                 ))
+                _sp_size_warn = shared.report_install_script_size(
+                    sp_text, 'setup.py', p,
+                    _SETUP_PY_WARN_BYTES, _SETUP_PY_WARN_LINES,
+                )
+                if _sp_size_warn:
+                    install_cmd_warnings.append(_sp_size_warn)
                 if suspicious:
                     has_build_hooks = 'YES'
                     install_script_files.append(('setup.py', setup_py))
