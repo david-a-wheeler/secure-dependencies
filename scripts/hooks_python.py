@@ -257,6 +257,13 @@ def _get_pkg_file(directory: Path, pkgname: str, version: str) -> Path | None:
     return None
 
 
+# Size thresholds for Python install scripts (setup.py).
+# Even numpy's historically large setup.py was under 1000 lines;
+# 40 KB or 1000 lines is extremely unusual for any legitimate package.
+_SETUP_PY_WARN_BYTES = 40_000
+_SETUP_PY_WARN_LINES = 1_000
+
+
 # ---------------------------------------------------------------------------
 # Public API: called by dep_review.py
 # ---------------------------------------------------------------------------
@@ -282,7 +289,17 @@ class Hooks(shared.EcosystemHooks):
         'obfuscated execution, unsafe deserialization (pickle, yaml.load, marshal), '
         'network calls at import scope, credential env-var access, home-dir writes, '
         'dynamic imports on external input, atexit/registration hooks, '
-        'self-publish (worm propagation), IDE config writes, cloud secret-manager API calls'
+        'self-publish (worm propagation), IDE config writes, cloud secret-manager API calls, '
+        'shadow runtimes (bun/deno/pkgx spawned from source), '
+        'cross-language spawn (curl/wget/nc as second-stage loaders), '
+        'GitHub raw-content fetch by direct commit SHA (orphan-commit injection), '
+        'GitHub commit-search API used as a C2 dead-drop channel, '
+        'Discord token format (harvested credential), '
+        'string-split obfuscation (char-by-char keyword assembly), '
+        'unusually long lines (embedded payload or single-line obfuscation), '
+        'reverse-shell indicators (bash /dev/tcp, nc -e, socat EXEC), '
+        'cron/systemd/LaunchAgent persistence, '
+        'cryptominer tools and Stratum mining protocol'
     )
 
     DANGEROUS_PATTERNS: list[tuple[str, str]] = [
@@ -343,8 +360,49 @@ class Hooks(shared.EcosystemHooks):
         # json.dumps(dict(os.environ)) as well as json.dumps(os.environ).
         ('env-enumeration',
          r'(?:json\.dumps|pprint\.pformat)\s*\(\s*(?:dict\s*\(\s*)?os\.environ\b'),
+        # Mini Shai-Hulud campaign: backdoor install path, LaunchAgent name,
+        # and dead-man's-switch script. No legitimate use in package code.
+        ('mini-shai-hulud-paths', shared.MINI_SHAI_HULUD_PATHS_RE),
         # Exfiltration relay services and known campaign C2 domains.
         ('exfil-relay-domain', shared.EXFIL_RELAY_DOMAINS_RE),
+        # Shadow runtimes: subprocess/os.system invoking bun/deno/pkgx etc.
+        # Highly suspicious in a Python package; no legitimate use case.
+        ('shadow-runtime',
+         r'(?:subprocess\.(?:call|run|Popen|check_output|check_call)'
+         r'|os\.(?:system|popen))\s*\([^)]{0,300}'
+         r'\b' + shared.SHADOW_RUNTIME_NAMES_RE + r'\b'),
+        # Cross-language spawn: Python invoking curl/wget/nc.
+        # Python has requests/urllib; spawning curl/wget/nc is a strong
+        # signal of a second-stage payload downloader.
+        ('cross-lang-spawn',
+         r'(?:subprocess\.(?:call|run|Popen|check_output|check_call)'
+         r'|os\.(?:system|popen))\s*\([^)]{0,300}'
+         r'\b' + shared.CROSS_LANG_TOOLS_RE + r'\b'),
+        # Orphan-commit fetch: source file fetches from GitHub by a direct
+        # 40-hex commit SHA alongside a fetch verb on the same line.
+        # Python packages have no legitimate reason to download by SHA;
+        # requests/urllib are native and should use versioned releases.
+        ('github-fetch-by-sha', shared.GITHUB_SHA_FETCH_RE),
+        # GitHub commit-search API used as a C2 dead-drop channel.
+        # The specific ?q=firedalazer form is in ADVERSARIAL_PATTERNS (abort);
+        # this catches the general endpoint for novel campaign variants.
+        ('github-commit-search-c2', shared.GITHUB_COMMIT_SEARCH_RE),
+        # Discord bot token embedded in source: likely a harvested credential
+        # or token-extraction regex.  24.6.27 base64 format; exact quantifiers.
+        ('discord-token-format', shared.DISCORD_TOKEN_RE),
+        # String-split obfuscation: 5+ single chars joined by + to assemble
+        # a keyword character by character, evading simple string-match scans.
+        ('string-split-obfuscation', shared.STRING_SPLIT_RE),
+        # Unusually long lines: may embed base64/hex payloads or
+        # single-line obfuscated code.  Python source rarely exceeds this.
+        ('long-line-obfuscation', shared.LONG_LINE_RE),
+        # Reverse-shell: bash /dev/tcp redirect, nc -e, socat EXEC.
+        ('reverse-shell', shared.REVERSE_SHELL_RE),
+        # Cron/systemd/LaunchAgent persistence.
+        ('cron-persistence', shared.CRON_PERSISTENCE_RE),
+        ('system-persistence', shared.SYSTEM_PERSISTENCE_RE),
+        # Cryptominer: named miner binaries or Stratum pool protocol.
+        ('cryptominer', shared.CRYPTOMINER_RE),
     ]
 
     DIFF_PATTERNS: list[tuple[str, str]] = [
@@ -552,6 +610,12 @@ class Hooks(shared.EcosystemHooks):
                     r'|open\s*\(|exec\s*\(|eval\s*\(|__import__|importlib)\b',
                     sp_text,
                 ))
+                _sp_size_warn = shared.report_install_script_size(
+                    sp_text, 'setup.py', p,
+                    _SETUP_PY_WARN_BYTES, _SETUP_PY_WARN_LINES,
+                )
+                if _sp_size_warn:
+                    install_cmd_warnings.append(_sp_size_warn)
                 if suspicious:
                     has_build_hooks = 'YES'
                     install_script_files.append(('setup.py', setup_py))
@@ -650,6 +714,10 @@ class Hooks(shared.EcosystemHooks):
             )
 
         has_install_scripts = bool(install_script_files)
+
+        # Bundled IDE config directories (cross-ecosystem, #3).
+        install_cmd_warnings.extend(
+            shared.check_bundled_ide_dirs(unpacked_dir, p))
 
         # Ecosystem-specific context for the driver's MANIFEST / INSTALL HOOKS section
         install_hook_context: list[str] = []
@@ -846,6 +914,7 @@ class Hooks(shared.EcosystemHooks):
         mfa_status = 'unknown'
         age_years_float: float | None = None
         last_release_days: int | None = None
+        version_published_days: int | None = None
         owner_count_int: int | None = None
         version_stability = 'unknown'
         license_from_registry: list[str] = []
@@ -879,6 +948,20 @@ class Hooks(shared.EcosystemHooks):
                 if all_upload_times:
                     last_release_days = shared.days_since(all_upload_times[-1])
 
+                # Age of this specific version
+                ver_files = releases.get(version, []) or []
+                ver_upload_times = sorted(
+                    t for rf in ver_files
+                    for t in [
+                        rf.get('upload_time_iso_8601', '')
+                        or rf.get('upload_time', '')
+                    ]
+                    if t
+                )
+                if ver_upload_times:
+                    version_published_days = shared.days_since(
+                        ver_upload_times[0])
+
                 # Version stability
                 ver_num = str(info.get('version', version))
                 if re.search(r'(?i)(alpha|beta|rc|\.dev|\.post|a\d+|b\d+)', ver_num):
@@ -899,6 +982,12 @@ class Hooks(shared.EcosystemHooks):
                 if yanked:
                     reason = shared.sanitize_line(str(info.get('yanked_reason', '')))
                     p(f'YANKED_REASON: {reason}')
+                p('')
+
+                ver_pub_str = (str(version_published_days)
+                               if version_published_days is not None
+                               else 'unknown')
+                p(f'VERSION_PUBLISHED_DAYS_AGO: {ver_pub_str}')
                 p('')
 
                 # Summary provenance info
@@ -947,6 +1036,7 @@ class Hooks(shared.EcosystemHooks):
             'mfa_status': mfa_status,
             'age_years_float': age_years_float,
             'last_release_days': last_release_days,
+            'version_published_days': version_published_days,
             'owner_count_int': owner_count_int,
             'version_stability': version_stability,
             'license_from_registry': license_from_registry,

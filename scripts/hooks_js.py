@@ -147,7 +147,25 @@ _INSTALL_CMD_CHECKS: list[tuple[str, re.Pattern[str]]] = [
         r'|vault\.azure\.net',
         re.IGNORECASE,
     )),
+    # Orphan-commit payload staging: install hook fetches content from GitHub
+    # by a direct 40-hex commit SHA rather than a branch or tag.  Attackers
+    # use commits unreachable from the default branch to hide malicious payloads
+    # that pass tag-based audits.  Install hooks that download by SHA are a
+    # direct supply-chain injection indicator; the SHA URL alone is sufficient
+    # since the entire hook value is executed shell code (no fetch-verb filter
+    # needed here -- unlike the broader DANGEROUS_PATTERNS source scan).
+    ('INSTALL_GITHUB_SHA_FETCH', re.compile(
+        shared.GITHUB_RAW_SHA_RE,
+        re.IGNORECASE,
+    )),
 ]
+
+# Size thresholds for install hook command strings (combined preinstall +
+# install + postinstall). Inline hook commands in package.json are almost
+# always a short shell invocation; 10 KB or 50 lines is extremely unusual
+# even for the most complex legitimate packages.
+_INSTALL_HOOK_WARN_BYTES = 10_000
+_INSTALL_HOOK_WARN_LINES = 50
 
 
 # ---------------------------------------------------------------------------
@@ -498,7 +516,17 @@ class Hooks(shared.EcosystemHooks):
         'dynamic require on external input, '
         'prototype pollution '
         '(Object.prototype assignment, __proto__ assignment), '
-        'home-dir writes, IDE config writes, cloud secret-manager API calls'
+        'home-dir writes, IDE config writes, cloud secret-manager API calls, '
+        'shadow runtimes (bun/deno/pkgx spawned from source), '
+        'cross-language spawn (python/curl/wget/nc as second-stage loaders), '
+        'GitHub raw-content fetch by direct commit SHA (orphan-commit injection), '
+        'GitHub commit-search API used as a C2 dead-drop channel, '
+        'Discord token format (harvested credential), '
+        'string-split obfuscation (char-by-char keyword assembly), '
+        'unusually long lines (embedded payload or single-line obfuscation), '
+        'reverse-shell indicators (bash /dev/tcp, nc -e, socat EXEC), '
+        'cron/systemd/LaunchAgent persistence, '
+        'cryptominer tools and Stratum mining protocol'
     )
 
     # ReDoS prevention (CWE-400): all patterns use bounded quantifiers so that
@@ -559,9 +587,54 @@ class Hooks(shared.EcosystemHooks):
          r'(?:JSON\.stringify|Object\.(?:keys|values|entries|assign|fromEntries))'
          r'\s*\(\s*process\.env\s*\)'
          r'|for\s*\(\s*(?:const|let|var)\s+\w{1,40}\s+(?:in|of)\s+process\.env\s*\)'),
+        # Mini Shai-Hulud campaign: backdoor install path, LaunchAgent name,
+        # and dead-man's-switch script. No legitimate use in package code.
+        ('mini-shai-hulud-paths', shared.MINI_SHAI_HULUD_PATHS_RE),
         # Exfiltration relay services and known campaign C2 domains.
         # Shared domain list from analysis_shared; no ecosystem-specific additions.
         ('exfil-relay-domain', shared.EXFIL_RELAY_DOMAINS_RE),
+        # Shadow runtimes: exec/spawn invoking bun/deno/pkgx/tsx/ts-node.
+        # These are covered in install hooks by _INSTALL_CMD_CHECKS; this
+        # pattern catches the same runtimes in broader source-file scans.
+        # [^)]{0,300} bounds backtracking to O(300) per anchor (safe).
+        ('shadow-runtime',
+         r'(?:exec(?:Sync|File(?:Sync)?)?|spawn(?:Sync)?)\s*\([^)]{0,300}'
+         r'\b' + shared.SHADOW_RUNTIME_NAMES_RE + r'\b'),
+        # Cross-language spawn: JS invoking python/curl/wget/nc.
+        # A JS package that spawns these tools is almost certainly a second-stage
+        # payload downloader or data exfiltration step.
+        ('cross-lang-spawn',
+         r'(?:exec(?:Sync|File(?:Sync)?)?|spawn(?:Sync)?)\s*\([^)]{0,300}'
+         r'\b' + shared.CROSS_LANG_TOOLS_RE + r'\b'),
+        # Orphan-commit fetch: source file fetches from GitHub by a direct
+        # 40-hex commit SHA alongside a fetch verb on the same line.
+        # A SHA URL in a fetch call is a supply-chain red flag; legitimate
+        # pinning uses lockfiles.  Whole-file multi-line coverage is handled
+        # for install hooks via INSTALL_GITHUB_SHA_FETCH in _INSTALL_CMD_CHECKS.
+        ('github-fetch-by-sha', shared.GITHUB_SHA_FETCH_RE),
+        # GitHub commit-search API used as a C2 dead-drop channel.
+        # The specific ?q=firedalazer form is in ADVERSARIAL_PATTERNS (abort);
+        # this catches the general endpoint for novel campaign variants.
+        ('github-commit-search-c2', shared.GITHUB_COMMIT_SEARCH_RE),
+        # Discord bot token embedded in source: likely a harvested credential
+        # or token-extraction regex.  24.6.27 base64 format; exact quantifiers.
+        ('discord-token-format', shared.DISCORD_TOKEN_RE),
+        # String-split obfuscation: 5+ single chars joined by + to assemble
+        # a keyword character by character, evading simple string-match scans.
+        ('string-split-obfuscation', shared.STRING_SPLIT_RE),
+        # Unusually long lines: may embed base64/hex payloads or
+        # single-line obfuscated code.  Matches in dist/ are expected.
+        ('long-line-obfuscation', shared.LONG_LINE_RE),
+        # Reverse-shell: bash /dev/tcp redirect, nc -e, socat EXEC.
+        # No legitimate use in package source code.
+        ('reverse-shell', shared.REVERSE_SHELL_RE),
+        # Cron persistence: writing to cron directories or piping to
+        # crontab; establishes a payload that survives reboots.
+        ('cron-persistence', shared.CRON_PERSISTENCE_RE),
+        # System-level persistence: systemd service or macOS LaunchAgent.
+        ('system-persistence', shared.SYSTEM_PERSISTENCE_RE),
+        # Cryptominer: named miner binaries or Stratum pool protocol.
+        ('cryptominer', shared.CRYPTOMINER_RE),
     ]
 
     # ReDoS prevention: diff lines start with ^\+ so they are anchored, but
@@ -778,6 +851,24 @@ class Hooks(shared.EcosystemHooks):
                             f'{_sig_name}:{_hook_name}')
                         break  # report each signal once only
 
+            # Install hook size check (combined inline hook content).
+            # Inline hook strings > 10 KB or > 50 lines are extremely unusual;
+            # attackers sometimes embed base64-encoded payloads directly here.
+            _hook_combined = '\n'.join(
+                v for _, v in install_script_content if v)
+            if _hook_combined:
+                _size_warn = shared.report_install_script_size(
+                    _hook_combined, 'install hooks (combined)',
+                    p, _INSTALL_HOOK_WARN_BYTES, _INSTALL_HOOK_WARN_LINES,
+                )
+                if _size_warn:
+                    install_cmd_warnings.append(_size_warn)
+                    install_hook_context.append(
+                        f'CRITICAL: {_size_warn.split(":", 1)[1]}'
+                        ' install hook content is unusually large.'
+                        ' Review for embedded payloads.'
+                    )
+
             # Runtime dependencies
             p('')
             p('RUNTIME_DEPS:')
@@ -899,6 +990,10 @@ class Hooks(shared.EcosystemHooks):
             p('ERROR: package.json not found in unpacked directory')
 
         has_install_scripts = (work / 'install-scripts.txt').is_file()
+
+        # Bundled IDE config directories (cross-ecosystem, #3).
+        install_cmd_warnings.extend(
+            shared.check_bundled_ide_dirs(unpacked_dir, p))
 
         return {
             'source_url': source_url,
@@ -1026,6 +1121,7 @@ class Hooks(shared.EcosystemHooks):
         mfa_status = 'unknown'
         age_years_float: float | None = None
         last_release_days: int | None = None
+        version_published_days: int | None = None
         owner_count_int: int | None = None
         version_stability = 'unknown'
         license_from_registry: list[str] = []
@@ -1058,6 +1154,9 @@ class Hooks(shared.EcosystemHooks):
                 if ver_times:
                     last_release_days = shared.days_since(
                         max(ver_times.values()))
+                ver_ts = ver_times.get(version)
+                if ver_ts:
+                    version_published_days = shared.days_since(ver_ts)
 
                 if (re.search(
                         r'(?i)(alpha|beta|rc|pre|dev|canary|next)',
@@ -1100,6 +1199,12 @@ class Hooks(shared.EcosystemHooks):
                 else:
                     p('DEPRECATED: NO')
                     p('')
+
+                ver_pub_str = (str(version_published_days)
+                               if version_published_days is not None
+                               else 'unknown')
+                p(f'VERSION_PUBLISHED_DAYS_AGO: {ver_pub_str}')
+                p('')
 
             except (ValueError, KeyError, TypeError):
                 p('REGISTRY_DATA: parse error')
@@ -1171,6 +1276,7 @@ class Hooks(shared.EcosystemHooks):
             'mfa_status': mfa_status,
             'age_years_float': age_years_float,
             'last_release_days': last_release_days,
+            'version_published_days': version_published_days,
             'owner_count_int': owner_count_int,
             'version_stability': version_stability,
             'license_from_registry': license_from_registry,

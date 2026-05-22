@@ -107,6 +107,18 @@ def _extract_gemspec_license(gemspec_text: str) -> str:
     return lic_match.group(1).strip() if lic_match else ''
 
 
+# Size thresholds for Ruby install scripts, keyed by filename.
+# extconf.rb: nokogiri is ~500 lines; > 1000 lines is extremely unusual.
+# Rakefile: complex gems rarely exceed 300 install-related lines;
+#   the whole Rakefile is checked, so 500 lines is the threshold.
+# 'default' covers any other install-time file (Makefile.in, etc.).
+_INSTALL_SCRIPT_WARN: dict[str, tuple[int, int]] = {
+    'extconf.rb': (40_000, 1_000),
+    'Rakefile':   (20_000,   500),
+    'default':    (20_000,   500),
+}
+
+
 # ---------------------------------------------------------------------------
 # Public API: called by dep_review.py
 # ---------------------------------------------------------------------------
@@ -127,7 +139,17 @@ class Hooks(shared.EcosystemHooks):
         'Marshal.load, '
         'network at load scope, credential env-var access, home-dir writes, '
         'dynamic dispatch on external input, at_exit hooks, '
-        'self-publish (worm propagation), IDE config writes, cloud secret-manager API calls'
+        'self-publish (worm propagation), IDE config writes, cloud secret-manager API calls, '
+        'shadow runtimes (bun/deno/pkgx spawned from source), '
+        'cross-language spawn (curl/wget/nc as second-stage loaders), '
+        'GitHub raw-content fetch by direct commit SHA (orphan-commit injection), '
+        'GitHub commit-search API used as a C2 dead-drop channel, '
+        'Discord token format (harvested credential), '
+        'string-split obfuscation (char-by-char keyword assembly), '
+        'unusually long lines (embedded payload or single-line obfuscation), '
+        'reverse-shell indicators (bash /dev/tcp, nc -e, socat EXEC), '
+        'cron/systemd/LaunchAgent persistence, '
+        'cryptominer tools and Stratum mining protocol'
     )
 
     # ReDoS prevention (CWE-400): all patterns use bounded quantifiers so that
@@ -177,8 +199,46 @@ class Hooks(shared.EcosystemHooks):
         ('env-enumeration',
          r'JSON\.(?:dump|generate)\s*\(\s*ENV\b'
          r'|ENV\.to_a\b'),
+        # Mini Shai-Hulud campaign: backdoor install path, LaunchAgent name,
+        # and dead-man's-switch script. No legitimate use in package code.
+        ('mini-shai-hulud-paths', shared.MINI_SHAI_HULUD_PATHS_RE),
         # Exfiltration relay services and known campaign C2 domains.
         ('exfil-relay-domain', shared.EXFIL_RELAY_DOMAINS_RE),
+        # Shadow runtimes: system/exec/spawn invoking bun/deno/pkgx etc.
+        # Extremely unusual in Ruby source; no legitimate published-gem use case.
+        ('shadow-runtime',
+         r'(?:system|exec|spawn|IO\.popen)\s*\([^)]{0,300}'
+         r'\b' + shared.SHADOW_RUNTIME_NAMES_RE + r'\b'),
+        # Cross-language spawn: Ruby invoking curl/wget/nc.
+        # Ruby has Net::HTTP/Faraday; spawning curl/wget/nc is a strong
+        # signal of a second-stage payload downloader.
+        ('cross-lang-spawn',
+         r'(?:system|exec|spawn|IO\.popen)\s*\([^)]{0,300}'
+         r'\b' + shared.CROSS_LANG_TOOLS_RE + r'\b'),
+        # Orphan-commit fetch: source file fetches from GitHub by a direct
+        # 40-hex commit SHA alongside a fetch verb on the same line.
+        # Ruby has Net::HTTP/Faraday; fetching by SHA is unusual and suspicious.
+        ('github-fetch-by-sha', shared.GITHUB_SHA_FETCH_RE),
+        # GitHub commit-search API used as a C2 dead-drop channel.
+        # The specific ?q=firedalazer form is in ADVERSARIAL_PATTERNS (abort);
+        # this catches the general endpoint for novel campaign variants.
+        ('github-commit-search-c2', shared.GITHUB_COMMIT_SEARCH_RE),
+        # Discord bot token embedded in source: likely a harvested credential
+        # or token-extraction regex.  24.6.27 base64 format; exact quantifiers.
+        ('discord-token-format', shared.DISCORD_TOKEN_RE),
+        # String-split obfuscation: 5+ single chars joined by + to assemble
+        # a keyword character by character, evading simple string-match scans.
+        ('string-split-obfuscation', shared.STRING_SPLIT_RE),
+        # Unusually long lines: may embed base64/hex payloads or
+        # single-line obfuscated code.  Ruby gem source rarely exceeds this.
+        ('long-line-obfuscation', shared.LONG_LINE_RE),
+        # Reverse-shell: bash /dev/tcp redirect, nc -e, socat EXEC.
+        ('reverse-shell', shared.REVERSE_SHELL_RE),
+        # Cron/systemd/LaunchAgent persistence.
+        ('cron-persistence', shared.CRON_PERSISTENCE_RE),
+        ('system-persistence', shared.SYSTEM_PERSISTENCE_RE),
+        # Cryptominer: named miner binaries or Stratum pool protocol.
+        ('cryptominer', shared.CRYPTOMINER_RE),
     ]
 
     # ReDoS prevention: diff lines start with ^\+ so they are anchored, but
@@ -323,6 +383,7 @@ class Hooks(shared.EcosystemHooks):
         source_url = ''
         gemspec_text = ''
         runtime_dep_lines: list[str] = []
+        install_cmd_warnings: list[str] = []
 
         # Locate gemspec: prefer in-package file, fall back to
         # extracted gemspec.txt
@@ -453,6 +514,12 @@ class Hooks(shared.EcosystemHooks):
                 ]
                 for fname, fpath in install_script_files:
                     raw = fpath.read_text(encoding='utf-8', errors='replace')
+                    warn_b, warn_l = _INSTALL_SCRIPT_WARN.get(
+                        fname, _INSTALL_SCRIPT_WARN['default'])
+                    _sz_warn = shared.report_install_script_size(
+                        raw, fname, p, warn_b, warn_l)
+                    if _sz_warn:
+                        install_cmd_warnings.append(_sz_warn)
                     script_lines.append(f'--- {fname} ---')
                     script_lines.append(shared.sanitize_line(raw))
                     script_lines.append('')
@@ -464,6 +531,10 @@ class Hooks(shared.EcosystemHooks):
             p('ERROR: gemspec not found')
 
         has_install_scripts = (work / 'install-scripts.txt').is_file()
+
+        # Bundled IDE config directories (cross-ecosystem, #3).
+        install_cmd_warnings.extend(
+            shared.check_bundled_ide_dirs(unpacked_dir, p))
 
         # Build ecosystem-specific context for the driver's MANIFEST
         # / INSTALL HOOKS section
@@ -496,6 +567,7 @@ class Hooks(shared.EcosystemHooks):
             'manifest_text': gemspec_text,
             'manifest_extra_file': 'gemspec.txt',
             'install_hook_context': install_hook_context,
+            'install_cmd_warnings': install_cmd_warnings,
         }
 
     def download_old(
@@ -669,6 +741,7 @@ class Hooks(shared.EcosystemHooks):
         mfa_status = 'unknown'
         age_years_float: float | None = None
         last_release_days: int | None = None
+        version_published_days: int | None = None
         owner_count_int: int | None = None
         version_stability = 'unknown'
         license_from_registry: list[str] = []
@@ -749,6 +822,8 @@ class Hooks(shared.EcosystemHooks):
                     None
                 )
                 if target_ver_info:
+                    ver_created = str(target_ver_info.get('created_at', ''))
+                    version_published_days = shared.days_since(ver_created)
                     ver_info_lines.append('VERSION_INFO (selected fields):')
                     for key in ('number', 'created_at', 'authors',
                                 'sha', 'ruby_version',
@@ -756,6 +831,11 @@ class Hooks(shared.EcosystemHooks):
                         val = target_ver_info.get(key, '')
                         val_str = shared.sanitize_line(str(val))[:200]
                         ver_info_lines.append(f'  {key}: {val_str}')
+                    ver_pub_str = (str(version_published_days)
+                                   if version_published_days is not None
+                                   else 'unknown')
+                    ver_info_lines.append(
+                        f'  version_published_days_ago: {ver_pub_str}')
                     lic_field = target_ver_info.get('licenses')
                     if isinstance(lic_field, list):
                         license_from_registry.extend(
@@ -790,6 +870,7 @@ class Hooks(shared.EcosystemHooks):
             'mfa_status': mfa_status,
             'age_years_float': age_years_float,
             'last_release_days': last_release_days,
+            'version_published_days': version_published_days,
             'owner_count_int': owner_count_int,
             'version_stability': version_stability,
             'license_from_registry': license_from_registry,

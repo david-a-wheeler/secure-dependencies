@@ -989,6 +989,49 @@ IDE_CONFIG_PATHS_RE: str = (
     r'|\.config[/\\](?:claude|copilot|cursor|codeium)[/\\]'
 )
 
+# Secondary JS runtimes rarely legitimately spawned by published packages.
+# Their presence as a subprocess command argument is a strong indicator of
+# install-hook abuse or worm propagation.  tsx/ts-node are lower urgency
+# (common in dev tooling) but still unusual in published package source.
+SHADOW_RUNTIME_NAMES_RE: str = r'(?:bun|deno|pkgx|tsx|ts-node)'
+
+# Cross-language tools that a package in one ecosystem rarely needs to
+# spawn at runtime.  curl/wget/nc are common second-stage payload loaders;
+# python appearing in a JS/Ruby package spawn call is a cross-language pivot.
+CROSS_LANG_TOOLS_RE: str = r'(?:python3?|curl|wget|nc|netcat)'
+
+# GitHub raw-content URL containing a 40-hex commit SHA as a path component.
+# Example: raw.githubusercontent.com/owner/repo/<sha>/file
+# Fetching by direct SHA (rather than a branch/tag) in package source is a
+# supply-chain attack indicator: attackers use "orphan commits" that are not
+# reachable from the default branch, so the SHA bypasses tag-based audits.
+# Legitimate SHA pinning uses lockfiles, not raw URL fetches in source code.
+# Owner and repo name chars: alphanumeric plus . - _ (GitHub rules).
+# [0-9a-f]{40}: exactly 40 lowercase hex digits -- a git SHA.
+GITHUB_RAW_SHA_RE: str = (
+    r'raw\.githubusercontent\.com'
+    r'/[a-zA-Z0-9._-]{1,100}'   # owner
+    r'/[a-zA-Z0-9._-]{1,100}'   # repo
+    r'/[0-9a-f]{40}/'            # 40-hex commit SHA
+)
+
+# Fetch-verb + SHA URL pattern for DANGEROUS_PATTERNS (line-by-line grep).
+# Matches a common HTTP-fetch verb on the same line as a raw GitHub SHA URL,
+# in either order.  [^\n]{0,300} is bounded O(300) per anchor -- ReDoS-safe.
+# The fetch verbs cover JS (axios/got/node-fetch), Python (requests/urllib),
+# Ruby (Net::HTTP/Faraday), and universal tools (curl/wget/fetch).
+GITHUB_SHA_FETCH_RE: str = (
+    r'(?:fetch|curl|wget|axios|got|requests?|urllib|urlopen'
+    r'|Net::HTTP|Faraday|HTTParty|https?\.get|node-fetch)'
+    r'[^\n]{0,300}'
+    + GITHUB_RAW_SHA_RE
+    + r'|'
+    + GITHUB_RAW_SHA_RE
+    + r'[^\n]{0,300}'
+    r'(?:fetch|curl|wget|axios|got|requests?|urllib|urlopen'
+    r'|Net::HTTP|Faraday|HTTParty|https?\.get|node-fetch)'
+)
+
 # Cloud secret-manager API hostnames.  These appear in HTTP calls and SDK
 # configs regardless of language.  Each ecosystem adds its own SDK-specific
 # alternatives on top of these shared provider hostnames.
@@ -1017,11 +1060,62 @@ HOME_PATHS_RE: str = (
     r'~\/|\/home\/|\.bashrc|\.zshrc|\.profile|\.bash_profile|\.ssh\/'
 )
 
+# Reverse-shell indicators: bash /dev/tcp redirect, netcat -e, socat EXEC.
+# These patterns have essentially no legitimate use in package source code.
+# /dev/tcp/host/port: positive character class + exact quantifiers, O(n) safe.
+# [^\n]{0,80}: bounded wildcard between nc/socat keyword and shell argument.
+REVERSE_SHELL_RE: str = (
+    r'/dev/tcp/[a-zA-Z0-9._-]{1,100}/[0-9]{1,5}'  # bash TCP pseudo-device
+    r'|\bnc\b[^\n]{0,80}-e\s+/bin/'                # netcat with -e /bin/sh
+    r'|\bsocat\s+TCP[^\n]{0,80}EXEC:/bin/'          # socat TCP ... EXEC:/bin/
+)
+
+# Cron job installation: writing to cron directories or piping to crontab.
+# /etc/cron.d/ and /var/spool/cron/ are OS cron drop directories.
+# '| crontab -' reads a new crontab from stdin -- the standard add-to-cron
+# pattern.  All alternatives are anchored literals or bounded classes.
+CRON_PERSISTENCE_RE: str = (
+    r'/etc/cron\.(?:d|daily|hourly|weekly|monthly)/[^\s"\']{0,80}'
+    r'|/var/spool/cron/'
+    r'|\|\s*crontab\s+-(?![a-zA-Z0-9])'  # | crontab - (stdin install, not -l/-r/-e)
+)
+
+# System-level persistence: systemd service installation, macOS LaunchAgent/
+# Daemon registration.  Both are unusual in published library packages and
+# indicate a payload that survives reboots.
+# Library/LaunchAgents/ and Library/LaunchDaemons/: macOS persistence dirs.
+# /etc/systemd/system/*.service: Linux systemd unit file installation path.
+# systemctl enable/daemon-reload: commands that activate the installed unit.
+SYSTEM_PERSISTENCE_RE: str = (
+    r'/etc/systemd/system/[a-zA-Z0-9._-]{1,100}\.service'
+    r'|\bsystemctl\s+(?:enable|daemon-reload)\b'
+    r'|Library/Launch(?:Agents|Daemons)/[^\s"\'<>]{1,100}'
+)
+
+# Cryptominer invocation: named miner binaries and the Stratum pool protocol.
+# xmrig/cpuminer/ethminer: common open-source CPU/GPU miners.
+# stratum+tcp:// and stratum+ssl://: mining-pool connection URL scheme with
+# no legitimate use in any published package.  All alternatives are literals
+# or simple alternations -- no backtracking risk.
+CRYPTOMINER_RE: str = (
+    r'\b(?:xmrig|cpuminer|ethminer|minerd|ccminer|t-rex|lolminer|nbminer)\b'
+    r'|stratum\+(?:tcp|ssl)://'
+)
+
 # Exfiltration relay services and known campaign C2 domains that appear as
 # string literals in package source.  These services have essentially no
 # legitimate use inside published packages; a match is a high-confidence
 # attack signal.  The alternation uses fixed-length domain segments to
 # avoid backtracking (each component is an anchored literal).
+# GitHub commit-search API used as a C2 dead-drop channel.
+# Attackers poll this endpoint with a unique query keyword (e.g. "firedalazer")
+# embedded in a commit message on an attacker-controlled repo; the search
+# result acts as a command signal without requiring a dedicated C2 server.
+# Legitimate package code almost never calls the commit-search API; an API
+# wrapper that does so is the rare exception and still warrants review.
+# The specific ?q=firedalazer form is in ADVERSARIAL_PATTERNS (abort-level).
+GITHUB_COMMIT_SEARCH_RE: str = r'api\.github\.com/search/commits'
+
 EXFIL_RELAY_DOMAINS_RE: str = (
     r'(?i)(?:webhook\.site'
     r'|pipedream\.net'
@@ -1031,6 +1125,32 @@ EXFIL_RELAY_DOMAINS_RE: str = (
     r'|burpcollaborator\.net'
     r'|m-kosche\.com)'
 )
+
+# Discord bot token format: base64-encoded user ID (24 chars), dot,
+# base64-encoded timestamp (6 chars), dot, HMAC (27 chars).
+# Finding this in package source means either a hardcoded stolen token or
+# code that extracts tokens matching this format.  Both are suspicious.
+# All quantifiers are exact: no alternation or backtracking possible.
+DISCORD_TOKEN_RE: str = (
+    r'[a-zA-Z0-9]{24}\.[a-zA-Z0-9]{6}\.[a-zA-Z0-9]{27}'
+)
+
+# String-split obfuscation: 5+ single-character string literals joined by +.
+# Used to assemble keywords like 'process', 'eval', or shell commands
+# one character at a time to evade simple string-match filters.
+# Each {4,} iteration must consume a literal '+' so the engine advances
+# monotonically -- linear scan, no catastrophic backtracking (ReDoS-safe).
+STRING_SPLIT_RE: str = (
+    r'["\'][a-zA-Z0-9._/\\]["\']'
+    r'(?:\s*\+\s*["\'][a-zA-Z0-9._/\\]["\']){4,}'
+)
+
+# Lines with 5000+ non-newline characters may embed base64/hex payloads
+# or single-line obfuscated attack code.  Matches in minified dist/ files
+# are expected; the file path in grep output lets the reviewer distinguish
+# build output from source or install scripts.
+# [^\n]{5000,} is a single bounded character class -- ReDoS-safe.
+LONG_LINE_RE: str = r'[^\n]{5000,}'
 
 # VCS URL scheme fragment: matches git+https:// and git+ssh:// transports.
 # Used in manifest and lockfile dep checks across all ecosystems.
@@ -1046,6 +1166,18 @@ VCS_HOSTNAMES_RE: str = r'(?:github|gitlab|bitbucket)\.com'
 # 64 chars covers SHA-256 (future git repos). Use {7,64} when both are
 # possible; use {7,40} when only SHA-1 is expected.
 COMMIT_HASH_RE: str = r'[0-9a-f]{7,40}'
+
+# Mini Shai-Hulud worm: persistence and dead-man's-switch path markers.
+# These appear in file-write or subprocess calls inside malicious packages.
+# kitty/cat.py: Python backdoor disguised as the kitty terminal's data dir.
+# kitty-monitor: LaunchAgent plist name used for macOS persistence.
+# gh-token-monitor: dead-man's-switch script fired when tokens are revoked.
+# Sources: [Kurmi2026, Lakshmanan2026]
+MINI_SHAI_HULUD_PATHS_RE: str = (
+    r'\.local[/\\]share[/\\]kitty[/\\]cat\.py'
+    r'|kitty-monitor'
+    r'|gh-token-monitor'
+)
 
 
 def blind_scan(
@@ -1305,6 +1437,23 @@ ADVERSARIAL_PATTERNS: list[tuple[str, str]] = [
     # 1000+ spaces/tabs followed by a non-whitespace character: content hidden
     # after padding that won't be visible in most editors or diff views.
     ('whitespace-hiding', r'[ \t]{1000,}[^ \t\r\n]'),
+    # Mini Shai-Hulud campaign fingerprints: zero-false-positive strings with
+    # no known legitimate use in package code. Finding any of these is definitive
+    # evidence of the May 2026 GitHub/Nx-Console supply-chain worm.
+    # firedalazer: unique dead-drop keyword for the GitHub commit-search C2 channel.
+    # WormyBoi: prefix of exfiltration commit messages (EveryBoiWeBuildIsAWormyBoi).
+    # niagA oG eW ereH: reversed Dune-theme string used in repo descriptions
+    #   and exfiltration logs to evade simple text filters.
+    # firedalazer C2 URL: hardcoded polling endpoint embedded in worm code.
+    # Sources: [Kurmi2026, Machluf2026, Lakshmanan2026]
+    ('mini-shai-hulud-firedalazer',
+     r'firedalazer'),
+    ('mini-shai-hulud-wormyboi',
+     r'WormyBoi'),
+    ('mini-shai-hulud-reversed-string',
+     r'niagA oG eW ereH'),
+    ('mini-shai-hulud-c2-url',
+     r'api\.github\.com/search/commits\?q=firedalazer'),
 ]
 
 # Labels that trigger ADVERSARIAL_GATE: ABORT.  These represent unambiguous
@@ -1317,6 +1466,8 @@ ADVERSARIAL_PATTERNS: list[tuple[str, str]] = [
 #     instructed to ignore such claims. Primary defenses: sub-agent isolation
 #     and never reading raw-* files.
 #   - whitespace-hiding hides content after 1000+ spaces, invisible in editors
+#   - mini-shai-hulud-*: fingerprints of the May 2026 GitHub/Nx-Console worm;
+#     zero-false-positive strings with no known legitimate use in any package.
 #
 # non-ascii-in-identifiers is NOT in this set: accented characters and
 # non-Latin scripts are common in documentation, comments, and string literals
@@ -1328,6 +1479,10 @@ ADVERSARIAL_ABORT_LABELS: frozenset[str] = frozenset({
     'zero-width-chars',
     'prompt-injection',
     'whitespace-hiding',
+    'mini-shai-hulud-firedalazer',
+    'mini-shai-hulud-wormyboi',
+    'mini-shai-hulud-reversed-string',
+    'mini-shai-hulud-c2-url',
 })
 
 # Source-code file globs used to scope bidi/zero-width scans.
@@ -2202,6 +2357,191 @@ def git_diff_between_tags(
 
 
 # ---------------------------------------------------------------------------
+# Install-script size reporting
+# ---------------------------------------------------------------------------
+
+def report_install_script_size(
+    content: str,
+    script_name: str,
+    p: 'Printer',
+    warn_bytes: int,
+    warn_lines: int,
+) -> 'str | None':
+    """Emit install-script size metrics; return warning key if over limit.
+
+    Prints INSTALL_SCRIPT_SIZE to p(). If byte_count > warn_bytes OR
+    line_count > warn_lines, also prints a [!] warning and returns an
+    'INSTALL_SCRIPT_LARGE:<script_name>' string for install_cmd_warnings.
+    Returns None when the script is within normal bounds.
+
+    Thresholds are intentionally high (ecosystem-specific) to fire only
+    on extremely unusual scripts; false positives waste reviewer attention.
+
+    >>> report_install_script_size('x\\n' * 5, 't.py', lambda x: None, 1000, 20)
+    >>> report_install_script_size('x\\n' * 30, 't.py', lambda x: None, 1000, 20)
+    'INSTALL_SCRIPT_LARGE:t.py'
+    """
+    byte_count = len(content.encode('utf-8'))
+    line_count = content.count('\n') + 1 if content.strip() else 0
+    p(f'INSTALL_SCRIPT_SIZE ({script_name}):'
+      f' {byte_count} bytes, {line_count} lines')
+    over_bytes = byte_count > warn_bytes
+    over_lines = warn_lines > 0 and line_count > warn_lines
+    if over_bytes or over_lines:
+        reasons: list[str] = []
+        if over_bytes:
+            reasons.append(
+                f'{byte_count} bytes exceeds {warn_bytes}-byte threshold')
+        if over_lines:
+            reasons.append(
+                f'{line_count} lines exceeds {warn_lines}-line threshold')
+        p(f'[!] INSTALL_SCRIPT_UNUSUALLY_LARGE ({script_name}):'
+          f' {"; ".join(reasons)}')
+        p('    Legitimate install scripts rarely exceed these sizes;'
+          ' review for embedded payloads or obfuscated code.')
+        return f'INSTALL_SCRIPT_LARGE:{script_name}'
+    return None
+
+
+_BUNDLED_IDE_DIRS: tuple[str, ...] = (
+    '.vscode', '.idea', '.claude', '.cursor',
+)
+
+# Filenames that are plain editor metadata; commonly left in packages by
+# accident (forgot .npmignore).  Not a concern on their own.
+_IDE_BENIGN_NAMES: frozenset[str] = frozenset({
+    'extensions.json',  # .vscode: recommended extensions list
+    'settings.json',    # .vscode: workspace editor settings
+    'launch.json',      # .vscode: debug launch configurations
+    'keybindings.json', # .vscode: custom key bindings
+    '.gitignore',       # common in IDE dirs
+    'workspace.xml',    # .idea: project workspace state
+    'vcs.xml',          # .idea: VCS root mappings
+    'misc.xml',         # .idea: miscellaneous project settings
+    'modules.xml',      # .idea: module list
+    'compiler.xml',     # .idea: compiler settings
+    'encodings.xml',    # .idea: file encoding map
+})
+
+# File suffixes that are always benign IDE metadata.
+_IDE_BENIGN_SUFFIXES: tuple[str, ...] = ('.iml',)  # JetBrains module files
+
+# Filenames that are direct execution or AI-prompt vectors.
+_IDE_SUSPICIOUS_NAMES: frozenset[str] = frozenset({
+    'tasks.json',  # .vscode: shell task definitions run on editor events
+})
+
+# Path prefixes (relative to the IDE dir, POSIX form) whose contents are
+# execution or AI-prompt vectors regardless of individual filename.
+_IDE_SUSPICIOUS_PREFIXES: tuple[str, ...] = (
+    'commands/',           # .claude/commands/: AI slash-command system prompts
+    'rules/',              # .cursor/rules/: AI behaviour injection rules
+    'runConfigurations/',  # .idea/runConfigurations/: shell run configs
+)
+
+
+def _classify_ide_file(rel_path: str) -> str:
+    """Classify a file inside an IDE config dir.
+
+    Returns 'suspicious' (execution/prompt vector), 'benign' (editor
+    metadata), or 'unknown'.
+
+    >>> _classify_ide_file('tasks.json')
+    'suspicious'
+    >>> _classify_ide_file('commands/exfil.md')
+    'suspicious'
+    >>> _classify_ide_file('rules/override.mdc')
+    'suspicious'
+    >>> _classify_ide_file('runConfigurations/run.xml')
+    'suspicious'
+    >>> _classify_ide_file('extensions.json')
+    'benign'
+    >>> _classify_ide_file('project.iml')
+    'benign'
+    >>> _classify_ide_file('mystery.txt')
+    'unknown'
+    """
+    name = Path(rel_path).name
+    for prefix in _IDE_SUSPICIOUS_PREFIXES:
+        if rel_path.startswith(prefix):
+            return 'suspicious'
+    if name in _IDE_SUSPICIOUS_NAMES:
+        return 'suspicious'
+    if name in _IDE_BENIGN_NAMES:
+        return 'benign'
+    if name.endswith(_IDE_BENIGN_SUFFIXES):
+        return 'benign'
+    return 'unknown'
+
+
+def check_bundled_ide_dirs(
+    unpacked_dir: Path,
+    p: 'Printer',
+) -> list[str]:
+    """Detect IDE config directories bundled inside a published package.
+
+    Files are classified as suspicious (execution/prompt vectors), benign
+    (editor metadata, e.g. extensions.json), or unknown.  Only suspicious
+    or unknown files produce a warning entry; a directory containing only
+    known editor metadata is noted without raising a concern (it is commonly
+    caused by a missing .npmignore, or expected in an IDE-config package).
+
+    Returns 'BUNDLED_IDE_EXEC:<dir>' (suspicious files found) or
+    'BUNDLED_IDE_CONFIG:<dir>' (only unrecognised files) strings for
+    install_cmd_warnings; returns nothing for benign-only directories.
+    """
+    warnings: list[str] = []
+    if not unpacked_dir.is_dir():
+        return warnings
+    for ide_dir in _BUNDLED_IDE_DIRS:
+        dir_path = unpacked_dir / ide_dir
+        if not dir_path.is_dir():
+            continue
+        files = sorted(f for f in dir_path.rglob('*') if f.is_file())
+        suspicious: list[Path] = []
+        unknown: list[Path] = []
+        benign: list[Path] = []
+        for f in files:
+            rel = f.relative_to(dir_path).as_posix()
+            cls = _classify_ide_file(rel)
+            if cls == 'suspicious':
+                suspicious.append(f)
+            elif cls == 'unknown':
+                unknown.append(f)
+            else:
+                benign.append(f)
+
+        if suspicious:
+            names = ', '.join(sanitize_line(f.name) for f in suspicious[:5])
+            suffix = ', ...' if len(suspicious) > 5 else ''
+            p(f'[!] BUNDLED_IDE_EXEC: {ide_dir}/ contains execution/'
+              f'prompt-vector files ({len(suspicious)} suspicious:'
+              f' {names}{suffix})')
+            p('    These files can execute shell commands, inject AI-tool'
+              ' system prompts, or define malicious run configurations.'
+              ' Review carefully even if this package intentionally ships'
+              ' IDE configuration.')
+            warnings.append(f'BUNDLED_IDE_EXEC:{ide_dir}')
+        elif unknown:
+            names = ', '.join(sanitize_line(f.name) for f in unknown[:5])
+            suffix = ', ...' if len(unknown) > 5 else ''
+            p(f'[~] BUNDLED_IDE_CONFIG: {ide_dir}/ contains unrecognised'
+              f' files ({len(unknown)} unknown: {names}{suffix})')
+            p('    Not known editor metadata; review if this package does'
+              ' not intentionally ship IDE configuration.'
+              ' Benign if the package purpose is IDE configuration.')
+            warnings.append(f'BUNDLED_IDE_CONFIG:{ide_dir}')
+        else:
+            names = ', '.join(sanitize_line(f.name) for f in benign[:5])
+            suffix = ', ...' if len(benign) > 5 else ''
+            p(f'    BUNDLED_IDE_CONFIG: {ide_dir}/ (editor metadata only:'
+              f' {len(benign)} file(s): {names}{suffix})')
+            p('    Expected if this is an IDE-config package; otherwise a'
+              ' stray config (forgot .npmignore). No action needed.')
+    return warnings
+
+
+# ---------------------------------------------------------------------------
 # Project health concerns
 # ---------------------------------------------------------------------------
 
@@ -2213,6 +2553,7 @@ def compute_health_concerns(
     version_stability: str,
     recent_commits: int | None = None,
     known_vulns: int = 0,
+    version_published_days: int | None = None,
 ) -> list[str]:
     """Return a list of human-readable health concern strings.
 
@@ -2222,6 +2563,8 @@ def compute_health_concerns(
       - Single owner: no succession plan
       - Scorecard <4.0/10: multiple security practice failures
       - Pre-release version: security guarantees rarely made
+      - Version published <3 days ago: community has had little time to
+        detect supply-chain attacks or critical bugs
 
     >>> compute_health_concerns(None, None, None, 'not found', 'stable')
     []
@@ -2239,6 +2582,8 @@ def compute_health_concerns(
     ['no commits in last 12 months (activity may have ceased)']
     >>> compute_health_concerns(None, None, None, 'not found', 'stable', known_vulns=2)
     ['2 known vulnerabilities in OSV database']
+    >>> compute_health_concerns(None, None, None, 'not found', 'stable', version_published_days=1)
+    ['version published 1 day(s) ago (community has had little time to detect supply-chain attacks or critical bugs)']
     """
     concerns: list[str] = []
 
@@ -2270,6 +2615,13 @@ def compute_health_concerns(
     if known_vulns > 0:
         vuln_word = 'vulnerability' if known_vulns == 1 else 'vulnerabilities'
         concerns.append(f'{known_vulns} known {vuln_word} in OSV database')
+
+    if version_published_days is not None and version_published_days < 3:
+        concerns.append(
+            f'version published {version_published_days} day(s) ago'
+            ' (community has had little time to detect supply-chain attacks'
+            ' or critical bugs)'
+        )
 
     return concerns
 

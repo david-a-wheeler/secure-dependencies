@@ -370,6 +370,16 @@ def write_signals(  # noqa: C901
             'version_stability',
             'pre-release  [0.x/alpha/beta: security guarantees rarely made for pre-release versions]',
         ))
+    _ver_pub = registry.get('version_published_days')
+    if _ver_pub is not None and _ver_pub < 3:
+        _concerns.append((
+            'version_age',
+            f'{_ver_pub} day(s) since published'
+            '  [new releases are a common supply-chain attack vector; a brief'
+            ' delay of a few days gives the community time to detect injected'
+            ' malware or critical bugs; update immediately only if there is a'
+            ' strong reason such as a security fix or urgent operational need]',
+        ))
     if scorecard != 'not found':
         try:
             _sc_val = float(scorecard.split('/')[0])
@@ -401,13 +411,45 @@ def write_signals(  # noqa: C901
             'YES  [new executables added to PATH; risk of persistence or path hijacking]',
         ))
     for _icw in manifest.get('install_cmd_warnings', []):
-        _icw_sig = _icw.split(':')[0]
-        _icw_hook = _icw.split(':')[1] if ':' in _icw else 'install script'
-        _concerns.append((
-            _icw_sig.lower(),
-            f'detected in {_icw_hook}  '
-            '[supply chain attack indicator; see manifest-analysis.txt]',
-        ))
+        _icw_sig, _, _icw_rest = _icw.partition(':')
+        _icw_hook = _icw_rest or 'install script'
+        if _icw_sig == 'INSTALL_SCRIPT_LARGE':
+            _icw_desc = (
+                f'{_icw_hook}: unusually large'
+                '  [see INSTALL_SCRIPT_SIZE in manifest-analysis.txt;'
+                ' large install scripts are extremely rare in legitimate'
+                ' packages and may embed obfuscated payloads]'
+            )
+        elif _icw_sig == 'INSTALL_GITHUB_SHA_FETCH':
+            _icw_desc = (
+                f'GitHub raw SHA URL in {_icw_hook}'
+                '  [install hook fetches content from GitHub by a direct'
+                ' 40-hex commit SHA; attackers use orphan commits unreachable'
+                ' from the default branch to bypass tag-based audits;'
+                ' legitimate pinning uses lockfiles not raw SHA URLs]'
+            )
+        elif _icw_sig == 'BUNDLED_IDE_EXEC':
+            _icw_desc = (
+                f'{_icw_hook}/ bundles execution/prompt-vector IDE files'
+                '  [tasks.json, .claude/commands/, .cursor/rules/, or'
+                ' .idea/runConfigurations/ found; these can execute shell'
+                ' commands or inject AI-tool system prompts; review even'
+                ' if package intentionally ships IDE configuration]'
+            )
+        elif _icw_sig == 'BUNDLED_IDE_CONFIG':
+            _icw_desc = (
+                f'{_icw_hook}/ bundles unrecognised IDE files'
+                '  [not known editor metadata; review if this package does'
+                ' not intentionally ship IDE configuration;'
+                ' benign if package purpose is IDE configuration]'
+            )
+        else:
+            _icw_desc = (
+                f'detected in {_icw_hook}'
+                '  [supply chain attack indicator;'
+                ' see manifest-analysis.txt]'
+            )
+        _concerns.append((_icw_sig.lower(), _icw_desc))
     if diff_mode and diff_lines > 500:
         _concerns.append((
             'diff_lines',
@@ -537,9 +579,12 @@ def write_signals(  # noqa: C901
     age_str = f'{registry["age_years_float"]:.1f}' if registry.get('age_years_float') is not None else 'unknown'
     last_rel = registry.get('last_release_days')
     last_rel_str = f'{last_rel} days ago' if last_rel is not None else 'unknown'
+    ver_pub = registry.get('version_published_days')
+    ver_pub_str = f'{ver_pub} days ago' if ver_pub is not None else 'unknown'
     owner_str = str(registry.get('owner_count_int')) if registry.get('owner_count_int') is not None else 'unknown'
     sc_str = scorecard
     p(f'Age: {age_str} yr  |  Last release: {last_rel_str}  |  Owners: {owner_str}  |  Scorecard: {sc_str}')
+    p(f'This version published: {ver_pub_str}')
     p(f'Stability: {registry.get("version_stability", "unknown")}')
     if recent_commits is not None:
         _trend = commit_activity['trend'] if commit_activity else 'unknown'
@@ -564,6 +609,13 @@ def write_signals(  # noqa: C901
         'single owner': 'A single maintainer with no backup is a high-value target for social engineering or account takeover.',
         'OpenSSF Scorecard': 'Low scorecard indicates multiple security practice failures across the supply chain.',
         'version is pre-release': 'Pre-release versions rarely have formal security guarantees or stable APIs.',
+        'version published': (
+            'New versions have not yet had time for community detection of'
+            ' supply-chain attacks or critical bugs. A brief delay of a few'
+            ' days before adopting a new version is often wise, unless there'
+            ' is an urgent security fix or strong operational need to update'
+            ' immediately.'
+        ),
     }
     if health_concerns:
         for hc in health_concerns:
@@ -1167,8 +1219,10 @@ def write_health_file(
     dep_repos = eco.get('dependent_repos_count')
     eco_critical = eco.get('critical')
     eco_status = eco.get('status') or 'OK'
+    ver_pub = registry.get('version_published_days')
     p(f'AGE_YEARS: {age_str}')
     p(f'LAST_RELEASE_DAYS_AGO: {last_rel if last_rel is not None else "unknown"}')
+    p(f'VERSION_PUBLISHED_DAYS_AGO: {ver_pub if ver_pub is not None else "unknown"}')
     p(f'VERSION_STABILITY: {registry.get("version_stability", "unknown")}')
     p(f'OWNER_COUNT: {owner_count if owner_count is not None else "unknown"}')
     p(f'SCORECARD: {scorecard}')
@@ -1652,6 +1706,7 @@ def run_analysis(  # noqa: C901
         version_stability=registry.get('version_stability', 'unknown'),
         recent_commits=recent_commits,
         known_vulns=vuln_count,
+        version_published_days=registry.get('version_published_days'),
     )
     for hc in health_concerns:
         print(f'  [!] {hc}')
