@@ -849,6 +849,7 @@ class Hooks(shared.EcosystemHooks):
         mfa_status = 'unknown'
         age_years_float: float | None = None
         last_release_days: int | None = None
+        version_published_days: int | None = None
         owner_count_int: int | None = None
         version_stability = 'unknown'
         license_from_registry: list[str] = []
@@ -882,6 +883,20 @@ class Hooks(shared.EcosystemHooks):
                 if all_upload_times:
                     last_release_days = shared.days_since(all_upload_times[-1])
 
+                # Age of this specific version
+                ver_files = releases.get(version, []) or []
+                ver_upload_times = sorted(
+                    t for rf in ver_files
+                    for t in [
+                        rf.get('upload_time_iso_8601', '')
+                        or rf.get('upload_time', '')
+                    ]
+                    if t
+                )
+                if ver_upload_times:
+                    version_published_days = shared.days_since(
+                        ver_upload_times[0])
+
                 # Version stability
                 ver_num = str(info.get('version', version))
                 if re.search(r'(?i)(alpha|beta|rc|\.dev|\.post|a\d+|b\d+)', ver_num):
@@ -902,6 +917,12 @@ class Hooks(shared.EcosystemHooks):
                 if yanked:
                     reason = shared.sanitize_line(str(info.get('yanked_reason', '')))
                     p(f'YANKED_REASON: {reason}')
+                p('')
+
+                ver_pub_str = (str(version_published_days)
+                               if version_published_days is not None
+                               else 'unknown')
+                p(f'VERSION_PUBLISHED_DAYS_AGO: {ver_pub_str}')
                 p('')
 
                 # Summary provenance info
@@ -950,6 +971,7 @@ class Hooks(shared.EcosystemHooks):
             'mfa_status': mfa_status,
             'age_years_float': age_years_float,
             'last_release_days': last_release_days,
+            'version_published_days': version_published_days,
             'owner_count_int': owner_count_int,
             'version_stability': version_stability,
             'license_from_registry': license_from_registry,

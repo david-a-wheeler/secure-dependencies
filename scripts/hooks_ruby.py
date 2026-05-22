@@ -672,6 +672,7 @@ class Hooks(shared.EcosystemHooks):
         mfa_status = 'unknown'
         age_years_float: float | None = None
         last_release_days: int | None = None
+        version_published_days: int | None = None
         owner_count_int: int | None = None
         version_stability = 'unknown'
         license_from_registry: list[str] = []
@@ -752,6 +753,8 @@ class Hooks(shared.EcosystemHooks):
                     None
                 )
                 if target_ver_info:
+                    ver_created = str(target_ver_info.get('created_at', ''))
+                    version_published_days = shared.days_since(ver_created)
                     ver_info_lines.append('VERSION_INFO (selected fields):')
                     for key in ('number', 'created_at', 'authors',
                                 'sha', 'ruby_version',
@@ -759,6 +762,11 @@ class Hooks(shared.EcosystemHooks):
                         val = target_ver_info.get(key, '')
                         val_str = shared.sanitize_line(str(val))[:200]
                         ver_info_lines.append(f'  {key}: {val_str}')
+                    ver_pub_str = (str(version_published_days)
+                                   if version_published_days is not None
+                                   else 'unknown')
+                    ver_info_lines.append(
+                        f'  version_published_days_ago: {ver_pub_str}')
                     lic_field = target_ver_info.get('licenses')
                     if isinstance(lic_field, list):
                         license_from_registry.extend(
@@ -793,6 +801,7 @@ class Hooks(shared.EcosystemHooks):
             'mfa_status': mfa_status,
             'age_years_float': age_years_float,
             'last_release_days': last_release_days,
+            'version_published_days': version_published_days,
             'owner_count_int': owner_count_int,
             'version_stability': version_stability,
             'license_from_registry': license_from_registry,

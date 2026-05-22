@@ -1029,6 +1029,7 @@ class Hooks(shared.EcosystemHooks):
         mfa_status = 'unknown'
         age_years_float: float | None = None
         last_release_days: int | None = None
+        version_published_days: int | None = None
         owner_count_int: int | None = None
         version_stability = 'unknown'
         license_from_registry: list[str] = []
@@ -1061,6 +1062,9 @@ class Hooks(shared.EcosystemHooks):
                 if ver_times:
                     last_release_days = shared.days_since(
                         max(ver_times.values()))
+                ver_ts = ver_times.get(version)
+                if ver_ts:
+                    version_published_days = shared.days_since(ver_ts)
 
                 if (re.search(
                         r'(?i)(alpha|beta|rc|pre|dev|canary|next)',
@@ -1103,6 +1107,12 @@ class Hooks(shared.EcosystemHooks):
                 else:
                     p('DEPRECATED: NO')
                     p('')
+
+                ver_pub_str = (str(version_published_days)
+                               if version_published_days is not None
+                               else 'unknown')
+                p(f'VERSION_PUBLISHED_DAYS_AGO: {ver_pub_str}')
+                p('')
 
             except (ValueError, KeyError, TypeError):
                 p('REGISTRY_DATA: parse error')
@@ -1174,6 +1184,7 @@ class Hooks(shared.EcosystemHooks):
             'mfa_status': mfa_status,
             'age_years_float': age_years_float,
             'last_release_days': last_release_days,
+            'version_published_days': version_published_days,
             'owner_count_int': owner_count_int,
             'version_stability': version_stability,
             'license_from_registry': license_from_registry,

@@ -2248,6 +2248,7 @@ def compute_health_concerns(
     version_stability: str,
     recent_commits: int | None = None,
     known_vulns: int = 0,
+    version_published_days: int | None = None,
 ) -> list[str]:
     """Return a list of human-readable health concern strings.
 
@@ -2257,6 +2258,8 @@ def compute_health_concerns(
       - Single owner: no succession plan
       - Scorecard <4.0/10: multiple security practice failures
       - Pre-release version: security guarantees rarely made
+      - Version published <3 days ago: community has had little time to
+        detect supply-chain attacks or critical bugs
 
     >>> compute_health_concerns(None, None, None, 'not found', 'stable')
     []
@@ -2274,6 +2277,8 @@ def compute_health_concerns(
     ['no commits in last 12 months (activity may have ceased)']
     >>> compute_health_concerns(None, None, None, 'not found', 'stable', known_vulns=2)
     ['2 known vulnerabilities in OSV database']
+    >>> compute_health_concerns(None, None, None, 'not found', 'stable', version_published_days=1)
+    ['version published 1 day(s) ago (community has had little time to detect supply-chain attacks or critical bugs)']
     """
     concerns: list[str] = []
 
@@ -2305,6 +2310,13 @@ def compute_health_concerns(
     if known_vulns > 0:
         vuln_word = 'vulnerability' if known_vulns == 1 else 'vulnerabilities'
         concerns.append(f'{known_vulns} known {vuln_word} in OSV database')
+
+    if version_published_days is not None and version_published_days < 3:
+        concerns.append(
+            f'version published {version_published_days} day(s) ago'
+            ' (community has had little time to detect supply-chain attacks'
+            ' or critical bugs)'
+        )
 
     return concerns
 
