@@ -142,7 +142,8 @@ class Hooks(shared.EcosystemHooks):
         'self-publish (worm propagation), IDE config writes, cloud secret-manager API calls, '
         'shadow runtimes (bun/deno/pkgx spawned from source), '
         'cross-language spawn (curl/wget/nc as second-stage loaders), '
-        'GitHub raw-content fetch by direct commit SHA (orphan-commit injection)'
+        'GitHub raw-content fetch by direct commit SHA (orphan-commit injection), '
+        'GitHub commit-search API used as a C2 dead-drop channel'
     )
 
     # ReDoS prevention (CWE-400): all patterns use bounded quantifiers so that
@@ -212,6 +213,10 @@ class Hooks(shared.EcosystemHooks):
         # 40-hex commit SHA alongside a fetch verb on the same line.
         # Ruby has Net::HTTP/Faraday; fetching by SHA is unusual and suspicious.
         ('github-fetch-by-sha', shared.GITHUB_SHA_FETCH_RE),
+        # GitHub commit-search API used as a C2 dead-drop channel.
+        # The specific ?q=firedalazer form is in ADVERSARIAL_PATTERNS (abort);
+        # this catches the general endpoint for novel campaign variants.
+        ('github-commit-search-c2', shared.GITHUB_COMMIT_SEARCH_RE),
     ]
 
     # ReDoS prevention: diff lines start with ^\+ so they are anchored, but

@@ -1065,6 +1065,15 @@ HOME_PATHS_RE: str = (
 # legitimate use inside published packages; a match is a high-confidence
 # attack signal.  The alternation uses fixed-length domain segments to
 # avoid backtracking (each component is an anchored literal).
+# GitHub commit-search API used as a C2 dead-drop channel.
+# Attackers poll this endpoint with a unique query keyword (e.g. "firedalazer")
+# embedded in a commit message on an attacker-controlled repo; the search
+# result acts as a command signal without requiring a dedicated C2 server.
+# Legitimate package code almost never calls the commit-search API; an API
+# wrapper that does so is the rare exception and still warrants review.
+# The specific ?q=firedalazer form is in ADVERSARIAL_PATTERNS (abort-level).
+GITHUB_COMMIT_SEARCH_RE: str = r'api\.github\.com/search/commits'
+
 EXFIL_RELAY_DOMAINS_RE: str = (
     r'(?i)(?:webhook\.site'
     r'|pipedream\.net'

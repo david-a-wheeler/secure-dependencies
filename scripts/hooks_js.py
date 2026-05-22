@@ -519,7 +519,8 @@ class Hooks(shared.EcosystemHooks):
         'home-dir writes, IDE config writes, cloud secret-manager API calls, '
         'shadow runtimes (bun/deno/pkgx spawned from source), '
         'cross-language spawn (python/curl/wget/nc as second-stage loaders), '
-        'GitHub raw-content fetch by direct commit SHA (orphan-commit injection)'
+        'GitHub raw-content fetch by direct commit SHA (orphan-commit injection), '
+        'GitHub commit-search API used as a C2 dead-drop channel'
     )
 
     # ReDoS prevention (CWE-400): all patterns use bounded quantifiers so that
@@ -605,6 +606,10 @@ class Hooks(shared.EcosystemHooks):
         # pinning uses lockfiles.  Whole-file multi-line coverage is handled
         # for install hooks via INSTALL_GITHUB_SHA_FETCH in _INSTALL_CMD_CHECKS.
         ('github-fetch-by-sha', shared.GITHUB_SHA_FETCH_RE),
+        # GitHub commit-search API used as a C2 dead-drop channel.
+        # The specific ?q=firedalazer form is in ADVERSARIAL_PATTERNS (abort);
+        # this catches the general endpoint for novel campaign variants.
+        ('github-commit-search-c2', shared.GITHUB_COMMIT_SEARCH_RE),
     ]
 
     # ReDoS prevention: diff lines start with ^\+ so they are anchored, but
