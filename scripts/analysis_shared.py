@@ -1060,6 +1060,48 @@ HOME_PATHS_RE: str = (
     r'~\/|\/home\/|\.bashrc|\.zshrc|\.profile|\.bash_profile|\.ssh\/'
 )
 
+# Reverse-shell indicators: bash /dev/tcp redirect, netcat -e, socat EXEC.
+# These patterns have essentially no legitimate use in package source code.
+# /dev/tcp/host/port: positive character class + exact quantifiers, O(n) safe.
+# [^\n]{0,80}: bounded wildcard between nc/socat keyword and shell argument.
+REVERSE_SHELL_RE: str = (
+    r'/dev/tcp/[a-zA-Z0-9._-]{1,100}/[0-9]{1,5}'  # bash TCP pseudo-device
+    r'|\bnc\b[^\n]{0,80}-e\s+/bin/'                # netcat with -e /bin/sh
+    r'|\bsocat\s+TCP[^\n]{0,80}EXEC:/bin/'          # socat TCP ... EXEC:/bin/
+)
+
+# Cron job installation: writing to cron directories or piping to crontab.
+# /etc/cron.d/ and /var/spool/cron/ are OS cron drop directories.
+# '| crontab -' reads a new crontab from stdin -- the standard add-to-cron
+# pattern.  All alternatives are anchored literals or bounded classes.
+CRON_PERSISTENCE_RE: str = (
+    r'/etc/cron\.(?:d|daily|hourly|weekly|monthly)/[^\s"\']{0,80}'
+    r'|/var/spool/cron/'
+    r'|\|\s*crontab\s+-'   # ... | crontab - (install from stdin)
+)
+
+# System-level persistence: systemd service installation, macOS LaunchAgent/
+# Daemon registration.  Both are unusual in published library packages and
+# indicate a payload that survives reboots.
+# Library/LaunchAgents/ and Library/LaunchDaemons/: macOS persistence dirs.
+# /etc/systemd/system/*.service: Linux systemd unit file installation path.
+# systemctl enable/daemon-reload: commands that activate the installed unit.
+SYSTEM_PERSISTENCE_RE: str = (
+    r'/etc/systemd/system/[a-zA-Z0-9._-]{1,100}\.service'
+    r'|\bsystemctl\s+(?:enable|daemon-reload)\b'
+    r'|Library/Launch(?:Agents|Daemons)/[^\s"\'<>]{1,100}'
+)
+
+# Cryptominer invocation: named miner binaries and the Stratum pool protocol.
+# xmrig/cpuminer/ethminer: common open-source CPU/GPU miners.
+# stratum+tcp:// and stratum+ssl://: mining-pool connection URL scheme with
+# no legitimate use in any published package.  All alternatives are literals
+# or simple alternations -- no backtracking risk.
+CRYPTOMINER_RE: str = (
+    r'\b(?:xmrig|cpuminer|ethminer|minerd|ccminer|t-rex|lolminer|nbminer)\b'
+    r'|stratum\+(?:tcp|ssl)://'
+)
+
 # Exfiltration relay services and known campaign C2 domains that appear as
 # string literals in package source.  These services have essentially no
 # legitimate use inside published packages; a match is a high-confidence

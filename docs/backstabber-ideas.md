@@ -108,17 +108,23 @@ Once executed, the payload typically performs one of the following:
 
 *   **Persistence/Backdoor:** Establishing reverse shells or adding SSH
     keys.
-    *(1) Partially implemented: `home-or-shell-write` (shell config
-    writes), `INSTALL_SHELL_CONFIG_WRITE`, and `INSTALL_DESTRUCTIVE_WIPE`
-    cover common persistence and destructive-wipe patterns. Reverse-shell
-    detection (e.g., `nc -e /bin/sh`) is not explicitly implemented.*
+    *(1) Implemented: `home-or-shell-write` (shell config writes),
+    `INSTALL_SHELL_CONFIG_WRITE`, and `INSTALL_DESTRUCTIVE_WIPE` cover
+    shell-config writes and destructive wipes. New patterns added (all
+    ecosystems, via shared constants in `analysis_shared.py`):
+    `reverse-shell` (bash `/dev/tcp/`, `nc -e /bin/`, `socat EXEC:/bin/`);
+    `cron-persistence` (`/etc/cron.d/`, `| crontab -`);
+    `system-persistence` (`/etc/systemd/system/*.service`, `systemctl
+    enable`, `Library/LaunchAgents/`, `Library/LaunchDaemons/`).*
 
 *   **Resource Hijacking:** Cryptojacking or using the host as a botnet
     node.
-    *(2) Not implemented: no cryptominer-specific patterns. Indirect
-    coverage: cross-lang-spawn catches tool launches; exfil-relay-domain
-    catches C2 communication. Dedicated miner detection (stratum protocol,
-    xmrig invocation) would be a low-priority future addition.*
+    *(1) Implemented: `cryptominer` pattern added (all ecosystems) via
+    `CRYPTOMINER_RE` in `analysis_shared.py`: flags named miner binaries
+    (`xmrig`, `cpuminer`, `ethminer`, `minerd`, `ccminer`, `t-rex`,
+    `lolminer`, `nbminer`) and the Stratum mining pool protocol
+    (`stratum+tcp://`, `stratum+ssl://`). Both have near-zero false+ in
+    npm/PyPI/RubyGems package source.*
 
 ## 4. Technical Implementation Details
 

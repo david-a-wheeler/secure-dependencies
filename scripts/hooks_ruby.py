@@ -146,7 +146,10 @@ class Hooks(shared.EcosystemHooks):
         'GitHub commit-search API used as a C2 dead-drop channel, '
         'Discord token format (harvested credential), '
         'string-split obfuscation (char-by-char keyword assembly), '
-        'unusually long lines (embedded payload or single-line obfuscation)'
+        'unusually long lines (embedded payload or single-line obfuscation), '
+        'reverse-shell indicators (bash /dev/tcp, nc -e, socat EXEC), '
+        'cron/systemd/LaunchAgent persistence, '
+        'cryptominer tools and Stratum mining protocol'
     )
 
     # ReDoS prevention (CWE-400): all patterns use bounded quantifiers so that
@@ -229,6 +232,13 @@ class Hooks(shared.EcosystemHooks):
         # Unusually long lines: may embed base64/hex payloads or
         # single-line obfuscated code.  Ruby gem source rarely exceeds this.
         ('long-line-obfuscation', shared.LONG_LINE_RE),
+        # Reverse-shell: bash /dev/tcp redirect, nc -e, socat EXEC.
+        ('reverse-shell', shared.REVERSE_SHELL_RE),
+        # Cron/systemd/LaunchAgent persistence.
+        ('cron-persistence', shared.CRON_PERSISTENCE_RE),
+        ('system-persistence', shared.SYSTEM_PERSISTENCE_RE),
+        # Cryptominer: named miner binaries or Stratum pool protocol.
+        ('cryptominer', shared.CRYPTOMINER_RE),
     ]
 
     # ReDoS prevention: diff lines start with ^\+ so they are anchored, but
