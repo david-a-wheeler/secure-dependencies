@@ -162,10 +162,11 @@ Isolation."
 
 > **Tool assessment:** *(1) Partially implemented* -- `run_sandboxed()` in `analysis_shared.py`
 > already uses bwrap/firejail/docker/podman to sandbox the reproducible-build step. True Linux
-> Landlock syscall-level restrictions are not yet used. *(3) Worth implementing* as a hardening
-> step: wrap the install probe using Landlock on Linux, blocking access to `~/.ssh`, `~/.aws`,
-> `~/.npmrc`, etc. at the kernel level (harder to bypass than seccomp). Applies to all ecosystems
-> run on Linux hosts.
+> Landlock syscall-level restrictions are not yet used.
+>
+> **TODO (NOT YET IMPLEMENTED -- only remaining item):** Wrap the install probe using Landlock
+> on Linux, blocking access to `~/.ssh`, `~/.aws`, `~/.npmrc`, etc. at the kernel level (harder
+> to bypass than seccomp or bwrap alone). Applies to all ecosystems run on Linux hosts.
 
 ### 5. Network Egress Baselines
 Most malware must eventually communicate with a C2 or exfiltrate data.
@@ -204,7 +205,7 @@ scripts.
 
 | Improvement | Mechanism | Value | Pros/Cons | Tool Status |
 | :--- | :--- | :--- | :--- | :--- |
-| **Kernel Landlocking** | Use **Linux Landlock** to restrict `install-probe`. | **High** | **Pros:** Hardest to bypass. **Cons:** Linux-only. | *(3) Worth implementing -- `run_sandboxed()` currently uses bwrap/firejail. Adding Landlock LSM rules to block access to `~/.ssh`, `~/.aws`, etc. would harden the sandbox; Linux-only but that covers most CI environments.* |
+| **Kernel Landlocking** | Use **Linux Landlock** to restrict `install-probe`. | **High** | **Pros:** Hardest to bypass. **Cons:** Linux-only. | **TODO: NOT YET IMPLEMENTED. This is the only remaining item from this document.** `run_sandboxed()` currently uses bwrap/firejail; Landlock LSM rules would block `~/.ssh`, `~/.aws`, etc. at the kernel level, harder to bypass than seccomp. Linux-only but covers most CI environments. |
 | **Canary/Honeytoken Audit** | Alert on access to `~/.aws/credentials_canary`. | **Critical** | **Pros:** Definitive proof of intent. **Cons:** Requires host setup. | *(2) Not applicable -- requires the reviewer's host to be pre-configured with canary files. Cannot be implemented inside the package analysis tool itself.* |
 
 ### 4. High-Fidelity Static Indicators (Mini Shai-Hulud Suite)
