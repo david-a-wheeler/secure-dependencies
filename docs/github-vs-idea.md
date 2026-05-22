@@ -142,14 +142,15 @@ repository.
     object storage. Verifying reachability ensures the code passed through the project's standard
     PR/Review process.
 
-> **Tool assessment:** The full reachability check is *(2) not practical* in our scanner --
-> it requires authenticated GitHub API calls (rate-limited at 60/hr unauthenticated) for every SHA
-> found in package code. However, a simplified form is *(3) worth implementing*: scan package
-> source for raw `githubusercontent.com` or GitHub blob URLs containing a 40-hex-char commit SHA
-> as a path component (e.g., `raw.githubusercontent.com/owner/repo/<sha>/file`). Add as a
-> DANGEROUS_PATTERNS entry `github-fetch-by-sha` that flags direct-SHA fetches for AI review.
-> This is distinct from checking the package's *own* source tag (which we already do via
-> `clone_source_repo`).
+> **Tool assessment:** *(1) Implemented* -- full reachability via GitHub API remains impractical
+> (rate-limited), but the heuristic form is now in place. `GITHUB_RAW_SHA_RE` and
+> `GITHUB_SHA_FETCH_RE` added to `analysis_shared.py`. `github-fetch-by-sha` added to
+> `DANGEROUS_PATTERNS` in all three ecosystems: flags a fetch verb co-occurring with a
+> `raw.githubusercontent.com/<owner>/<repo>/<40-hex-sha>/` URL on the same source line.
+> `INSTALL_GITHUB_SHA_FETCH` added to JS `_INSTALL_CMD_CHECKS`: flags the SHA URL alone in
+> npm lifecycle hook values (the entire hook value is executed shell code, so no fetch-verb
+> filter is needed). `dep_review.py` renders `INSTALL_GITHUB_SHA_FETCH` with orphan-commit
+> attack context in the CONCERN_SUMMARY table.
 
 ### 4. OS-Level "Landlocking" (Enforced Least Privilege)
 IDEs often have excessive permissions. We can use OS-native primitives to enforce "Project
@@ -194,7 +195,7 @@ scripts.
 
 | Signal | Logic | Value | AI Interpretation Guidance | Tool Status |
 | :--- | :--- | :--- | :--- | :--- |
-| **`REPO_ORPHAN_COMMIT`** | Verify SHA reachability from default branch. | **Critical** | **Problem:** Almost always tampering or "imposter commit" injection. **Fine:** Extremely rare non-standard branch/tag flows. | *(2/3) Full reachability via GitHub API is impractical unauthenticated. Worth implementing as a simpler heuristic: flag direct-SHA GitHub raw content URLs in package source (see section 3 above). Add `github-fetch-by-sha` to `DANGEROUS_PATTERNS`.* |
+| **`REPO_ORPHAN_COMMIT`** | Verify SHA reachability from default branch. | **Critical** | **Problem:** Almost always tampering or "imposter commit" injection. **Fine:** Extremely rare non-standard branch/tag flows. | *(1) Implemented as heuristic: `github-fetch-by-sha` in `DANGEROUS_PATTERNS` (all ecosystems) flags fetch-verb + raw GitHub SHA URL on the same source line; `INSTALL_GITHUB_SHA_FETCH` in JS `_INSTALL_CMD_CHECKS` flags the SHA URL alone in npm lifecycle hooks. Full SHA reachability via GitHub API remains impractical unauthenticated.* |
 | **`SHADOW_RUNTIME`** | Scan for `bun`, `deno`, `pkgx`, `tsx`, `ts-node` calls. | **High** | **Problem:** Runtime used in `scripts`, `hooks`, or `main` but *not* declared in manifest. **Fine:** Runtime is a declared dependency or used only in `tests/` for benchmarking. | *(1) Implemented: `shadow-runtime` in `DANGEROUS_PATTERNS` for all three ecosystems, using shared `SHADOW_RUNTIME_NAMES_RE` in `analysis_shared.py`. Complements existing `INSTALL_BOOTSTRAP_RUNTIME` install-hook check.* |
 | **`IDE_CONFIG_POISONING`** | Flag `.vscode/`, `.idea/`, or `.claude/` content in the package. | **High** | **Problem:** Hidden configs targeting credentials or shell tasks. **Fine:** Standard `.vscode/extensions.json` for recommended plugins. | *(1) Implemented: `check_bundled_ide_dirs()` added to `analysis_shared.py`, called from all three ecosystems' `read_manifest()`. Detects `.vscode`, `.idea`, `.claude`, `.cursor` directories bundled in published tarballs. Filenames sanitized; `.vscode/extensions.json` benign-exception note shown only for `.vscode`.* |
 | **`C2_DOMAIN_POLLING`** | Add `api.github.com/search/commits` + suspicious query. | **Medium** | **Problem:** Search for specific "dead-drop" triggers like `firedalazer`. **Fine:** Legitimate use of Search API (requires manual inspection of query logic). | *(3) Worth implementing -- add `api\.github\.com/search/commits` to `DANGEROUS_PATTERNS` or `EXFIL_RELAY_DOMAINS_RE` in `analysis_shared.py`. The specific `?q=firedalazer` form belongs in `ADVERSARIAL_PATTERNS` for zero-FP detection.* |

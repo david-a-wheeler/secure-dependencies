@@ -141,7 +141,8 @@ class Hooks(shared.EcosystemHooks):
         'dynamic dispatch on external input, at_exit hooks, '
         'self-publish (worm propagation), IDE config writes, cloud secret-manager API calls, '
         'shadow runtimes (bun/deno/pkgx spawned from source), '
-        'cross-language spawn (curl/wget/nc as second-stage loaders)'
+        'cross-language spawn (curl/wget/nc as second-stage loaders), '
+        'GitHub raw-content fetch by direct commit SHA (orphan-commit injection)'
     )
 
     # ReDoS prevention (CWE-400): all patterns use bounded quantifiers so that
@@ -207,6 +208,10 @@ class Hooks(shared.EcosystemHooks):
         ('cross-lang-spawn',
          r'(?:system|exec|spawn|IO\.popen)\s*\([^)]{0,300}'
          r'\b' + shared.CROSS_LANG_TOOLS_RE + r'\b'),
+        # Orphan-commit fetch: source file fetches from GitHub by a direct
+        # 40-hex commit SHA alongside a fetch verb on the same line.
+        # Ruby has Net::HTTP/Faraday; fetching by SHA is unusual and suspicious.
+        ('github-fetch-by-sha', shared.GITHUB_SHA_FETCH_RE),
     ]
 
     # ReDoS prevention: diff lines start with ^\+ so they are anchored, but

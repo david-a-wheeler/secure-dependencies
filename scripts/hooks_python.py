@@ -291,7 +291,8 @@ class Hooks(shared.EcosystemHooks):
         'dynamic imports on external input, atexit/registration hooks, '
         'self-publish (worm propagation), IDE config writes, cloud secret-manager API calls, '
         'shadow runtimes (bun/deno/pkgx spawned from source), '
-        'cross-language spawn (curl/wget/nc as second-stage loaders)'
+        'cross-language spawn (curl/wget/nc as second-stage loaders), '
+        'GitHub raw-content fetch by direct commit SHA (orphan-commit injection)'
     )
 
     DANGEROUS_PATTERNS: list[tuple[str, str]] = [
@@ -370,6 +371,11 @@ class Hooks(shared.EcosystemHooks):
          r'(?:subprocess\.(?:call|run|Popen|check_output|check_call)'
          r'|os\.(?:system|popen))\s*\([^)]{0,300}'
          r'\b' + shared.CROSS_LANG_TOOLS_RE + r'\b'),
+        # Orphan-commit fetch: source file fetches from GitHub by a direct
+        # 40-hex commit SHA alongside a fetch verb on the same line.
+        # Python packages have no legitimate reason to download by SHA;
+        # requests/urllib are native and should use versioned releases.
+        ('github-fetch-by-sha', shared.GITHUB_SHA_FETCH_RE),
     ]
 
     DIFF_PATTERNS: list[tuple[str, str]] = [

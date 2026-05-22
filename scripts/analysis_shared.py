@@ -1000,6 +1000,38 @@ SHADOW_RUNTIME_NAMES_RE: str = r'(?:bun|deno|pkgx|tsx|ts-node)'
 # python appearing in a JS/Ruby package spawn call is a cross-language pivot.
 CROSS_LANG_TOOLS_RE: str = r'(?:python3?|curl|wget|nc|netcat)'
 
+# GitHub raw-content URL containing a 40-hex commit SHA as a path component.
+# Example: raw.githubusercontent.com/owner/repo/<sha>/file
+# Fetching by direct SHA (rather than a branch/tag) in package source is a
+# supply-chain attack indicator: attackers use "orphan commits" that are not
+# reachable from the default branch, so the SHA bypasses tag-based audits.
+# Legitimate SHA pinning uses lockfiles, not raw URL fetches in source code.
+# Owner and repo name chars: alphanumeric plus . - _ (GitHub rules).
+# [0-9a-f]{40}: exactly 40 lowercase hex digits -- a git SHA.
+GITHUB_RAW_SHA_RE: str = (
+    r'raw\.githubusercontent\.com'
+    r'/[a-zA-Z0-9._-]{1,100}'   # owner
+    r'/[a-zA-Z0-9._-]{1,100}'   # repo
+    r'/[0-9a-f]{40}/'            # 40-hex commit SHA
+)
+
+# Fetch-verb + SHA URL pattern for DANGEROUS_PATTERNS (line-by-line grep).
+# Matches a common HTTP-fetch verb on the same line as a raw GitHub SHA URL,
+# in either order.  [^\n]{0,300} is bounded O(300) per anchor -- ReDoS-safe.
+# The fetch verbs cover JS (axios/got/node-fetch), Python (requests/urllib),
+# Ruby (Net::HTTP/Faraday), and universal tools (curl/wget/fetch).
+GITHUB_SHA_FETCH_RE: str = (
+    r'(?:fetch|curl|wget|axios|got|requests?|urllib|urlopen'
+    r'|Net::HTTP|Faraday|HTTParty|https?\.get|node-fetch)'
+    r'[^\n]{0,300}'
+    + GITHUB_RAW_SHA_RE
+    + r'|'
+    + GITHUB_RAW_SHA_RE
+    + r'[^\n]{0,300}'
+    r'(?:fetch|curl|wget|axios|got|requests?|urllib|urlopen'
+    r'|Net::HTTP|Faraday|HTTParty|https?\.get|node-fetch)'
+)
+
 # Cloud secret-manager API hostnames.  These appear in HTTP calls and SDK
 # configs regardless of language.  Each ecosystem adds its own SDK-specific
 # alternatives on top of these shared provider hostnames.

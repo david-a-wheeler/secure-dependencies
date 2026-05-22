@@ -420,6 +420,14 @@ def write_signals(  # noqa: C901
                 ' large install scripts are extremely rare in legitimate'
                 ' packages and may embed obfuscated payloads]'
             )
+        elif _icw_sig == 'INSTALL_GITHUB_SHA_FETCH':
+            _icw_desc = (
+                f'GitHub raw SHA URL in {_icw_hook}'
+                '  [install hook fetches content from GitHub by a direct'
+                ' 40-hex commit SHA; attackers use orphan commits unreachable'
+                ' from the default branch to bypass tag-based audits;'
+                ' legitimate pinning uses lockfiles not raw SHA URLs]'
+            )
         elif _icw_sig == 'BUNDLED_IDE_EXEC':
             _icw_desc = (
                 f'{_icw_hook}/ bundles execution/prompt-vector IDE files'

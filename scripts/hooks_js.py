@@ -147,6 +147,17 @@ _INSTALL_CMD_CHECKS: list[tuple[str, re.Pattern[str]]] = [
         r'|vault\.azure\.net',
         re.IGNORECASE,
     )),
+    # Orphan-commit payload staging: install hook fetches content from GitHub
+    # by a direct 40-hex commit SHA rather than a branch or tag.  Attackers
+    # use commits unreachable from the default branch to hide malicious payloads
+    # that pass tag-based audits.  Install hooks that download by SHA are a
+    # direct supply-chain injection indicator; the SHA URL alone is sufficient
+    # since the entire hook value is executed shell code (no fetch-verb filter
+    # needed here -- unlike the broader DANGEROUS_PATTERNS source scan).
+    ('INSTALL_GITHUB_SHA_FETCH', re.compile(
+        shared.GITHUB_RAW_SHA_RE,
+        re.IGNORECASE,
+    )),
 ]
 
 # Size thresholds for install hook command strings (combined preinstall +
@@ -507,7 +518,8 @@ class Hooks(shared.EcosystemHooks):
         '(Object.prototype assignment, __proto__ assignment), '
         'home-dir writes, IDE config writes, cloud secret-manager API calls, '
         'shadow runtimes (bun/deno/pkgx spawned from source), '
-        'cross-language spawn (python/curl/wget/nc as second-stage loaders)'
+        'cross-language spawn (python/curl/wget/nc as second-stage loaders), '
+        'GitHub raw-content fetch by direct commit SHA (orphan-commit injection)'
     )
 
     # ReDoS prevention (CWE-400): all patterns use bounded quantifiers so that
@@ -587,6 +599,12 @@ class Hooks(shared.EcosystemHooks):
         ('cross-lang-spawn',
          r'(?:exec(?:Sync|File(?:Sync)?)?|spawn(?:Sync)?)\s*\([^)]{0,300}'
          r'\b' + shared.CROSS_LANG_TOOLS_RE + r'\b'),
+        # Orphan-commit fetch: source file fetches from GitHub by a direct
+        # 40-hex commit SHA alongside a fetch verb on the same line.
+        # A SHA URL in a fetch call is a supply-chain red flag; legitimate
+        # pinning uses lockfiles.  Whole-file multi-line coverage is handled
+        # for install hooks via INSTALL_GITHUB_SHA_FETCH in _INSTALL_CMD_CHECKS.
+        ('github-fetch-by-sha', shared.GITHUB_SHA_FETCH_RE),
     ]
 
     # ReDoS prevention: diff lines start with ^\+ so they are anchored, but
