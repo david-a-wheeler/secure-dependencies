@@ -111,13 +111,12 @@ Attackers use alternative runtimes to bypass static analysis or security filters
 -   **Why it works:** Legitimate packages rarely bring their own entire runtime binary to "evade"
     the host environment.
 
-> **Tool assessment:** The install-hook check (`INSTALL_BOOTSTRAP_RUNTIME` in
-> `hooks_js.py:_INSTALL_CMD_CHECKS`) already covers bun/deno/pkgx in lifecycle scripts.
-> **(3) Worth extending** to scan source code files via `DANGEROUS_PATTERNS` in `hooks_js.py`
-> (and adding a lower-priority `INSTALL_TSRUNNER_IN_HOOK` already exists for tsx/ts-node).
-> The "manifest check" refinement (skip if declared in `engines`/`devDependencies`) would reduce
-> false positives but adds complexity -- worth a future iteration. Ruby and Python hooks currently
-> have no equivalent; adding it there is lower priority since bun/deno are JS-ecosystem runtimes.
+> **Tool assessment:** *(1) Implemented* -- `shadow-runtime` added to `DANGEROUS_PATTERNS` in all
+> three ecosystems (`hooks_js.py`, `hooks_python.py`, `hooks_ruby.py`), using shared constant
+> `SHADOW_RUNTIME_NAMES_RE` (`bun|deno|pkgx|tsx|ts-node`) in `analysis_shared.py`. Catches
+> exec/spawn calls invoking these runtimes across all source files, complementing the existing
+> install-hook check (`INSTALL_BOOTSTRAP_RUNTIME`). Cross-language: same pattern applied to Ruby
+> `system/exec/spawn/IO.popen` and Python `subprocess.*`/`os.system`.
 
 ### 2. High-Signal Deception ("Honey-Secrets")
 Deception scales better for defenders than attackers.
@@ -196,8 +195,8 @@ scripts.
 | Signal | Logic | Value | AI Interpretation Guidance | Tool Status |
 | :--- | :--- | :--- | :--- | :--- |
 | **`REPO_ORPHAN_COMMIT`** | Verify SHA reachability from default branch. | **Critical** | **Problem:** Almost always tampering or "imposter commit" injection. **Fine:** Extremely rare non-standard branch/tag flows. | *(2/3) Full reachability via GitHub API is impractical unauthenticated. Worth implementing as a simpler heuristic: flag direct-SHA GitHub raw content URLs in package source (see section 3 above). Add `github-fetch-by-sha` to `DANGEROUS_PATTERNS`.* |
-| **`SHADOW_RUNTIME`** | Scan for `bun`, `deno`, `pkgx`, `tsx`, `ts-node` calls. | **High** | **Problem:** Runtime used in `scripts`, `hooks`, or `main` but *not* declared in manifest. **Fine:** Runtime is a declared dependency or used only in `tests/` for benchmarking. | *(1/3) Partially implemented: `INSTALL_BOOTSTRAP_RUNTIME` covers install hooks; `INSTALL_TSRUNNER_IN_HOOK` covers tsx/ts-node. Worth adding to `DANGEROUS_PATTERNS` for source file scans in `hooks_js.py`.* |
-| **`IDE_CONFIG_POISONING`** | Flag `.vscode/`, `.idea/`, or `.claude/` content in the package. | **High** | **Problem:** Hidden configs targeting credentials or shell tasks. **Fine:** Standard `.vscode/extensions.json` for recommended plugins. | *(1/3) Partially implemented: `ide-config-write` in `DANGEROUS_PATTERNS` (all ecosystems) catches source code that *writes to* IDE config paths; `INSTALL_IDE_CONFIG_WRITE` catches install-hook writes. Missing: detecting packages that *bundle* `.vscode/`/`.idea/`/`.claude/` directories. Worth adding a file-tree check in `read_manifest()`.* |
+| **`SHADOW_RUNTIME`** | Scan for `bun`, `deno`, `pkgx`, `tsx`, `ts-node` calls. | **High** | **Problem:** Runtime used in `scripts`, `hooks`, or `main` but *not* declared in manifest. **Fine:** Runtime is a declared dependency or used only in `tests/` for benchmarking. | *(1) Implemented: `shadow-runtime` in `DANGEROUS_PATTERNS` for all three ecosystems, using shared `SHADOW_RUNTIME_NAMES_RE` in `analysis_shared.py`. Complements existing `INSTALL_BOOTSTRAP_RUNTIME` install-hook check.* |
+| **`IDE_CONFIG_POISONING`** | Flag `.vscode/`, `.idea/`, or `.claude/` content in the package. | **High** | **Problem:** Hidden configs targeting credentials or shell tasks. **Fine:** Standard `.vscode/extensions.json` for recommended plugins. | *(1) Implemented: `check_bundled_ide_dirs()` added to `analysis_shared.py`, called from all three ecosystems' `read_manifest()`. Detects `.vscode`, `.idea`, `.claude`, `.cursor` directories bundled in published tarballs. Filenames sanitized; `.vscode/extensions.json` benign-exception note shown only for `.vscode`.* |
 | **`C2_DOMAIN_POLLING`** | Add `api.github.com/search/commits` + suspicious query. | **Medium** | **Problem:** Search for specific "dead-drop" triggers like `firedalazer`. **Fine:** Legitimate use of Search API (requires manual inspection of query logic). | *(3) Worth implementing -- add `api\.github\.com/search/commits` to `DANGEROUS_PATTERNS` or `EXFIL_RELAY_DOMAINS_RE` in `analysis_shared.py`. The specific `?q=firedalazer` form belongs in `ADVERSARIAL_PATTERNS` for zero-FP detection.* |
 
 ### 2. Sandbox Improvements (Install Probe)
@@ -256,7 +255,7 @@ about how benign software must behave, regardless of the language, runtime, or d
 | **Credential Access** | Libraries should never access `~/.ssh`, `~/.aws`, or `.env`. | Any `open()` or `stat()` on sensitive system paths. | *(1) Already implemented: `credential-env-vars` and `home-or-shell-write` in `DANGEROUS_PATTERNS` (all ecosystems); `INSTALL_CREDENTIAL_CLI` in JS install hooks; `HOME_PATHS_RE` covers the path targets.* |
 | **Installation vs. Runtime** | Packages should not require outbound network connectivity during the `install` phase. | Network activity during `postinstall`, `setup.py`, or `extconf.rb`. | *(1) Partially implemented: `network-at-load-scope` in `DANGEROUS_PATTERNS` (JS and Python); `INSTALL_BOOTSTRAP_RUNTIME` flags secondary runtime downloads; sandbox blocks outbound calls during reproducible build.* |
 | **Execution Transparency** | Software should execute well-defined, named binaries. | Spawning `/bin/sh` to execute an obfuscated or base64-encoded string. | *(1) Partially implemented: `child-process-exec`/`subprocess-shell`/`shell-exec` in `DANGEROUS_PATTERNS`; `obfuscated-exec` catches base64-decode-then-eval patterns.* |
-| **Identity Integrity** | A package's runtime behavior should match its declared metadata. | A JS library spawning a `python` or `curl` process to side-load payloads. | *(3) Partially implemented: subprocess patterns catch obvious cases. Worth adding a cross-language spawn pattern to `DANGEROUS_PATTERNS` in `hooks_js.py`: flag `child_process.exec/spawn` calls that invoke `python`, `curl`, `wget`, or `nc` (common second-stage loaders).* |
+| **Identity Integrity** | A package's runtime behavior should match its declared metadata. | A JS library spawning a `python` or `curl` process to side-load payloads. | *(1) Implemented: `cross-lang-spawn` added to `DANGEROUS_PATTERNS` in all three ecosystems, using shared `CROSS_LANG_TOOLS_RE` (`python3?|curl|wget|nc|netcat`) in `analysis_shared.py`. Flags exec/spawn calls invoking cross-language tools from any ecosystem's source files.* |
 
 ### 2. Detection of "Integrity Gaps"
 
