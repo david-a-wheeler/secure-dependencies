@@ -35,11 +35,12 @@ malicious code:
 
 *   **Typosquatting:** Registering names similar to popular packages
     (e.g., `djanga` instead of `django`).
-    *(1) Partially implemented: Levenshtein distance against Node.js
-    built-in module names and against the project's existing lockfile deps
-    (JS and Ruby). Flags exact matches (dependency confusion) and
-    near-matches (distance 1 = concern, distance 2 = note). No external
-    Top-N popularity list is used; see 4.1 for why.*
+    *(1) Partially implemented: countering typosquatting is a primary
+    purpose of this tool. Current implementation: Levenshtein distance
+    against Node.js built-in module names and against the project's
+    existing lockfile deps (JS and Ruby). Flags exact matches (dependency
+    confusion) and near-matches (distance 1 = concern, distance 2 = note).
+    No external Top-N popularity list is used yet; see 4.1.*
 
 *   **Dependency Confusion:** Exploiting package manager resolution order
     (internal vs. public) to force the download of a malicious public
@@ -143,13 +144,15 @@ and **Damerau-Levenshtein** (distance $\le 2$) for final verification.
         (Java/Maven, Go, Python). This includes widely used but
         potentially "stale" or deprecated packages like `minimist` and
         `request`.
-    *   *(2) Not applicable: maintaining and shipping an up-to-date
-        reference list of tens of thousands of popular packages is an
-        infrastructure problem outside this tool's scope. The tool already
-        compares against the project's own lockfile deps and against
-        language built-ins, which are the highest-value cases. Registry-
-        wide Top-N comparison is better done by registry-level tooling
-        (e.g., npm audit, Deps.dev) rather than a per-package reviewer.*
+    *   *(3) Worth implementing: countering typosquatting is a primary
+        purpose of this tool, so comparing against a Top-N list is not
+        out of scope. It is just not yet done. The tool already compares
+        against the project's own lockfile deps and language built-ins,
+        which are the highest-value cases. Bundling or caching a Top-N
+        reference list (e.g., from Census III, npm-rank, or PyPI BigQuery)
+        and running Levenshtein against it is a reasonable future
+        addition. Registry-level tooling (npm audit, Deps.dev) can do
+        this too, but that does not preclude doing it here as well.*
 
 *   **Heuristics:**
     *   **Homoglyph:** Identify confusable characters (e.g., `l` vs `I`,
@@ -275,8 +278,8 @@ Identify where the data is going:
     to ensure coverage of critical-but-boring dependencies.
     *(1) Partially implemented: version_published_days covers package age;
     download and owner counts are reported from registry metadata. Top-N
-    reference list comparison is not implemented; see 4.1 for why it is
-    not practical in this tool.*
+    reference list comparison is not yet implemented but is worth doing
+    in the future; see 4.1.*
 
 2.  **Phase 2: Install-Script Sandbox.** Run `npm install` in an
     instrumented container to catch real-time network calls to the "Drop
@@ -304,7 +307,9 @@ Identify where the data is going:
 
 ## Summary: What was added from this document
 
-All three items have been implemented:
+All actionable items have been implemented:
+
+**Obfuscation detection (section 4.4):**
 
 1.  **`long-line-obfuscation`** -- *(1) Implemented* in DANGEROUS_PATTERNS
     (all ecosystems) via `LONG_LINE_RE` (`[^\n]{5000,}`). Threshold of
@@ -315,7 +320,32 @@ All three items have been implemented:
     5+ adjacent single-char string literals joined by `+`.
 
 3.  **`discord-token-format`** -- *(1) Implemented* in DANGEROUS_PATTERNS
-    (all ecosystems) via `DISCORD_TOKEN_RE` (`[a-zA-Z0-9]{24}.[a-zA-Z0-9]{6}.[a-zA-Z0-9]{27}`).
+    (all ecosystems) via `DISCORD_TOKEN_RE`
+    (`[a-zA-Z0-9]{24}.[a-zA-Z0-9]{6}.[a-zA-Z0-9]{27}`).
+
+**Persistence/Backdoor (section 3):**
+
+4.  **`reverse-shell`** -- *(1) Implemented* in DANGEROUS_PATTERNS (all
+    ecosystems) via `REVERSE_SHELL_RE`: bash `/dev/tcp/host/port`,
+    `nc -e /bin/`, `socat TCP...EXEC:/bin/`.
+
+5.  **`cron-persistence`** -- *(1) Implemented* in DANGEROUS_PATTERNS
+    (all ecosystems) via `CRON_PERSISTENCE_RE`: `/etc/cron.d/` and
+    related directories, `/var/spool/cron/`, `| crontab -` (stdin
+    install; negative lookahead prevents false+ on `-l`/`-r`/`-e`).
+
+6.  **`system-persistence`** -- *(1) Implemented* in DANGEROUS_PATTERNS
+    (all ecosystems) via `SYSTEM_PERSISTENCE_RE`:
+    `/etc/systemd/system/*.service`, `systemctl enable/daemon-reload`,
+    `Library/LaunchAgents/`, `Library/LaunchDaemons/`.
+
+**Resource Hijacking (section 3):**
+
+7.  **`cryptominer`** -- *(1) Implemented* in DANGEROUS_PATTERNS (all
+    ecosystems) via `CRYPTOMINER_RE`: named miner binaries (`xmrig`,
+    `cpuminer`, `ethminer`, `minerd`, `ccminer`, `t-rex`, `lolminer`,
+    `nbminer`) and the Stratum pool protocol (`stratum+tcp://`,
+    `stratum+ssl://`).
 
 ## Bibliography
 
