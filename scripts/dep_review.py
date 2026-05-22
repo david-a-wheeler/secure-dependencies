@@ -73,7 +73,7 @@ def run_scans(hooks, unpacked_dir: Path, work: Path) -> tuple[int, list[tuple[st
     if not unpacked_dir.is_dir():
         return 0, [], 0
     todo_labels = {label for label, _ in shared.TODO_PATTERNS}
-    for label, pattern in shared.ADVERSARIAL_PATTERNS + shared.TODO_PATTERNS + hooks.DANGEROUS_PATTERNS:
+    for label, pattern in shared.ADVERSARIAL_PATTERNS + shared.TODO_PATTERNS + hooks.all_dangerous_patterns():
         globs = shared.CODE_FILE_GLOBS if label in shared.ADVERSARIAL_CODE_ONLY_LABELS else None
         with shared.Printer(work / f'summary-scan-{label}.txt') as _p_scan:
             n = shared.blind_scan(label, pattern, unpacked_dir, work, _p_scan, include_globs=globs)

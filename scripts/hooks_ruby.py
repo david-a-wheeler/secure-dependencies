@@ -182,8 +182,6 @@ class Hooks(shared.EcosystemHooks):
         # Worm propagation: publishing to RubyGems from inside an install hook.
         ('self-publish',
          r'\bgem\s+push\b'),
-        # Persistence: writing to IDE or AI-tool config directories.
-        ('ide-config-write', shared.IDE_CONFIG_PATHS_RE),
         # Credential harvesting via cloud secret-manager SDKs or direct API calls.
         # Aws::SecretsManager is not caught by network-at-load-scope (which checks
         # Net::HTTP and similar, not the AWS SDK).
@@ -199,11 +197,6 @@ class Hooks(shared.EcosystemHooks):
         ('env-enumeration',
          r'JSON\.(?:dump|generate)\s*\(\s*ENV\b'
          r'|ENV\.to_a\b'),
-        # Mini Shai-Hulud campaign: backdoor install path, LaunchAgent name,
-        # and dead-man's-switch script. No legitimate use in package code.
-        ('mini-shai-hulud-paths', shared.MINI_SHAI_HULUD_PATHS_RE),
-        # Exfiltration relay services and known campaign C2 domains.
-        ('exfil-relay-domain', shared.EXFIL_RELAY_DOMAINS_RE),
         # Shadow runtimes: system/exec/spawn invoking bun/deno/pkgx etc.
         # Extremely unusual in Ruby source; no legitimate published-gem use case.
         ('shadow-runtime',
@@ -215,30 +208,6 @@ class Hooks(shared.EcosystemHooks):
         ('cross-lang-spawn',
          r'(?:system|exec|spawn|IO\.popen)\s*\([^)]{0,300}'
          r'\b' + shared.CROSS_LANG_TOOLS_RE + r'\b'),
-        # Orphan-commit fetch: source file fetches from GitHub by a direct
-        # 40-hex commit SHA alongside a fetch verb on the same line.
-        # Ruby has Net::HTTP/Faraday; fetching by SHA is unusual and suspicious.
-        ('github-fetch-by-sha', shared.GITHUB_SHA_FETCH_RE),
-        # GitHub commit-search API used as a C2 dead-drop channel.
-        # The specific ?q=firedalazer form is in ADVERSARIAL_PATTERNS (abort);
-        # this catches the general endpoint for novel campaign variants.
-        ('github-commit-search-c2', shared.GITHUB_COMMIT_SEARCH_RE),
-        # Discord bot token embedded in source: likely a harvested credential
-        # or token-extraction regex.  24.6.27 base64 format; exact quantifiers.
-        ('discord-token-format', shared.DISCORD_TOKEN_RE),
-        # String-split obfuscation: 5+ single chars joined by + to assemble
-        # a keyword character by character, evading simple string-match scans.
-        ('string-split-obfuscation', shared.STRING_SPLIT_RE),
-        # Unusually long lines: may embed base64/hex payloads or
-        # single-line obfuscated code.  Ruby gem source rarely exceeds this.
-        ('long-line-obfuscation', shared.LONG_LINE_RE),
-        # Reverse-shell: bash /dev/tcp redirect, nc -e, socat EXEC.
-        ('reverse-shell', shared.REVERSE_SHELL_RE),
-        # Cron/systemd/LaunchAgent persistence.
-        ('cron-persistence', shared.CRON_PERSISTENCE_RE),
-        ('system-persistence', shared.SYSTEM_PERSISTENCE_RE),
-        # Cryptominer: named miner binaries or Stratum pool protocol.
-        ('cryptominer', shared.CRYPTOMINER_RE),
     ]
 
     # ReDoS prevention: diff lines start with ^\+ so they are anchored, but

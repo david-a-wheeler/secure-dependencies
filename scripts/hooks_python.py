@@ -342,8 +342,6 @@ class Hooks(shared.EcosystemHooks):
          r'|\bflit\s+publish\b'
          r'|\bhatch\s+publish\b'
          r'|\bpython[^\n]{0,60}setup\.py[^\n]{0,40}\bupload\b'),
-        # Persistence: writing to IDE or AI-tool config directories.
-        ('ide-config-write', shared.IDE_CONFIG_PATHS_RE),
         # Credential harvesting via cloud secret-manager SDKs or direct API calls.
         # boto3 calls are not caught by network-at-load-scope (which checks urllib etc.).
         # Shared provider hostnames come from shared.CLOUD_SECRET_HOSTS_RE.
@@ -360,11 +358,6 @@ class Hooks(shared.EcosystemHooks):
         # json.dumps(dict(os.environ)) as well as json.dumps(os.environ).
         ('env-enumeration',
          r'(?:json\.dumps|pprint\.pformat)\s*\(\s*(?:dict\s*\(\s*)?os\.environ\b'),
-        # Mini Shai-Hulud campaign: backdoor install path, LaunchAgent name,
-        # and dead-man's-switch script. No legitimate use in package code.
-        ('mini-shai-hulud-paths', shared.MINI_SHAI_HULUD_PATHS_RE),
-        # Exfiltration relay services and known campaign C2 domains.
-        ('exfil-relay-domain', shared.EXFIL_RELAY_DOMAINS_RE),
         # Shadow runtimes: subprocess/os.system invoking bun/deno/pkgx etc.
         # Highly suspicious in a Python package; no legitimate use case.
         ('shadow-runtime',
@@ -378,31 +371,6 @@ class Hooks(shared.EcosystemHooks):
          r'(?:subprocess\.(?:call|run|Popen|check_output|check_call)'
          r'|os\.(?:system|popen))\s*\([^)]{0,300}'
          r'\b' + shared.CROSS_LANG_TOOLS_RE + r'\b'),
-        # Orphan-commit fetch: source file fetches from GitHub by a direct
-        # 40-hex commit SHA alongside a fetch verb on the same line.
-        # Python packages have no legitimate reason to download by SHA;
-        # requests/urllib are native and should use versioned releases.
-        ('github-fetch-by-sha', shared.GITHUB_SHA_FETCH_RE),
-        # GitHub commit-search API used as a C2 dead-drop channel.
-        # The specific ?q=firedalazer form is in ADVERSARIAL_PATTERNS (abort);
-        # this catches the general endpoint for novel campaign variants.
-        ('github-commit-search-c2', shared.GITHUB_COMMIT_SEARCH_RE),
-        # Discord bot token embedded in source: likely a harvested credential
-        # or token-extraction regex.  24.6.27 base64 format; exact quantifiers.
-        ('discord-token-format', shared.DISCORD_TOKEN_RE),
-        # String-split obfuscation: 5+ single chars joined by + to assemble
-        # a keyword character by character, evading simple string-match scans.
-        ('string-split-obfuscation', shared.STRING_SPLIT_RE),
-        # Unusually long lines: may embed base64/hex payloads or
-        # single-line obfuscated code.  Python source rarely exceeds this.
-        ('long-line-obfuscation', shared.LONG_LINE_RE),
-        # Reverse-shell: bash /dev/tcp redirect, nc -e, socat EXEC.
-        ('reverse-shell', shared.REVERSE_SHELL_RE),
-        # Cron/systemd/LaunchAgent persistence.
-        ('cron-persistence', shared.CRON_PERSISTENCE_RE),
-        ('system-persistence', shared.SYSTEM_PERSISTENCE_RE),
-        # Cryptominer: named miner binaries or Stratum pool protocol.
-        ('cryptominer', shared.CRYPTOMINER_RE),
     ]
 
     DIFF_PATTERNS: list[tuple[str, str]] = [

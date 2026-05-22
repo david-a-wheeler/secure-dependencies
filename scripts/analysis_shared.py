@@ -1404,8 +1404,9 @@ def cmd_available(name: str) -> bool:
 
 # ---------------------------------------------------------------------------
 # Adversarial scan patterns: language-agnostic; apply to every ecosystem.
-# DANGEROUS_PATTERNS (language-specific eval/exec/etc.) live in each
-# ecosystem script because the idioms differ across languages.
+# BASE_DANGEROUS_PATTERNS (language-agnostic) live in EcosystemHooks and
+# apply to every ecosystem.  DANGEROUS_PATTERNS (eval/exec/etc.) live in
+# each ecosystem script because the idioms differ across languages.
 # ---------------------------------------------------------------------------
 
 ADVERSARIAL_PATTERNS: list[tuple[str, str]] = [
@@ -3655,8 +3656,9 @@ class EcosystemHooks(ABC):
         LOCKFILE_NAME        Single lockfile filename, or None if the ecosystem
                              uses multiple formats (see LOCKFILE_NAMES).
         MANIFEST_FILE        Canonical manifest filename written to the work dir.
-        DANGEROUS_WHAT       Human-readable description of DANGEROUS_PATTERNS.
-        DANGEROUS_PATTERNS   list[tuple[str, str]] of (label, regex) pairs.
+        DANGEROUS_WHAT       Human-readable description of all dangerous patterns.
+        DANGEROUS_PATTERNS   Ecosystem-specific (label, regex) pairs; appended
+                             to BASE_DANGEROUS_PATTERNS by all_dangerous_patterns().
         DIFF_PATTERNS        list[tuple[str, str]] of (label, regex) pairs.
     """
 
@@ -3669,6 +3671,49 @@ class EcosystemHooks(ABC):
     OSV_ECOSYSTEM: str
     OSS_REBUILD_ECOSYSTEM: str
     NATIVE_BINARY_SUFFIXES: frozenset[str]
+
+    # Language-agnostic patterns applied to every ecosystem.
+    # Subclasses must NOT repeat these; call all_dangerous_patterns() instead
+    # of DANGEROUS_PATTERNS to get the combined list.
+    BASE_DANGEROUS_PATTERNS: list[tuple[str, str]] = [
+        # Persistence: writing to IDE or AI-tool config directories.
+        ('ide-config-write', IDE_CONFIG_PATHS_RE),
+        # Mini Shai-Hulud campaign: backdoor install path, LaunchAgent name,
+        # and dead-man's-switch script. No legitimate use in package code.
+        ('mini-shai-hulud-paths', MINI_SHAI_HULUD_PATHS_RE),
+        # Exfiltration relay services and known campaign C2 domains.
+        ('exfil-relay-domain', EXFIL_RELAY_DOMAINS_RE),
+        # Orphan-commit fetch: source file fetches from GitHub by a direct
+        # 40-hex commit SHA alongside a fetch verb on the same line.
+        # Legitimate pinning uses lockfiles, not bare commit SHAs.
+        ('github-fetch-by-sha', GITHUB_SHA_FETCH_RE),
+        # GitHub commit-search API used as a C2 dead-drop channel.
+        # The specific ?q=firedalazer form is in ADVERSARIAL_PATTERNS (abort);
+        # this catches the general endpoint for novel campaign variants.
+        ('github-commit-search-c2', GITHUB_COMMIT_SEARCH_RE),
+        # Discord bot token embedded in source: likely a harvested credential
+        # or token-extraction regex.  24.6.27 base64 format; exact quantifiers.
+        ('discord-token-format', DISCORD_TOKEN_RE),
+        # String-split obfuscation: 5+ single chars joined by + to assemble
+        # a keyword character by character, evading simple string-match scans.
+        ('string-split-obfuscation', STRING_SPLIT_RE),
+        # Unusually long lines: may embed base64/hex payloads or
+        # single-line obfuscated code.
+        ('long-line-obfuscation', LONG_LINE_RE),
+        # Reverse-shell: bash /dev/tcp redirect, nc -e, socat EXEC.
+        ('reverse-shell', REVERSE_SHELL_RE),
+        # Cron persistence: writing to cron directories or piping to
+        # crontab; establishes a payload that survives reboots.
+        ('cron-persistence', CRON_PERSISTENCE_RE),
+        # System-level persistence: systemd service or macOS LaunchAgent.
+        ('system-persistence', SYSTEM_PERSISTENCE_RE),
+        # Cryptominer: named miner binaries or Stratum pool protocol.
+        ('cryptominer', CRYPTOMINER_RE),
+    ]
+
+    def all_dangerous_patterns(self) -> list[tuple[str, str]]:
+        """Return ecosystem-specific patterns followed by base patterns."""
+        return self.DANGEROUS_PATTERNS + self.BASE_DANGEROUS_PATTERNS
 
     def __init__(self, registry_url: str | None = None) -> None:
         self.registry_url = registry_url
