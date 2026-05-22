@@ -1077,7 +1077,7 @@ REVERSE_SHELL_RE: str = (
 CRON_PERSISTENCE_RE: str = (
     r'/etc/cron\.(?:d|daily|hourly|weekly|monthly)/[^\s"\']{0,80}'
     r'|/var/spool/cron/'
-    r'|\|\s*crontab\s+-'   # ... | crontab - (install from stdin)
+    r'|\|\s*crontab\s+-(?![a-zA-Z0-9])'  # | crontab - (stdin install, not -l/-r/-e)
 )
 
 # System-level persistence: systemd service installation, macOS LaunchAgent/
