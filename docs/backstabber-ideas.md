@@ -14,6 +14,7 @@ Attackers use several methods to trick users or systems into including malicious
 *   **Dependency Confusion:** Exploiting package manager resolution order (internal vs. public) to force the download of a malicious public package with the same name as a private one.
 *   **Account Takeover:** Gaining control of a legitimate maintainer's account.
 *   **Self-Published Malware:** New packages that seem useful but contain hidden logic.
+*   **Bitsquatting (Niche):** Registering names that differ by a single bit from popular packages (e.g., `mic2osoft` vs `microsoft`). While mathematically interesting, it is a low-probability threat in modern ecosystems due to ECC RAM and registry similarity checks, but still worth monitoring for highly critical targets.
 
 ## 2. Execution Triggers (When it runs)
 
@@ -35,9 +36,11 @@ Once executed, the payload typically performs one of the following:
 
 ### 4.1. Typosquatting Detection
 **Algorithm:** Hybrid approach using **Sift4** for fast bulk filtering and **Damerau-Levenshtein** (distance $\le 2$) for final verification.
-*   **Reference Dataset:** Maintain a local list of the Top 1,000 - 5,000 most downloaded packages per ecosystem.
+*   **Reference Dataset Sources:**
+    *   **npm:** Use the [npm-rank](https://github.com/LeoDog896/npm-rank) or [Socket.dev Popularity List](https://socket.dev/npm/category/popular).
+    *   **PyPI:** Query the BigQuery public dataset `bigquery-public-data.pypi.file_downloads` (via `pypinfo`).
+    *   **Critical Software:** Incorporate the **Linux Foundation Census III** (2024) Top 500 lists for npm and non-npm libraries (Java/Maven, Go, Python). This includes widely used but potentially "stale" or deprecated packages like `minimist` and `request`.
 *   **Heuristics:**
-    *   **Bit-flipping:** Check for names with exactly one bit difference.
     *   **Homoglyph:** Identify confusable characters (e.g., `l` vs `I`, `o` vs `0`).
     *   **Keyboard Adjacency:** Higher risk score if the substitution is an adjacent key on QWERTY.
     *   **Metadata Check:** High risk if `Distance <= 2` AND `Package Age < 30 days` AND `Downloads < 100`.
@@ -72,7 +75,7 @@ Identify where the data is going:
 
 ## 5. Practical Steps for Our Code
 
-1.  **Phase 1: Metadata Audit.** Implement the Top-N comparison and package age check. This has the highest signal-to-noise ratio.
+1.  **Phase 1: Metadata Audit.** Implement the Top-N comparison and package age check. Seed the reference list with **Census III** data to ensure coverage of critical-but-boring dependencies.
 2.  **Phase 2: Install-Script Sandbox.** Run `npm install` in an instrumented container to catch real-time network calls to the "Drop Services" identified in 4.3.
 3.  **Phase 3: Static Analysis (AST).** Move beyond regex to AST-based detection of "Suspicious Pairs" (e.g., code that reads an environment variable and then calls an HTTP client within the same function).
 4.  **Phase 4: Baselines.** For the Top-N packages, baseline their legitimate network destinations to detect "Account Takeover" updates that introduce new C2 domains.
@@ -80,3 +83,5 @@ Identify where the data is going:
 ## Bibliography
 
 [Ohm2020] [Ohm et al, 2020, "Backstabber's Knife Collection: A Review of Open Source Software Supply Chain Attacks"](https://arxiv.org/abs/2005.09535)
+
+[Census III] [Linux Foundation, 2024, "Census III of Free and Open Source Software – Application Libraries"](https://www.linuxfoundation.org/resources/publications/census-iii-of-free-and-open-source-software-application-libraries)
