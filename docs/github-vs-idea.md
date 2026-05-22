@@ -309,10 +309,11 @@ When evaluating *any* signal from an unknown attack, the AI should apply the
 By grounding detection in these **Invariants**, we create a defense that remains effective even as
 attackers switch from JavaScript to Rust, or from VS Code to new AI-native IDEs.
 
-*(Tool: (3) worth incorporating -- these three questions map directly to the AI reviewer's
-evaluation logic. They should be added to the system prompt / analysis instructions as an explicit
-reasoning checklist for evaluating DANGEROUS_PATTERNS hits, particularly `SHADOW_RUNTIME` and
-`ide-config-write` signals where context determines severity.)*
+*(Tool: (1) IMPLEMENTED -- added as Step 5a "Principle of Least Justification" in
+`references/package-analysis-brief.md`, between the file-reading table and the existing
+Step 5b (deeper-analysis decision). The three questions (Functional Mapping, Manifest
+Correlation, Path Provenance) are now explicit instructions the tier-2 agent applies when
+evaluating any `DANGEROUS_PATTERNS` scan hit.)*
 
 ## Sources
 

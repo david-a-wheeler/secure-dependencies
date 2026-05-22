@@ -112,6 +112,34 @@ including the new `CONCERN_SUMMARY` block.
 New transitive deps are reported to `dep_session.py` automatically via
 `session-update.json`. You do not need to list or relay them.
 
+**Step 5a: interpret scan pattern matches.**
+
+When `summary-scan-LABEL.txt` reports matches, apply the
+**Principle of Least Justification** before escalating. Ask all three
+questions; escalate to HIGH/CRITICAL only when the match lacks justification
+across all three:
+
+1. **Functional Mapping**: Does this action (network call, shell spawn,
+   credential access) match the package's stated purpose? A network call
+   in an HTTP client library is expected; the same call in a string-utility
+   package is not.
+2. **Manifest Correlation**: Is the tool or runtime used declared in the
+   manifest? A `bun` or `deno` call is lower-concern if that runtime is in
+   `devDependencies` or `engines`; high-concern if it is absent from the
+   manifest entirely.
+3. **Path Provenance**: Is the match in a production file or in a
+   test/example/docs directory? Matches in `tests/`, `examples/`, or
+   `docs/` carry lower weight than matches in the main entry point or
+   install hooks.
+
+A match that fails all three checks (action inconsistent with purpose,
+tool not declared in manifest, found in production code) is a strong
+supply-chain attack signal regardless of the specific label.
+
+Note: `mini-shai-hulud-*` labels in `ADVERSARIAL_GATE` are campaign
+fingerprints with no legitimate use; skip this checklist and treat them
+as CRITICAL immediately.
+
 **Step 5b: decide whether to run deeper analysis.**
 
 Read the `CONCERN_SUMMARY` block in `signals.txt`. It lists each flagged
