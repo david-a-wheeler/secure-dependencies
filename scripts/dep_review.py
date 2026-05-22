@@ -420,12 +420,20 @@ def write_signals(  # noqa: C901
                 ' large install scripts are extremely rare in legitimate'
                 ' packages and may embed obfuscated payloads]'
             )
+        elif _icw_sig == 'BUNDLED_IDE_EXEC':
+            _icw_desc = (
+                f'{_icw_hook}/ bundles execution/prompt-vector IDE files'
+                '  [tasks.json, .claude/commands/, .cursor/rules/, or'
+                ' .idea/runConfigurations/ found; these can execute shell'
+                ' commands or inject AI-tool system prompts; review even'
+                ' if package intentionally ships IDE configuration]'
+            )
         elif _icw_sig == 'BUNDLED_IDE_CONFIG':
             _icw_desc = (
-                f'{_icw_hook}/ directory bundled in package'
-                '  [published packages should not ship IDE config dirs;'
-                ' may contain credential-targeting tasks or AI-tool'
-                ' manipulation; .vscode/extensions.json is a benign exception]'
+                f'{_icw_hook}/ bundles unrecognised IDE files'
+                '  [not known editor metadata; review if this package does'
+                ' not intentionally ship IDE configuration;'
+                ' benign if package purpose is IDE configuration]'
             )
         else:
             _icw_desc = (

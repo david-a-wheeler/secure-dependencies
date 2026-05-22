@@ -2298,6 +2298,72 @@ _BUNDLED_IDE_DIRS: tuple[str, ...] = (
     '.vscode', '.idea', '.claude', '.cursor',
 )
 
+# Filenames that are plain editor metadata; commonly left in packages by
+# accident (forgot .npmignore).  Not a concern on their own.
+_IDE_BENIGN_NAMES: frozenset[str] = frozenset({
+    'extensions.json',  # .vscode: recommended extensions list
+    'settings.json',    # .vscode: workspace editor settings
+    'launch.json',      # .vscode: debug launch configurations
+    'keybindings.json', # .vscode: custom key bindings
+    '.gitignore',       # common in IDE dirs
+    'workspace.xml',    # .idea: project workspace state
+    'vcs.xml',          # .idea: VCS root mappings
+    'misc.xml',         # .idea: miscellaneous project settings
+    'modules.xml',      # .idea: module list
+    'compiler.xml',     # .idea: compiler settings
+    'encodings.xml',    # .idea: file encoding map
+})
+
+# File suffixes that are always benign IDE metadata.
+_IDE_BENIGN_SUFFIXES: tuple[str, ...] = ('.iml',)  # JetBrains module files
+
+# Filenames that are direct execution or AI-prompt vectors.
+_IDE_SUSPICIOUS_NAMES: frozenset[str] = frozenset({
+    'tasks.json',  # .vscode: shell task definitions run on editor events
+})
+
+# Path prefixes (relative to the IDE dir, POSIX form) whose contents are
+# execution or AI-prompt vectors regardless of individual filename.
+_IDE_SUSPICIOUS_PREFIXES: tuple[str, ...] = (
+    'commands/',           # .claude/commands/: AI slash-command system prompts
+    'rules/',              # .cursor/rules/: AI behaviour injection rules
+    'runConfigurations/',  # .idea/runConfigurations/: shell run configs
+)
+
+
+def _classify_ide_file(rel_path: str) -> str:
+    """Classify a file inside an IDE config dir.
+
+    Returns 'suspicious' (execution/prompt vector), 'benign' (editor
+    metadata), or 'unknown'.
+
+    >>> _classify_ide_file('tasks.json')
+    'suspicious'
+    >>> _classify_ide_file('commands/exfil.md')
+    'suspicious'
+    >>> _classify_ide_file('rules/override.mdc')
+    'suspicious'
+    >>> _classify_ide_file('runConfigurations/run.xml')
+    'suspicious'
+    >>> _classify_ide_file('extensions.json')
+    'benign'
+    >>> _classify_ide_file('project.iml')
+    'benign'
+    >>> _classify_ide_file('mystery.txt')
+    'unknown'
+    """
+    name = Path(rel_path).name
+    for prefix in _IDE_SUSPICIOUS_PREFIXES:
+        if rel_path.startswith(prefix):
+            return 'suspicious'
+    if name in _IDE_SUSPICIOUS_NAMES:
+        return 'suspicious'
+    if name in _IDE_BENIGN_NAMES:
+        return 'benign'
+    if name.endswith(_IDE_BENIGN_SUFFIXES):
+        return 'benign'
+    return 'unknown'
+
 
 def check_bundled_ide_dirs(
     unpacked_dir: Path,
@@ -2305,13 +2371,15 @@ def check_bundled_ide_dirs(
 ) -> list[str]:
     """Detect IDE config directories bundled inside a published package.
 
-    Legitimate packages do not ship .vscode/.idea/.claude directories in
-    their published artifact; their presence may indicate credential-targeting
-    task configs or AI-tool system-prompt manipulation.
-    (.vscode/extensions.json recommending plugins is a common benign exception.)
+    Files are classified as suspicious (execution/prompt vectors), benign
+    (editor metadata, e.g. extensions.json), or unknown.  Only suspicious
+    or unknown files produce a warning entry; a directory containing only
+    known editor metadata is noted without raising a concern (it is commonly
+    caused by a missing .npmignore, or expected in an IDE-config package).
 
-    Returns a list of 'BUNDLED_IDE_CONFIG:<dirname>' strings for
-    install_cmd_warnings.
+    Returns 'BUNDLED_IDE_EXEC:<dir>' (suspicious files found) or
+    'BUNDLED_IDE_CONFIG:<dir>' (only unrecognised files) strings for
+    install_cmd_warnings; returns nothing for benign-only directories.
     """
     warnings: list[str] = []
     if not unpacked_dir.is_dir():
@@ -2321,17 +2389,46 @@ def check_bundled_ide_dirs(
         if not dir_path.is_dir():
             continue
         files = sorted(f for f in dir_path.rglob('*') if f.is_file())
-        names = ', '.join(
-            sanitize_line(f.name) for f in files[:5])
-        suffix = ', ...' if len(files) > 5 else ''
-        p(f'[!] BUNDLED_IDE_CONFIG_DIR: {ide_dir}/'
-          f' ({len(files)} file(s): {names}{suffix})')
-        p('    Published packages should not bundle IDE config directories;'
-          ' review for credential-targeting tasks or AI-tool manipulation.')
-        if ide_dir == '.vscode':
-            p('    Note: .vscode/extensions.json (recommending plugins)'
-              ' is a common benign exception.')
-        warnings.append(f'BUNDLED_IDE_CONFIG:{ide_dir}')
+        suspicious: list[Path] = []
+        unknown: list[Path] = []
+        benign: list[Path] = []
+        for f in files:
+            rel = f.relative_to(dir_path).as_posix()
+            cls = _classify_ide_file(rel)
+            if cls == 'suspicious':
+                suspicious.append(f)
+            elif cls == 'unknown':
+                unknown.append(f)
+            else:
+                benign.append(f)
+
+        if suspicious:
+            names = ', '.join(sanitize_line(f.name) for f in suspicious[:5])
+            suffix = ', ...' if len(suspicious) > 5 else ''
+            p(f'[!] BUNDLED_IDE_EXEC: {ide_dir}/ contains execution/'
+              f'prompt-vector files ({len(suspicious)} suspicious:'
+              f' {names}{suffix})')
+            p('    These files can execute shell commands, inject AI-tool'
+              ' system prompts, or define malicious run configurations.'
+              ' Review carefully even if this package intentionally ships'
+              ' IDE configuration.')
+            warnings.append(f'BUNDLED_IDE_EXEC:{ide_dir}')
+        elif unknown:
+            names = ', '.join(sanitize_line(f.name) for f in unknown[:5])
+            suffix = ', ...' if len(unknown) > 5 else ''
+            p(f'[~] BUNDLED_IDE_CONFIG: {ide_dir}/ contains unrecognised'
+              f' files ({len(unknown)} unknown: {names}{suffix})')
+            p('    Not known editor metadata; review if this package does'
+              ' not intentionally ship IDE configuration.'
+              ' Benign if the package purpose is IDE configuration.')
+            warnings.append(f'BUNDLED_IDE_CONFIG:{ide_dir}')
+        else:
+            names = ', '.join(sanitize_line(f.name) for f in benign[:5])
+            suffix = ', ...' if len(benign) > 5 else ''
+            p(f'    BUNDLED_IDE_CONFIG: {ide_dir}/ (editor metadata only:'
+              f' {len(benign)} file(s): {names}{suffix})')
+            p('    Expected if this is an IDE-config package; otherwise a'
+              ' stray config (forgot .npmignore). No action needed.')
     return warnings
 
 
