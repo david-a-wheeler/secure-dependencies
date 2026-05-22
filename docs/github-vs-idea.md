@@ -23,20 +23,20 @@ The attack delivered a sophisticated worm dubbed **"Mini Shai-Hulud,"** which wa
 - **Backdoor Script:** `~/.local/share/kitty/cat.py` (Python-based backdoor) [Kurmi2026, Lakshmanan2026].
 - **Persistence Mechanism:** `~/Library/LaunchAgents/com.user.kitty-monitor.plist` (macOS) [Kurmi2026].
 - **AI/CLI Hooks:**
-    - `.claude/settings.json` (Targeted for secret harvesting) [Kurmi2026, Qualysec2026].
-    - `.claude/router_runtime.js` [Qualysec2026].
-- **Hidden Configs:** `~/.config/sysmon`, `~/.config/audiomon` [OxSecurity2026].
+    - `.claude/settings.json` (Targeted for secret harvesting) [Kurmi2026].
+    - `.claude/router_runtime.js`
+- **Hidden Configs:** `~/.config/sysmon`, `~/.config/audiomon` [Levy2026].
 - **Staging/State Files:**
     - `/var/tmp/.gh_update_state`
     - `/tmp/kitty-*`
     - Environment variable `__DAEMONIZED=1` [Kurmi2026].
 
 ### Network & Exfiltration
-- **C2 Subnet:** `83.142.209.0/24` [PhoenixSecurity2026].
+- **C2 Subnet:** `83.142.209.0/24`.
 - **Known C2 Domains:** `git-service[.]com`, `git-tanstack[.]com`, `modesl[.]litellm[.]cloud`, `checkmarx[.]zone` [Lakshmanan2026].
 - **C2 Polling Query:** `api.github.com/search/commits?q=firedalazer` [Kurmi2026].
-- **Exfiltration Repositories:** Public repositories created on victim accounts named **"A Mini Shai-Hulud has Appeared"** [Plate2025, Upwind2026].
-- **Commit Messages:** Patterns including `EveryBoiWeBuildIsAWormyBoi:<base64-token>` [Upwind2026].
+- **Exfiltration Repositories:** Public repositories created on victim accounts named **"A Mini Shai-Hulud has Appeared"** [Plate2025].
+- **Commit Messages:** Patterns including `EveryBoiWeBuildIsAWormyBoi:<base64-token>`.
 
 ## Detection & Prevention Strategies
 
@@ -65,9 +65,6 @@ To detect and prevent malicious content *before* installation:
 - [Brown2026] [Shaun Brown, May 20, 2026, "GITHUB BREACHED VIA A MALICIOUS VS CODE EXTENSION: WHY DEVELOPER DEVICES ARE THE REAL TARGET", Aikido](https://www.aikido.dev/blog/github-breached-vs-code-extension)
 - [ThreatLocker2026] [ThreatLocker Threat Intelligence, May 21, 2026, "GITHUB CONFIRMS COMPROMISED NX CONSOLE EXTENSION WAS INITIAL ACCESS VECTOR", ThreatLocker](https://www.threatlocker.com/blog/github-breach-likely-caused-by-nx-console-compromise)
 - [Baran2026] [Guru Baran, May 21, 2026, "GITHUB INTERNAL REPOSITORIES BREACHED VIA WEAPONIZED VS CODE EXTENSION", CybersecurityNews](https://cybersecuritynews.com/github-internal-repositories-breached/)
-- [Qualysec2026] [Tanmay Dixit, May 2026, "Mini Shai Hulud Worm Infects 170+ npm and PyPI Packages in Autonomous Supply Chain Attack", Qualysec](https://qualysec.com/mini-shai-hulud-worm-infects-170-npm-and-pypi-packages-in-autonomous-supply-chain-attack/)
-- [OxSecurity2026] [Lior Levy, May 2026, "The Mother of All AI Supply Chains", Ox Security](https://www.ox.security/blog/the-mother-of-all-ai-supply-chains/)
-- [PhoenixSecurity2026] [Francesco Cipollone, May 2026, "TeamPCP Wave Four: GitHub Breach via Poisoned VS Code Extension", Phoenix Security](https://phoenix.security/blog/teampcp-wave-four-github-breach-via-poisoned-vs-code-extension/)
+- [Levy2026] [Ox Security Research Team, 2026, "THE MOTHER OF ALL AI SUPPLY CHAINS", Ox Security](https://www.ox.security/blog/the-mother-of-all-ai-supply-chains/)
 - [Plate2025] [Henrik Plate, Kiran Raj, and Cris Staicu, Nov 24, 2025, "SHAI-HULUD 2 MALWARE CAMPAIGN TARGETS GITHUB AND CLOUD CREDENTIALS USING BUN RUNTIME", Endor Labs](https://www.endorlabs.com/blog/shai-hulud-2-malware-campaign-targets-github-and-cloud-credentials-using-bun-runtime)
-- [Upwind2026] [Avital Harel, May 2026, "A Mini Shai-Hulud Has Appeared: Dissecting a Multi-Vector npm Supply Chain Worm", Upwind](https://www.upwind.io/blog/a-mini-shai-hulud-has-appeared)
 - [McCarthy2026] [Rami McCarthy, Amitai Cohen, and Benjamin Read, May 12, 2026, "MINI SHAI-HULUD STRIKES AGAIN: TANSTACK + MORE NPM PACKAGES COMPROMISED", Wiz](https://www.wiz.io/blog/mini-shai-hulud-strikes-again-tanstack-more-npm-packages-compromised)
