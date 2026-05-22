@@ -186,11 +186,11 @@ Detecting the *source* of the data:
 
 *   **Specific Secrets:**
     *   Discord Token: `[a-zA-Z0-9]{24}\.[a-zA-Z0-9]{6}\.[a-zA-Z0-9]{27}`
-        *(3) Worth adding: the format is highly specific (low false+).
-        A credential-format pattern for Discord tokens would belong in
-        `DANGEROUS_PATTERNS` as `discord-token-format`, shared via
-        `analysis_shared.py`. Flagging a package that contains or matches
-        a Discord token regex is a strong exfiltration signal.*
+        *(1) Implemented: `discord-token-format` in DANGEROUS_PATTERNS
+        (all three ecosystems) using `DISCORD_TOKEN_RE` from
+        `analysis_shared.py`. The 24.6.27 base64 format is highly
+        specific; a match means either a hardcoded stolen token or code
+        that extracts tokens in this format.*
     *   Generic API Key: `(?:key|secret|token|auth|pwd)[a-z0-9_-]{16,}`
         *(2) Not useful: this pattern matches virtually every package that
         handles authentication legitimately. The false+ rate would be
@@ -239,13 +239,12 @@ Identify where the data is going:
 *   **Structure Heuristics:**
     *   **Long Lines:** Single lines $> 1000$ characters without common
         minification patterns (like `webpack` headers).
-        *(3) Worth implementing: a grep pattern for very long lines
-        (e.g., `.{2000,}`) is straightforward and catches single-line
-        payload embedding or hand-minified attack code. Would apply to
-        install scripts and source files. Add to DANGEROUS_PATTERNS as
-        `long-line-obfuscation` with a high threshold (e.g., 2000 chars)
-        to keep false+ low; legitimate minified JS from bundlers uses
-        standard headers that can be excluded.*
+        *(1) Implemented: `long-line-obfuscation` in DANGEROUS_PATTERNS
+        (all three ecosystems) using `LONG_LINE_RE` (`[^\n]{5000,}`) from
+        `analysis_shared.py`. Threshold of 5000 chars keeps false+ low
+        for normal source; matches in minified dist/ files are expected
+        and the file path in grep output lets the AI distinguish build
+        output from source or install scripts.*
     *   **Hex/Base64 Blobs:** Large strings matching `[a-fA-F0-9]{100,}`
         or `(?:[A-Za-z0-9+\/]{4}){25,}`.
         *(1) Partially implemented: `obfuscated-exec` catches the
@@ -256,12 +255,12 @@ Identify where the data is going:
         hex/base64 strings.*
     *   **String Splitting:** Detecting
         `('p' + 'r' + 'o' + 'c' + 'e' + 's' + 's' + '.' + 'e' + 'n' + 'v')`.
-        *(3) Worth implementing: character-concatenation to form a
-        suspicious keyword followed by eval or exec is a known evasion
-        technique. A bounded pattern like
-        `eval\s*\([^)]{0,200}(?:['"][a-z]['"](?:\s*\+\s*['"][a-z]['"]){3,})`
-        would catch the common forms without catastrophic false+. Add as
-        `string-split-exec` in DANGEROUS_PATTERNS.*
+        *(1) Implemented: `string-split-obfuscation` in DANGEROUS_PATTERNS
+        (all three ecosystems) using `STRING_SPLIT_RE` from
+        `analysis_shared.py`. Matches 5+ adjacent single-char string
+        literals joined by `+`; 5-char minimum keeps false+ low while
+        catching keyword assembly. No eval/exec co-occurrence required
+        since the concatenation pattern alone is already unusual.*
 
 ## 5. Practical Steps for Our Code
 
@@ -297,25 +296,20 @@ Identify where the data is going:
     baseline database updated on every new version. This is a registry-
     level or CI-integration concern, not a per-package static reviewer.*
 
-## Summary: What is worth adding from this document
+## Summary: What was added from this document
 
-Two concrete additions from section 4.4 that are practical and low false+:
+All three items have been implemented:
 
-1.  **`long-line-obfuscation`** in DANGEROUS_PATTERNS (all ecosystems):
-    flag lines exceeding ~2000 characters. Catches single-line payload
-    embedding. Exclude known-minified files (webpack/esbuild comment
-    headers) to reduce false+.
+1.  **`long-line-obfuscation`** -- *(1) Implemented* in DANGEROUS_PATTERNS
+    (all ecosystems) via `LONG_LINE_RE` (`[^\n]{5000,}`). Threshold of
+    5000 chars; matches in minified dist/ are expected and noted as such.
 
-2.  **`string-split-exec`** in DANGEROUS_PATTERNS (all ecosystems):
-    flag character-concatenation patterns used to assemble a keyword for
-    eval/exec (e.g., `'p'+'r'+'o'+'c'`). Bounded regex, low false+.
+2.  **`string-split-obfuscation`** -- *(1) Implemented* in
+    DANGEROUS_PATTERNS (all ecosystems) via `STRING_SPLIT_RE`. Matches
+    5+ adjacent single-char string literals joined by `+`.
 
-One addition from section 4.2:
-
-3.  **`discord-token-format`** in DANGEROUS_PATTERNS (all ecosystems):
-    the Discord token regex `[a-zA-Z0-9]{24}\.[a-zA-Z0-9]{6}\.[a-zA-Z0-9]{27}`
-    is highly specific. Finding it in package source strongly suggests
-    a token harvester.
+3.  **`discord-token-format`** -- *(1) Implemented* in DANGEROUS_PATTERNS
+    (all ecosystems) via `DISCORD_TOKEN_RE` (`[a-zA-Z0-9]{24}.[a-zA-Z0-9]{6}.[a-zA-Z0-9]{27}`).
 
 ## Bibliography
 

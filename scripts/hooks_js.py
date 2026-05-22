@@ -520,7 +520,10 @@ class Hooks(shared.EcosystemHooks):
         'shadow runtimes (bun/deno/pkgx spawned from source), '
         'cross-language spawn (python/curl/wget/nc as second-stage loaders), '
         'GitHub raw-content fetch by direct commit SHA (orphan-commit injection), '
-        'GitHub commit-search API used as a C2 dead-drop channel'
+        'GitHub commit-search API used as a C2 dead-drop channel, '
+        'Discord token format (harvested credential), '
+        'string-split obfuscation (char-by-char keyword assembly), '
+        'unusually long lines (embedded payload or single-line obfuscation)'
     )
 
     # ReDoS prevention (CWE-400): all patterns use bounded quantifiers so that
@@ -610,6 +613,15 @@ class Hooks(shared.EcosystemHooks):
         # The specific ?q=firedalazer form is in ADVERSARIAL_PATTERNS (abort);
         # this catches the general endpoint for novel campaign variants.
         ('github-commit-search-c2', shared.GITHUB_COMMIT_SEARCH_RE),
+        # Discord bot token embedded in source: likely a harvested credential
+        # or token-extraction regex.  24.6.27 base64 format; exact quantifiers.
+        ('discord-token-format', shared.DISCORD_TOKEN_RE),
+        # String-split obfuscation: 5+ single chars joined by + to assemble
+        # a keyword character by character, evading simple string-match scans.
+        ('string-split-obfuscation', shared.STRING_SPLIT_RE),
+        # Unusually long lines: may embed base64/hex payloads or
+        # single-line obfuscated code.  Matches in dist/ are expected.
+        ('long-line-obfuscation', shared.LONG_LINE_RE),
     ]
 
     # ReDoS prevention: diff lines start with ^\+ so they are anchored, but

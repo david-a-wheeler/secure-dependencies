@@ -1084,6 +1084,32 @@ EXFIL_RELAY_DOMAINS_RE: str = (
     r'|m-kosche\.com)'
 )
 
+# Discord bot token format: base64-encoded user ID (24 chars), dot,
+# base64-encoded timestamp (6 chars), dot, HMAC (27 chars).
+# Finding this in package source means either a hardcoded stolen token or
+# code that extracts tokens matching this format.  Both are suspicious.
+# All quantifiers are exact: no alternation or backtracking possible.
+DISCORD_TOKEN_RE: str = (
+    r'[a-zA-Z0-9]{24}\.[a-zA-Z0-9]{6}\.[a-zA-Z0-9]{27}'
+)
+
+# String-split obfuscation: 5+ single-character string literals joined by +.
+# Used to assemble keywords like 'process', 'eval', or shell commands
+# one character at a time to evade simple string-match filters.
+# Each {4,} iteration must consume a literal '+' so the engine advances
+# monotonically -- linear scan, no catastrophic backtracking (ReDoS-safe).
+STRING_SPLIT_RE: str = (
+    r'["\'][a-zA-Z0-9._/\\]["\']'
+    r'(?:\s*\+\s*["\'][a-zA-Z0-9._/\\]["\']){4,}'
+)
+
+# Lines with 5000+ non-newline characters may embed base64/hex payloads
+# or single-line obfuscated attack code.  Matches in minified dist/ files
+# are expected; the file path in grep output lets the reviewer distinguish
+# build output from source or install scripts.
+# [^\n]{5000,} is a single bounded character class -- ReDoS-safe.
+LONG_LINE_RE: str = r'[^\n]{5000,}'
+
 # VCS URL scheme fragment: matches git+https:// and git+ssh:// transports.
 # Used in manifest and lockfile dep checks across all ecosystems.
 # Compose with ecosystem-specific context: e.g. start-of-string anchor (JS),
