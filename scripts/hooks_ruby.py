@@ -139,7 +139,9 @@ class Hooks(shared.EcosystemHooks):
         'Marshal.load, '
         'network at load scope, credential env-var access, home-dir writes, '
         'dynamic dispatch on external input, at_exit hooks, '
-        'self-publish (worm propagation), IDE config writes, cloud secret-manager API calls'
+        'self-publish (worm propagation), IDE config writes, cloud secret-manager API calls, '
+        'shadow runtimes (bun/deno/pkgx spawned from source), '
+        'cross-language spawn (curl/wget/nc as second-stage loaders)'
     )
 
     # ReDoS prevention (CWE-400): all patterns use bounded quantifiers so that
@@ -194,6 +196,17 @@ class Hooks(shared.EcosystemHooks):
         ('mini-shai-hulud-paths', shared.MINI_SHAI_HULUD_PATHS_RE),
         # Exfiltration relay services and known campaign C2 domains.
         ('exfil-relay-domain', shared.EXFIL_RELAY_DOMAINS_RE),
+        # Shadow runtimes: system/exec/spawn invoking bun/deno/pkgx etc.
+        # Extremely unusual in Ruby source; no legitimate published-gem use case.
+        ('shadow-runtime',
+         r'(?:system|exec|spawn|IO\.popen)\s*\([^)]{0,300}'
+         r'\b' + shared.SHADOW_RUNTIME_NAMES_RE + r'\b'),
+        # Cross-language spawn: Ruby invoking curl/wget/nc.
+        # Ruby has Net::HTTP/Faraday; spawning curl/wget/nc is a strong
+        # signal of a second-stage payload downloader.
+        ('cross-lang-spawn',
+         r'(?:system|exec|spawn|IO\.popen)\s*\([^)]{0,300}'
+         r'\b' + shared.CROSS_LANG_TOOLS_RE + r'\b'),
     ]
 
     # ReDoS prevention: diff lines start with ^\+ so they are anchored, but
@@ -486,6 +499,10 @@ class Hooks(shared.EcosystemHooks):
             p('ERROR: gemspec not found')
 
         has_install_scripts = (work / 'install-scripts.txt').is_file()
+
+        # Bundled IDE config directories (cross-ecosystem, #3).
+        install_cmd_warnings.extend(
+            shared.check_bundled_ide_dirs(unpacked_dir, p))
 
         # Build ecosystem-specific context for the driver's MANIFEST
         # / INSTALL HOOKS section

@@ -289,7 +289,9 @@ class Hooks(shared.EcosystemHooks):
         'obfuscated execution, unsafe deserialization (pickle, yaml.load, marshal), '
         'network calls at import scope, credential env-var access, home-dir writes, '
         'dynamic imports on external input, atexit/registration hooks, '
-        'self-publish (worm propagation), IDE config writes, cloud secret-manager API calls'
+        'self-publish (worm propagation), IDE config writes, cloud secret-manager API calls, '
+        'shadow runtimes (bun/deno/pkgx spawned from source), '
+        'cross-language spawn (curl/wget/nc as second-stage loaders)'
     )
 
     DANGEROUS_PATTERNS: list[tuple[str, str]] = [
@@ -355,6 +357,19 @@ class Hooks(shared.EcosystemHooks):
         ('mini-shai-hulud-paths', shared.MINI_SHAI_HULUD_PATHS_RE),
         # Exfiltration relay services and known campaign C2 domains.
         ('exfil-relay-domain', shared.EXFIL_RELAY_DOMAINS_RE),
+        # Shadow runtimes: subprocess/os.system invoking bun/deno/pkgx etc.
+        # Highly suspicious in a Python package; no legitimate use case.
+        ('shadow-runtime',
+         r'(?:subprocess\.(?:call|run|Popen|check_output|check_call)'
+         r'|os\.(?:system|popen))\s*\([^)]{0,300}'
+         r'\b' + shared.SHADOW_RUNTIME_NAMES_RE + r'\b'),
+        # Cross-language spawn: Python invoking curl/wget/nc.
+        # Python has requests/urllib; spawning curl/wget/nc is a strong
+        # signal of a second-stage payload downloader.
+        ('cross-lang-spawn',
+         r'(?:subprocess\.(?:call|run|Popen|check_output|check_call)'
+         r'|os\.(?:system|popen))\s*\([^)]{0,300}'
+         r'\b' + shared.CROSS_LANG_TOOLS_RE + r'\b'),
     ]
 
     DIFF_PATTERNS: list[tuple[str, str]] = [
@@ -666,6 +681,10 @@ class Hooks(shared.EcosystemHooks):
             )
 
         has_install_scripts = bool(install_script_files)
+
+        # Bundled IDE config directories (cross-ecosystem, #3).
+        install_cmd_warnings.extend(
+            shared.check_bundled_ide_dirs(unpacked_dir, p))
 
         # Ecosystem-specific context for the driver's MANIFEST / INSTALL HOOKS section
         install_hook_context: list[str] = []

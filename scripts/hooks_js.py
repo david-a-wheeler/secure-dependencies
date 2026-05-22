@@ -505,7 +505,9 @@ class Hooks(shared.EcosystemHooks):
         'dynamic require on external input, '
         'prototype pollution '
         '(Object.prototype assignment, __proto__ assignment), '
-        'home-dir writes, IDE config writes, cloud secret-manager API calls'
+        'home-dir writes, IDE config writes, cloud secret-manager API calls, '
+        'shadow runtimes (bun/deno/pkgx spawned from source), '
+        'cross-language spawn (python/curl/wget/nc as second-stage loaders)'
     )
 
     # ReDoS prevention (CWE-400): all patterns use bounded quantifiers so that
@@ -572,6 +574,19 @@ class Hooks(shared.EcosystemHooks):
         # Exfiltration relay services and known campaign C2 domains.
         # Shared domain list from analysis_shared; no ecosystem-specific additions.
         ('exfil-relay-domain', shared.EXFIL_RELAY_DOMAINS_RE),
+        # Shadow runtimes: exec/spawn invoking bun/deno/pkgx/tsx/ts-node.
+        # These are covered in install hooks by _INSTALL_CMD_CHECKS; this
+        # pattern catches the same runtimes in broader source-file scans.
+        # [^)]{0,300} bounds backtracking to O(300) per anchor (safe).
+        ('shadow-runtime',
+         r'(?:exec(?:Sync|File(?:Sync)?)?|spawn(?:Sync)?)\s*\([^)]{0,300}'
+         r'\b' + shared.SHADOW_RUNTIME_NAMES_RE + r'\b'),
+        # Cross-language spawn: JS invoking python/curl/wget/nc.
+        # A JS package that spawns these tools is almost certainly a second-stage
+        # payload downloader or data exfiltration step.
+        ('cross-lang-spawn',
+         r'(?:exec(?:Sync|File(?:Sync)?)?|spawn(?:Sync)?)\s*\([^)]{0,300}'
+         r'\b' + shared.CROSS_LANG_TOOLS_RE + r'\b'),
     ]
 
     # ReDoS prevention: diff lines start with ^\+ so they are anchored, but
@@ -927,6 +942,10 @@ class Hooks(shared.EcosystemHooks):
             p('ERROR: package.json not found in unpacked directory')
 
         has_install_scripts = (work / 'install-scripts.txt').is_file()
+
+        # Bundled IDE config directories (cross-ecosystem, #3).
+        install_cmd_warnings.extend(
+            shared.check_bundled_ide_dirs(unpacked_dir, p))
 
         return {
             'source_url': source_url,

@@ -989,6 +989,17 @@ IDE_CONFIG_PATHS_RE: str = (
     r'|\.config[/\\](?:claude|copilot|cursor|codeium)[/\\]'
 )
 
+# Secondary JS runtimes rarely legitimately spawned by published packages.
+# Their presence as a subprocess command argument is a strong indicator of
+# install-hook abuse or worm propagation.  tsx/ts-node are lower urgency
+# (common in dev tooling) but still unusual in published package source.
+SHADOW_RUNTIME_NAMES_RE: str = r'(?:bun|deno|pkgx|tsx|ts-node)'
+
+# Cross-language tools that a package in one ecosystem rarely needs to
+# spawn at runtime.  curl/wget/nc are common second-stage payload loaders;
+# python appearing in a JS/Ruby package spawn call is a cross-language pivot.
+CROSS_LANG_TOOLS_RE: str = r'(?:python3?|curl|wget|nc|netcat)'
+
 # Cloud secret-manager API hostnames.  These appear in HTTP calls and SDK
 # configs regardless of language.  Each ecosystem adds its own SDK-specific
 # alternatives on top of these shared provider hostnames.
@@ -2281,6 +2292,47 @@ def report_install_script_size(
           ' review for embedded payloads or obfuscated code.')
         return f'INSTALL_SCRIPT_LARGE:{script_name}'
     return None
+
+
+_BUNDLED_IDE_DIRS: tuple[str, ...] = (
+    '.vscode', '.idea', '.claude', '.cursor',
+)
+
+
+def check_bundled_ide_dirs(
+    unpacked_dir: Path,
+    p: 'Printer',
+) -> list[str]:
+    """Detect IDE config directories bundled inside a published package.
+
+    Legitimate packages do not ship .vscode/.idea/.claude directories in
+    their published artifact; their presence may indicate credential-targeting
+    task configs or AI-tool system-prompt manipulation.
+    (.vscode/extensions.json recommending plugins is a common benign exception.)
+
+    Returns a list of 'BUNDLED_IDE_CONFIG:<dirname>' strings for
+    install_cmd_warnings.
+    """
+    warnings: list[str] = []
+    if not unpacked_dir.is_dir():
+        return warnings
+    for ide_dir in _BUNDLED_IDE_DIRS:
+        dir_path = unpacked_dir / ide_dir
+        if not dir_path.is_dir():
+            continue
+        files = sorted(f for f in dir_path.rglob('*') if f.is_file())
+        names = ', '.join(
+            sanitize_line(f.name) for f in files[:5])
+        suffix = ', ...' if len(files) > 5 else ''
+        p(f'[!] BUNDLED_IDE_CONFIG_DIR: {ide_dir}/'
+          f' ({len(files)} file(s): {names}{suffix})')
+        p('    Published packages should not bundle IDE config directories;'
+          ' review for credential-targeting tasks or AI-tool manipulation.')
+        if ide_dir == '.vscode':
+            p('    Note: .vscode/extensions.json (recommending plugins)'
+              ' is a common benign exception.')
+        warnings.append(f'BUNDLED_IDE_CONFIG:{ide_dir}')
+    return warnings
 
 
 # ---------------------------------------------------------------------------

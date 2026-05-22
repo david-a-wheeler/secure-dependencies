@@ -420,6 +420,13 @@ def write_signals(  # noqa: C901
                 ' large install scripts are extremely rare in legitimate'
                 ' packages and may embed obfuscated payloads]'
             )
+        elif _icw_sig == 'BUNDLED_IDE_CONFIG':
+            _icw_desc = (
+                f'{_icw_hook}/ directory bundled in package'
+                '  [published packages should not ship IDE config dirs;'
+                ' may contain credential-targeting tasks or AI-tool'
+                ' manipulation; .vscode/extensions.json is a benign exception]'
+            )
         else:
             _icw_desc = (
                 f'detected in {_icw_hook}'
