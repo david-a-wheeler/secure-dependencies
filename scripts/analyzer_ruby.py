@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# hooks_ruby.py: Ruby language operations for the dependency analysis driver.
+# analyzer_ruby.py: Ruby language operations for the dependency analysis driver.
 #
 # Handles the Ruby gem format (download, unpack, gemspec, Rakefile) and the
 # rubygems.org registry API. Used for --from rubygems; can be reused for other
@@ -43,89 +43,14 @@ _RE_GEMLOCK_SPECS = re.compile(r'^\s{4}(\S+)\s+\(', re.MULTILINE)
 
 
 # ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-def _extract_source_url(gemspec_text: str) -> str:
-    """Extract source/homepage URL from gemspec text.
-
-    Tries in priority order for source_code_uri, then homepage_uri:
-      1. Hash-rocket metadata hash  ("source_code_uri" => "URL")
-      2. Subscript assignment       (metadata['source_code_uri'] = 'URL')
-      3. Top-level assignment       (s.source_code_uri = "URL")
-    Then falls back to s.homepage = "URL".
-
-    >>> _extract_source_url("s.metadata['source_code_uri'] = 'https://github.com/foo/bar'")
-    'https://github.com/foo/bar'
-    >>> _extract_source_url('"source_code_uri" => "https://github.com/foo/bar"')
-    'https://github.com/foo/bar'
-    >>> _extract_source_url('s.source_code_uri = "https://github.com/foo/bar"')
-    'https://github.com/foo/bar'
-    >>> _extract_source_url('s.homepage = "https://example.com"')
-    'https://example.com'
-    >>> _extract_source_url('no url here')
-    ''
-    """
-    for key in ('source_code_uri', 'homepage_uri'):
-        ek = re.escape(key)
-        # Format 1: hash rocket  ("source_code_uri" => "URL")
-        m = re.search(
-            rf'["\']' + ek + r'["\']\s*=>\s*["\']([^"\']+)',
-            gemspec_text)
-        if m:
-            return m.group(1).strip().rstrip('/')
-        # Format 2: subscript assignment (metadata['source_code_uri'] = 'URL')
-        m = re.search(
-            r"metadata\[(['\"])" + ek + r"\1\]\s*=\s*['\"]([^'\"]+)",
-            gemspec_text)
-        if m:
-            return m.group(2).strip().rstrip('/')
-    # Format 3: top-level assignment
-    # (s.source_code_uri = "URL" or s.homepage_uri = "URL")
-    m = re.search(
-        r'(?:source_code_uri|homepage_uri)\s*=\s*["\']([^"\']+)',
-        gemspec_text)
-    if m:
-        return m.group(1).strip()
-    # Last resort: s.homepage = "URL"
-    m = re.search(r'homepage\s*=\s*["\']([^"\']+)', gemspec_text)
-    return m.group(1).strip() if m else ''
-
-
-def _extract_gemspec_license(gemspec_text: str) -> str:
-    """Extract raw license string from gemspec text, or empty string.
-
-    >>> _extract_gemspec_license('s.license = "MIT"')
-    'MIT'
-    >>> _extract_gemspec_license("s.licenses = ['Apache-2.0']")
-    'Apache-2.0'
-    >>> _extract_gemspec_license('no license here')
-    ''
-    """
-    lic_match = re.search(
-        r'\.licenses?\s*=\s*\[?["\']([^"\']+)["\']', gemspec_text)
-    return lic_match.group(1).strip() if lic_match else ''
-
-
-# Size thresholds for Ruby install scripts, keyed by filename.
-# extconf.rb: nokogiri is ~500 lines; > 1000 lines is extremely unusual.
-# Rakefile: complex gems rarely exceed 300 install-related lines;
-#   the whole Rakefile is checked, so 500 lines is the threshold.
-# 'default' covers any other install-time file (Makefile.in, etc.).
-_INSTALL_SCRIPT_WARN: dict[str, tuple[int, int]] = {
-    'extconf.rb': (40_000, 1_000),
-    'Rakefile':   (20_000,   500),
-    'default':    (20_000,   500),
-}
-
-
-# ---------------------------------------------------------------------------
 # Public API: called by dep_review.py
 # ---------------------------------------------------------------------------
 
-class Hooks(shared.EcosystemHooks):
+class RubyAnalyzer(shared.EcosystemAnalyzer):
+    """EcosystemAnalyzer implementation for Ruby packages (RubyGems/gems)."""
+
     ECOSYSTEM = 'ruby'
-    LOCKFILE_NAME = 'Gemfile.lock'
+    LOCKFILE_NAME: str = 'Gemfile.lock'  # type: ignore[override]
     OSV_ECOSYSTEM = 'RubyGems'
     OSS_REBUILD_ECOSYSTEM = 'rubygems'
     NATIVE_BINARY_SUFFIXES: frozenset[str] = frozenset({'.so', '.bundle'})
@@ -134,111 +59,73 @@ class Hooks(shared.EcosystemHooks):
     MANIFEST_FILE = 'gemspec.txt'
 
     # Human-readable summary of what DANGEROUS_PATTERNS scans for.
-    DANGEROUS_WHAT = (
-        'eval/exec variants, shell execution, obfuscated execution, '
-        'Marshal.load, '
-        'network at load scope, credential env-var access, home-dir writes, '
-        'dynamic dispatch on external input, at_exit hooks, '
-        'self-publish (worm propagation), IDE config writes, cloud secret-manager API calls, '
-        'shadow runtimes (bun/deno/pkgx spawned from source), '
-        'cross-language spawn (curl/wget/nc as second-stage loaders), '
-        'GitHub raw-content fetch by direct commit SHA (orphan-commit injection), '
-        'GitHub commit-search API used as a C2 dead-drop channel, '
-        'Discord token format (harvested credential), '
-        'string-split obfuscation (char-by-char keyword assembly), '
-        'unusually long lines (embedded payload or single-line obfuscation), '
-        'reverse-shell indicators (bash /dev/tcp, nc -e, socat EXEC), '
-        'cron/systemd/LaunchAgent persistence, '
-        'cryptominer tools and Stratum mining protocol'
-    )
-
     # ReDoS prevention (CWE-400): all patterns use bounded quantifiers so that
     # worst-case PCRE backtracking is O(bound^2) rather than O(n^2) or worse.
     # Unbounded character-class repetitions ([^x]+, [^x]*) are capped with
     # {1,N} or {0,N}.  See AGENTS.md for the full policy.
-    DANGEROUS_PATTERNS: list[tuple[str, str]] = [
+    DANGEROUS_PATTERNS: list[tuple[str, str, str]] = [
         ('eval-variants',
-         r'\b(?:eval|instance_eval|class_eval|module_eval|binding\.eval)\s*[\(\{]'),
+         r'\b(?:eval|instance_eval|class_eval|module_eval|binding\.eval)\s*[\(\{]',
+         'eval/exec variants (eval, instance_eval, class_eval, binding.eval)'),
         ('shell-exec',
-         r'\b(?:system|exec|spawn)\s*[\(\x60]|IO\.popen|Open3\.(?:popen|capture|pipeline)|%x\{|\x60'),
+         r'\b(?:system|exec|spawn)\s*[\(\x60]|IO\.popen|Open3\.(?:popen|capture|pipeline)|%x\{|\x60',
+         'shell execution (system, exec, spawn, IO.popen, Open3, backtick)'),
         ('obfuscated-exec',
          r'(?:Base64\.decode64|\.unpack\s*\(\s*["\x27]H\*|Zlib::Inflate|\.decode)\b'
-         r'(?:[^\n]{0,120})(?:eval|instance_eval|class_eval|exec|system)\b'),
-        ('marshal-load',       r'\bMarshal\.(?:load|restore)\b'),
+         r'(?:[^\n]{0,120})(?:eval|instance_eval|class_eval|exec|system)\b',
+         'obfuscated execution (Base64/Zlib decode into eval/exec)'),
+        ('marshal-load',
+         r'\bMarshal\.(?:load|restore)\b',
+         'unsafe deserialization via Marshal.load'),
         ('network-at-load-scope',
          r'^\s*(?:Net::HTTP|require\s+["\x27]open-uri["\x27]|URI\.open|Faraday\.new'
-         r'|RestClient\.|HTTParty\.(?:get|post)|TCPSocket\.new|UDPSocket\.new)\b'),
+         r'|RestClient\.|HTTParty\.(?:get|post)|TCPSocket\.new|UDPSocket\.new)\b',
+         'network calls at load scope (Net::HTTP, URI.open, Faraday, etc.)'),
         ('credential-env-vars',
          r'ENV\s*\[\s*["\x27][A-Z_]*(?:'
-         + shared.CRED_KEYWORDS_RE + r'|BUNDLE_)[A-Z_]*["\x27]\s*\]'),
+         + shared.CRED_KEYWORDS_RE + r'|BUNDLE_)[A-Z_]*["\x27]\s*\]',
+         'credential environment variable access (AWS/cloud/BUNDLE keys)'),
         # [^,]{1,200} rather than [^,]+ to cap backtracking when no quote
         # follows many non-comma characters (ReDoS: O(200^2) not O(n^2)).
         ('home-or-shell-write',
          r'(?:File\.(?:write|open|binwrite)|IO\.write)\s*[^,]{1,200}["\x27](?:'
-         + shared.HOME_PATHS_RE + r')'),
+         + shared.HOME_PATHS_RE + r')',
+         'home-dir or shell-config writes (File.write, IO.write)'),
         ('dynamic-dispatch',
-         r'\b(?:__send__|public_send|send)\s*\(\s*(?:params|request|user_input|ENV|ARGV|gets)\b'),
-        ('at-exit-hooks',      r'^\s*at_exit\b'),
+         r'\b(?:__send__|public_send|send)\s*\(\s*(?:params|request|user_input|ENV|ARGV|gets)\b',
+         'dynamic dispatch on external input (__send__/public_send with user data)'),
+        ('at-exit-hooks',
+         r'^\s*at_exit\b',
+         'at_exit hook registration'),
         # Worm propagation: publishing to RubyGems from inside an install hook.
         ('self-publish',
-         r'\bgem\s+push\b'),
-        # Persistence: writing to IDE or AI-tool config directories.
-        ('ide-config-write', shared.IDE_CONFIG_PATHS_RE),
-        # Credential harvesting via cloud secret-manager SDKs or direct API calls.
+         r'\bgem\s+push\b',
+         'self-publish worm propagation (gem push from install hook)'),
         # Aws::SecretsManager is not caught by network-at-load-scope (which checks
         # Net::HTTP and similar, not the AWS SDK).
         # Shared provider hostnames come from shared.CLOUD_SECRET_HOSTS_RE.
         ('cloud-secret-api',
          r'\bAws::SecretsManager::Client\b'
          r'|\bAws::SSM::Client\b'
-         r'|' + shared.CLOUD_SECRET_HOSTS_RE),
-        # Bulk env-var serialization: harvest pattern that converts the entire
-        # ENV hash to JSON or an Array of pairs.  ENV.to_h is excluded (very
-        # common for subprocess env copies); ENV.to_a and JSON serialization
-        # are the unambiguous bulk-collect forms.
+         r'|' + shared.CLOUD_SECRET_HOSTS_RE,
+         'cloud secret-manager API calls (Aws::SecretsManager, GCP, Azure)'),
+        # ENV.to_h is excluded (very common for subprocess env copies);
+        # ENV.to_a and JSON serialization are the unambiguous bulk-collect forms.
         ('env-enumeration',
          r'JSON\.(?:dump|generate)\s*\(\s*ENV\b'
-         r'|ENV\.to_a\b'),
-        # Mini Shai-Hulud campaign: backdoor install path, LaunchAgent name,
-        # and dead-man's-switch script. No legitimate use in package code.
-        ('mini-shai-hulud-paths', shared.MINI_SHAI_HULUD_PATHS_RE),
-        # Exfiltration relay services and known campaign C2 domains.
-        ('exfil-relay-domain', shared.EXFIL_RELAY_DOMAINS_RE),
-        # Shadow runtimes: system/exec/spawn invoking bun/deno/pkgx etc.
-        # Extremely unusual in Ruby source; no legitimate published-gem use case.
+         r'|ENV\.to_a\b',
+         'bulk environment variable serialization (credential harvest)'),
+        # [^)]{0,300} bounds backtracking to O(300) per anchor (safe).
         ('shadow-runtime',
          r'(?:system|exec|spawn|IO\.popen)\s*\([^)]{0,300}'
-         r'\b' + shared.SHADOW_RUNTIME_NAMES_RE + r'\b'),
-        # Cross-language spawn: Ruby invoking curl/wget/nc.
+         r'\b' + shared.SHADOW_RUNTIME_NAMES_RE + r'\b',
+         'shadow runtime invocation (bun/deno/pkgx spawned from source)'),
         # Ruby has Net::HTTP/Faraday; spawning curl/wget/nc is a strong
         # signal of a second-stage payload downloader.
         ('cross-lang-spawn',
          r'(?:system|exec|spawn|IO\.popen)\s*\([^)]{0,300}'
-         r'\b' + shared.CROSS_LANG_TOOLS_RE + r'\b'),
-        # Orphan-commit fetch: source file fetches from GitHub by a direct
-        # 40-hex commit SHA alongside a fetch verb on the same line.
-        # Ruby has Net::HTTP/Faraday; fetching by SHA is unusual and suspicious.
-        ('github-fetch-by-sha', shared.GITHUB_SHA_FETCH_RE),
-        # GitHub commit-search API used as a C2 dead-drop channel.
-        # The specific ?q=firedalazer form is in ADVERSARIAL_PATTERNS (abort);
-        # this catches the general endpoint for novel campaign variants.
-        ('github-commit-search-c2', shared.GITHUB_COMMIT_SEARCH_RE),
-        # Discord bot token embedded in source: likely a harvested credential
-        # or token-extraction regex.  24.6.27 base64 format; exact quantifiers.
-        ('discord-token-format', shared.DISCORD_TOKEN_RE),
-        # String-split obfuscation: 5+ single chars joined by + to assemble
-        # a keyword character by character, evading simple string-match scans.
-        ('string-split-obfuscation', shared.STRING_SPLIT_RE),
-        # Unusually long lines: may embed base64/hex payloads or
-        # single-line obfuscated code.  Ruby gem source rarely exceeds this.
-        ('long-line-obfuscation', shared.LONG_LINE_RE),
-        # Reverse-shell: bash /dev/tcp redirect, nc -e, socat EXEC.
-        ('reverse-shell', shared.REVERSE_SHELL_RE),
-        # Cron/systemd/LaunchAgent persistence.
-        ('cron-persistence', shared.CRON_PERSISTENCE_RE),
-        ('system-persistence', shared.SYSTEM_PERSISTENCE_RE),
-        # Cryptominer: named miner binaries or Stratum pool protocol.
-        ('cryptominer', shared.CRYPTOMINER_RE),
+         r'\b' + shared.CROSS_LANG_TOOLS_RE + r'\b',
+         'cross-language spawn (curl/wget/nc as second-stage downloader)'),
     ]
 
     # ReDoS prevention: diff lines start with ^\+ so they are anchored, but
@@ -260,6 +147,70 @@ class Hooks(shared.EcosystemHooks):
         ('diff-eval',
          r'^\+[^\n]{0,500}(?:eval|instance_eval|class_eval|module_eval)\s*[\(\{]'),
     ]
+
+    # Size thresholds for install scripts, keyed by filename.
+    # extconf.rb: nokogiri is ~500 lines; > 1000 lines is extremely unusual.
+    # Rakefile: complex gems rarely exceed 300 install-related lines;
+    #   the whole Rakefile is checked, so 500 lines is the threshold.
+    # 'default' covers any other install-time file (Makefile.in, etc.).
+    INSTALL_SCRIPT_WARN: dict[str, tuple[int, int]] = {
+        'extconf.rb': (40_000, 1_000),
+        'Rakefile':   (20_000,   500),
+        'default':    (20_000,   500),
+    }
+
+    def extract_source_url(self, raw_data: object) -> str:
+        """Extract source URL from gemspec text.
+
+        Tries source_code_uri then homepage_uri (hash-rocket, subscript,
+        top-level assignment), then falls back to s.homepage.
+
+        >>> RubyAnalyzer(None).extract_source_url("s.metadata['source_code_uri'] = 'https://github.com/foo/bar'")
+        'https://github.com/foo/bar'
+        >>> RubyAnalyzer(None).extract_source_url('"source_code_uri" => "https://github.com/foo/bar"')
+        'https://github.com/foo/bar'
+        >>> RubyAnalyzer(None).extract_source_url('s.source_code_uri = "https://github.com/foo/bar"')
+        'https://github.com/foo/bar'
+        >>> RubyAnalyzer(None).extract_source_url('s.homepage = "https://example.com"')
+        'https://example.com'
+        >>> RubyAnalyzer(None).extract_source_url('no url here')
+        ''
+        """
+        gemspec_text = str(raw_data)
+        for key in ('source_code_uri', 'homepage_uri'):
+            ek = re.escape(key)
+            m = re.search(
+                rf'["\']' + ek + r'["\']\s*=>\s*["\']([^"\']+)',
+                gemspec_text)
+            if m:
+                return m.group(1).strip().rstrip('/')
+            m = re.search(
+                r"metadata\[(['\"])" + ek + r"\1\]\s*=\s*['\"]([^'\"]+)",
+                gemspec_text)
+            if m:
+                return m.group(2).strip().rstrip('/')
+        m = re.search(
+            r'(?:source_code_uri|homepage_uri)\s*=\s*["\']([^"\']+)',
+            gemspec_text)
+        if m:
+            return m.group(1).strip()
+        m = re.search(r'homepage\s*=\s*["\']([^"\']+)', gemspec_text)
+        return m.group(1).strip() if m else ''
+
+    def extract_license(self, raw_data: object) -> str:
+        """Extract raw license string from gemspec text, or empty string.
+
+        >>> RubyAnalyzer(None).extract_license('s.license = "MIT"')
+        'MIT'
+        >>> RubyAnalyzer(None).extract_license("s.licenses = ['Apache-2.0']")
+        'Apache-2.0'
+        >>> RubyAnalyzer(None).extract_license('no license here')
+        ''
+        """
+        gemspec_text = str(raw_data)
+        lic_match = re.search(
+            r'\.licenses?\s*=\s*\[?["\']([^"\']+)["\']', gemspec_text)
+        return lic_match.group(1).strip() if lic_match else ''
 
     def get_lockfile_path(self, project_root: Path) -> Path:
         """Return the path to the Ruby lockfile (Gemfile.lock)."""
@@ -366,14 +317,8 @@ class Hooks(shared.EcosystemHooks):
         work: Path,
         failures: list[str],
         p: 'shared.Printer',
-    ) -> dict:
-        """Parse gemspec; write manifest-analysis.txt and gemspec.txt.
-
-        Returns dict with keys: source_url, extensions, executables,
-        executables_list, post_install_msg, runtime_dep_lines,
-        manifest_license_raw, manifest_text, manifest_extra_file,
-        has_build_hooks, has_install_scripts, install_hook_context.
-        """
+    ) -> shared.PackageManifest:
+        """Parse gemspec; write manifest-analysis.txt and gemspec.txt."""
         extensions = 'NO'
         executables = 'NO'
         executables_list = ''
@@ -467,7 +412,7 @@ class Hooks(shared.EcosystemHooks):
                 if auth_match else '(not found)')
             p(f'AUTHORS: {authors_val}')
 
-            gemspec_license_raw = _extract_gemspec_license(gemspec_text)
+            gemspec_license_raw = self.extract_license(gemspec_text)
             p('')
             lic_decl = (
                 shared.sanitize_line(gemspec_license_raw)
@@ -488,7 +433,7 @@ class Hooks(shared.EcosystemHooks):
             else:
                 p('RAKEFILE_PRESENT: NO')
 
-            source_url = _extract_source_url(gemspec_text)
+            source_url = self.extract_source_url(gemspec_text)
 
             # Collect install-time scripts for AI review when any
             # install-time code is present. These files run (or direct
@@ -514,8 +459,8 @@ class Hooks(shared.EcosystemHooks):
                 ]
                 for fname, fpath in install_script_files:
                     raw = fpath.read_text(encoding='utf-8', errors='replace')
-                    warn_b, warn_l = _INSTALL_SCRIPT_WARN.get(
-                        fname, _INSTALL_SCRIPT_WARN['default'])
+                    warn_b, warn_l = self.INSTALL_SCRIPT_WARN.get(
+                        fname, self.INSTALL_SCRIPT_WARN['default'])
                     _sz_warn = shared.report_install_script_size(
                         raw, fname, p, warn_b, warn_l)
                     if _sz_warn:
@@ -554,21 +499,21 @@ class Hooks(shared.EcosystemHooks):
                 ' or unexpected behavior.',
             ])
 
-        return {
-            'source_url': source_url,
-            'extensions': extensions,
-            'executables': executables,
-            'executables_list': executables_list,
-            'post_install_msg': post_install_msg,
-            'has_build_hooks': has_rakefile_tasks,
-            'has_install_scripts': 'YES' if has_install_scripts else 'NO',
-            'runtime_dep_lines': runtime_dep_lines,
-            'manifest_license_raw': gemspec_license_raw,
-            'manifest_text': gemspec_text,
-            'manifest_extra_file': 'gemspec.txt',
-            'install_hook_context': install_hook_context,
-            'install_cmd_warnings': install_cmd_warnings,
-        }
+        return shared.PackageManifest(
+            source_url=source_url,
+            extensions=extensions,
+            executables=executables,
+            executables_list=executables_list,
+            post_install_msg=post_install_msg,
+            has_build_hooks=has_rakefile_tasks,
+            has_install_scripts='YES' if has_install_scripts else 'NO',
+            runtime_dep_lines=runtime_dep_lines,
+            manifest_license_raw=gemspec_license_raw,
+            manifest_text=gemspec_text,
+            manifest_extra_file='gemspec.txt',
+            install_hook_context=install_hook_context,
+            install_cmd_warnings=install_cmd_warnings,
+        )
 
     def download_old(
         self,
@@ -668,50 +613,20 @@ class Hooks(shared.EcosystemHooks):
                 unpacked_dir = candidates[0]
         return {'ok': ok, 'source': source, 'unpacked_dir': unpacked_dir}
 
-    def get_old_license(
-        self,
-        pkgname: str,
-        old_ver: str,
-        old_unpacked_dir: Path,
-    ) -> str | None:
-        """Extract raw license string from old version gemspec.
-
-        Returns the raw string or None if not found.
-        """
-        if not old_unpacked_dir or not old_unpacked_dir.is_dir():
-            return None
+    def _read_old_manifest(self, old_unpacked_dir: Path, pkgname: str) -> str | None:
         old_gs_path = old_unpacked_dir / f'{pkgname}.gemspec'
         if not old_gs_path.is_file():
             return None
-        old_gs_text = old_gs_path.read_text(
-            encoding='utf-8', errors='replace')
-        return _extract_gemspec_license(old_gs_text) or None
+        return old_gs_path.read_text(encoding='utf-8', errors='replace')
 
-    def get_old_dep_lines(
-        self,
-        pkgname: str,
-        old_ver: str,
-        old_result: dict,
-    ) -> list[str]:
-        """Extract runtime dependency lines from the old version's gemspec.
-
-        Returns list of raw lines containing add_runtime_dependency
-        or add_dependency.
-        """
-        if not old_result.get('ok'):
+    def _extract_old_dep_lines(self, old_unpacked_dir: Path, pkgname: str) -> list[str]:
+        text = self._read_old_manifest(old_unpacked_dir, pkgname)
+        if not text:
             return []
-        old_unpacked_dir = old_result.get('unpacked_dir')
-        if not old_unpacked_dir or not Path(old_unpacked_dir).is_dir():
-            return []
-        old_gs_path = Path(old_unpacked_dir) / f'{pkgname}.gemspec'
-        if not old_gs_path.is_file():
-            return []
-        old_gs_text = old_gs_path.read_text(
-            encoding='utf-8', errors='replace')
         return [
-            l for l in old_gs_text.splitlines()
-            if 'add_runtime_dependency' in l or
-               ('add_dependency' in l and 'development' not in l)
+            l for l in text.splitlines()
+            if 'add_runtime_dependency' in l
+            or ('add_dependency' in l and 'development' not in l)
         ]
 
     def fetch_all_registry_data(
@@ -1109,29 +1024,19 @@ class Hooks(shared.EcosystemHooks):
 
         pkg_lower = pkgname.lower()
 
-        for gem in gem_names:
-            gem_lower = gem.lower()
-            if gem_lower == pkg_lower:
-                concerns.append(
-                    f'EXACT_STDLIB_MATCH: "{pkgname}" matches'
-                    f' installed/stdlib gem "{gem}". '
-                    'Installing an external gem with the same name'
-                    ' as an already-available '
-                    'gem is a strong slopsquat signal.'
-                )
-            else:
-                dist = shared.levenshtein(pkg_lower, gem_lower)
-                if dist == 1:
-                    concerns.append(
-                        f'NEAR_MATCH(dist=1): "{pkgname}" is one'
-                        f' edit from installed gem "{gem}". '
-                        'Classic typosquat pattern.'
-                    )
-                elif dist == 2:
-                    notes.append(
-                        f'NEAR_MATCH(dist=2): "{pkgname}" is two'
-                        f' edits from installed gem "{gem}".'
-                    )
+        # --- A: installed/stdlib gems (exact then near-match) ---
+        gem_exact = {g for g in gem_names if g.lower() == pkg_lower}
+        for gem in gem_exact:
+            concerns.append(
+                f'EXACT_STDLIB_MATCH: "{pkgname}" matches'
+                f' installed/stdlib gem "{gem}". '
+                'Installing an external gem with the same name'
+                ' as an already-available '
+                'gem is a strong slopsquat signal.'
+            )
+        self._lev_check(pkgname, pkg_lower,
+                        [g for g in gem_names if g not in gem_exact],
+                        'installed gem', concerns, notes)
 
         # --- C: Read Gemfile.lock for project-specific deps ---
         lockfile = project_root / 'Gemfile.lock'
@@ -1153,29 +1058,17 @@ class Hooks(shared.EcosystemHooks):
 
         # Only flag lockfile matches not already caught by gem_names
         installed_lower = {g.lower() for g in gem_names}
-        for dep in lockfile_names:
-            dep_lower = dep.lower()
-            if dep_lower in installed_lower:
-                continue  # already checked in A
-            if dep_lower == pkg_lower:
-                concerns.append(
-                    f'EXACT_LOCKFILE_MATCH: "{pkgname}" matches'
-                    f' existing lockfile dep "{dep}". '
-                    'This name is already in use in this project.'
-                )
-            else:
-                dist = shared.levenshtein(pkg_lower, dep_lower)
-                if dist == 1:
-                    concerns.append(
-                        f'NEAR_LOCKFILE_MATCH(dist=1): "{pkgname}"'
-                        f' is one edit from '
-                        f'lockfile dep "{dep}". Possible targeted typosquat.'
-                    )
-                elif dist == 2:
-                    notes.append(
-                        f'NEAR_LOCKFILE_MATCH(dist=2): "{pkgname}"'
-                        f' is two edits from lockfile dep "{dep}".'
-                    )
+        new_lf_deps = [d for d in lockfile_names if d.lower() not in installed_lower]
+        lf_exact = {d for d in new_lf_deps if d.lower() == pkg_lower}
+        for dep in lf_exact:
+            concerns.append(
+                f'EXACT_LOCKFILE_MATCH: "{pkgname}" matches'
+                f' existing lockfile dep "{dep}". '
+                'This name is already in use in this project.'
+            )
+        self._lev_check(pkgname, pkg_lower,
+                        [d for d in new_lf_deps if d not in lf_exact],
+                        'lockfile dep', concerns, notes)
 
         # --- D: Structural heuristics ---
         # D1: hyphen/underscore normalization (ruby gems use both conventions)
@@ -1191,35 +1084,12 @@ class Hooks(shared.EcosystemHooks):
                         ' Could be a naming-convention confusion attack.'
                     )
 
-        # D2: language prefix/suffix stripping
-        # If stripping a Ruby-specific wrapper prefix/suffix reveals
-        # an installed gem name, this package may be an unnecessary
-        # (or malicious) wrapper around stdlib.
-        strip_prefixes = ('ruby-', 'rb-', 'gem-')
-        strip_suffixes = ('-rb', '-ruby', '-gem')
-        all_known_lower = (
-            {g.lower() for g in gem_names}
-            | {d.lower() for d in lockfile_names})
-        for prefix in strip_prefixes:
-            if pkg_lower.startswith(prefix):
-                base = pkg_lower[len(prefix):]
-                if base in all_known_lower:
-                    concerns.append(
-                        f'PREFIX_SHADOW: "{pkgname}" appears to'
-                        f' wrap installed gem "{base}"'
-                        f' (stripped prefix "{prefix}").'
-                        ' Verify this external wrapper is intentional.'
-                    )
-        for suffix in strip_suffixes:
-            if pkg_lower.endswith(suffix):
-                base = pkg_lower[: -len(suffix)]
-                if base in all_known_lower:
-                    concerns.append(
-                        f'SUFFIX_SHADOW: "{pkgname}" appears to'
-                        f' wrap installed gem "{base}"'
-                        f' (stripped suffix "{suffix}").'
-                        ' Verify this external wrapper is intentional.'
-                    )
+        # D2: Ruby-specific prefix/suffix stripping
+        all_known_lower = ({g.lower() for g in gem_names}
+                           | {d.lower() for d in lockfile_names})
+        self._check_strip_rules(pkgname, pkg_lower, all_known_lower,
+                                ('ruby-', 'rb-', 'gem-'), ('-rb', '-ruby', '-gem'),
+                                concerns)
 
         with shared.Printer(work / 'alternatives.txt') as _p_alt:
             return shared.write_alternatives(
@@ -1276,58 +1146,34 @@ class Hooks(shared.EcosystemHooks):
         """Returns deep source comparison config for Ruby."""
         return {'primary_label': 'Ruby', 'primary_pattern': r'\.(rb)$'}
 
-    def reproducible_build(
-        self,
-        pkgname: str,
-        version: str,
-        work: Path,
-        sandbox: str,
-        p: 'shared.Printer',
-    ) -> tuple[str, int, int]:
-        """Attempt to build gem from source and compare with distributed gem.
+    REPRO_BUILT_DIR_SUFFIX = 'raw-built-gem'
 
-        Returns (repro_result, code_diffs, metadata_diffs).
-        repro_result is one of:
-          SKIPPED
-          INCONCLUSIVE
-          EXACTLY REPRODUCIBLE (sha256 match)
-          EXACTLY REPRODUCIBLE (content match)
-          FUNCTIONALLY EQUIVALENT (metadata-only diffs)
-          UNEXPECTED DIFFERENCES
-        """
-        clone_dir = work / 'source'
-        built_gem_dir = work / 'raw-built-gem'
-        built_gem_dir.mkdir(exist_ok=True)
-
-        p(f'=== Reproducible build: {pkgname} {version} ===')
-        p(f'Sandbox: {sandbox}')
-        p('')
-
-        if not clone_dir.is_dir():
-            return shared.finish_reproducible_build(
-                p, work, 'SKIPPED (no source clone)')
-
+    def _repro_setup(
+        self, clone_dir: Path, work: Path, p: 'shared.Printer',
+    ) -> 'Path | str':
         rc_rv, rv_out, _ = shared.run_cmd(['ruby', '--version'], timeout=10)
         ruby_ver = (
-            shared.sanitize_line(rv_out.strip())
-            if rc_rv == 0 else 'unknown')
+            shared.sanitize_line(rv_out.strip()) if rc_rv == 0 else 'unknown')
         p(f'RUBY_VERSION: {ruby_ver}')
-
         gemspec_candidates = list(clone_dir.rglob('*.gemspec'))
         if not gemspec_candidates:
-            return shared.finish_reproducible_build(
-                p, work, 'SKIPPED (no gemspec in source)')
+            return 'SKIPPED (no gemspec in source)'
         source_gemspec = gemspec_candidates[0].relative_to(clone_dir)
         p(f'SOURCE_GEMSPEC: {shared.sanitize_line(str(source_gemspec))}')
+        return clone_dir
 
-        build_log_path = work / 'raw-build-output.txt'
-
+    def _repro_run_build(
+        self, build_root: Path, built_dir: Path, sandbox: str,
+    ) -> 'tuple[int, str] | None':
         rc_rv2, rv2_out, _ = shared.run_cmd(
             ['ruby', '-e', 'puts RUBY_VERSION'], timeout=5)
         ruby_img_tag = rv2_out.strip() if rc_rv2 == 0 else '3'
         parts = ruby_img_tag.split('.')
         ruby_img_tag = '.'.join(parts[:2]) if len(parts) >= 2 else parts[0]
-
+        # Re-locate the gemspec so the cmd= list can reference it.
+        # _repro_setup already verified at least one exists.
+        source_gemspec = list(build_root.rglob('*.gemspec'))[0].relative_to(
+            build_root)
         # Shell injection defense: two separate paths, neither uses
         # source_gemspec in a shell string.
         #   bwrap/firejail: cmd= list is exec'd directly (no shell), so a
@@ -1336,8 +1182,8 @@ class Hooks(shared.EcosystemHooks):
         #   docker/podman: container_shell_cmd is a hardcoded string that
         #     uses "*.gemspec" (a shell glob), independent of the discovered
         #     filename entirely.
-        build_result = shared.run_sandboxed(
-            sandbox, clone_dir, built_gem_dir,
+        return shared.run_sandboxed(
+            sandbox, build_root, built_dir,
             '',  # shell_cmd unused for bwrap/firejail; cmd= used instead
             f'ruby:{ruby_img_tag}',
             cmd=['gem', 'build', '{src}/' + str(source_gemspec),
@@ -1349,35 +1195,23 @@ class Hooks(shared.EcosystemHooks):
                 'gem build *.gemspec && cp *.gem {out}/'
             ),
         )
-        if build_result is None:
-            return shared.finish_reproducible_build(
-                p, work,
-                'SKIPPED (no sandbox available:'
-                ' install bwrap, firejail, docker, or podman)',
-            )
-        rc_b, combined = build_result
-        build_log_path.write_text(
-            combined, encoding='utf-8', errors='replace')
-        build_ok = (rc_b == 0)
 
-        p(f'BUILD_STATUS: {"yes" if build_ok else "no"}')
-
-        if not build_ok:
-            return shared.finish_reproducible_build(
-                p, work, 'INCONCLUSIVE (build failed)')
-
-        built_gems = list(built_gem_dir.glob('*.gem'))
+    def _repro_compare(
+        self,
+        pkgname: str,
+        version: str,
+        built_dir: Path,
+        work: Path,
+        p: 'shared.Printer',
+    ) -> tuple[str, int, int]:
+        built_gems = list(built_dir.glob('*.gem'))
         if not built_gems:
             return shared.finish_reproducible_build(
                 p, work, 'INCONCLUSIVE (no .gem produced)')
         built_gem = built_gems[0]
-
         built_sha = shared.sha256_file(built_gem)
-        repro = shared.compare_repro_sha256(built_sha, work, p)
-        if repro is not None:
+        if (repro := shared.compare_repro_sha256(built_sha, work, p)) is not None:
             return repro
-
-        # Hashes differ; unpack and compare contents
         built_unpacked_parent = work / 'raw-built-unpacked'
         built_unpacked_parent.mkdir(exist_ok=True)
         shared.run_cmd(
@@ -1385,17 +1219,14 @@ class Hooks(shared.EcosystemHooks):
              '--target', str(built_unpacked_parent)],
             timeout=60,
         )
-
         built_unpacked = built_unpacked_parent / f'{pkgname}-{version}'
         if not built_unpacked.is_dir():
             built_unpacked = built_unpacked_parent
-
         dist_unpacked = work / 'unpacked' / f'{pkgname}-{version}'
         if not dist_unpacked.is_dir():
             return shared.finish_reproducible_build(
                 p, work,
                 'INCONCLUSIVE (hashes differ, no dist unpacked dir)')
-
         rc_diff, diff_out, _ = shared.run_cmd(
             ['diff', '-r', str(built_unpacked), str(dist_unpacked),
              '--exclude=*.gem'],
@@ -1403,13 +1234,13 @@ class Hooks(shared.EcosystemHooks):
         )
         (work / 'raw-repro-diff.txt').write_text(
             diff_out, encoding='utf-8', errors='replace')
-
         diff_line_count = len(diff_out.splitlines())
         p(f'CONTENT_DIFF_LINES: {diff_line_count}')
-
         if diff_line_count == 0:
             return shared.finish_reproducible_build(
                 p, work, 'EXACTLY REPRODUCIBLE (content match)')
-
         return shared.classify_repro_diffs(
             diff_out, p, work, _RE_REPRO_CODE, _RE_REPRO_META)
+
+
+Analyzer = RubyAnalyzer   # used by dep_review.py for instantiation

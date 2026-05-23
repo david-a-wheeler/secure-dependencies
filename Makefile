@@ -1,6 +1,6 @@
 PYTHON ?= python3
 
-all: test syntax_valid emdash validate
+all: test syntax_valid typecheck emdash validate
 	@echo Verification complete
 
 test:
@@ -10,6 +10,15 @@ syntax_valid:
 	@echo "Checking Python syntax of scripts:"
 	$(PYTHON) -m py_compile scripts/*.py
 	@echo 'OK, no syntax errors found'
+
+typecheck:
+	@echo "Type-checking Python scripts with pyright:"
+	@if command -v pyright > /dev/null 2>&1; then \
+	    pyright scripts/; \
+	    echo 'OK, no type errors found'; \
+	else \
+	    echo 'WARNING: pyright not found; skipping (install: pip install pyright)'; \
+	fi
 
 emdash:
 	@echo "Finding lines in textual format files with em or en dashes:"
@@ -26,4 +35,4 @@ validate:
 	@echo "Validating SKILL.md frontmatter:"
 	$(PYTHON) scripts/validate_skill.py
 
-.PHONY: all test syntax_valid emdash validate
+.PHONY: all test syntax_valid typecheck emdash validate

@@ -29,14 +29,14 @@ These add network calls to `fetch_all_registry_data`. See
 `docs/shai-halud-ideas.md` for full spec. Summary:
 
 **Idea 14: Publisher velocity anomaly (`PUBLISHER_VELOCITY_ANOMALOUS`)**
-- File: `hooks_js.py`, `fetch_all_registry_data()`
+- File: `analyzer_js.py`, `fetch_all_registry_data()`
 - API: `GET https://registry.npmjs.org/-/v1/search?text=maintainer:<user>&size=250`
 - Count packages whose `date` field is within the last 72 hours. Threshold: 10.
 - Combine with account-age (from `time.created`): new account + high velocity = HIGH.
 - One extra network call per analysis session.
 
 **Idea 15: SLSA provenance issuer validation (`SIGSTORE_REPO_MISMATCH`)**
-- File: `hooks_js.py`, `fetch_all_registry_data()`
+- File: `analyzer_js.py`, `fetch_all_registry_data()`
 - API: `GET https://registry.npmjs.org/-/package/<encoded-name>/provenance`
 - Compare `sourceRepositoryURI` against the declared `source_url` (already
   available from `_extract_source_url()`). Mismatch = forged provenance.
@@ -65,7 +65,7 @@ call and ETag caching logic is identical regardless of ecosystem.
 
 - `docs/shai-halud-ideas.md` -- full spec with implementation notes; status updated
 - `scripts/analysis_shared.py` -- shared constants and helpers
-- `scripts/hooks_js.py` -- JS/npm ecosystem
-- `scripts/hooks_python.py` -- Python/PyPI ecosystem
-- `scripts/hooks_ruby.py` -- Ruby/RubyGems ecosystem
+- `scripts/analyzer_js.py` -- JS/npm ecosystem
+- `scripts/analyzer_python.py` -- Python/PyPI ecosystem
+- `scripts/analyzer_ruby.py` -- Ruby/RubyGems ecosystem
 - `scripts/tests/` -- run with `python3 -m unittest discover tests -q`

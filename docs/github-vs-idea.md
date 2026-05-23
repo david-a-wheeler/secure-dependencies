@@ -64,12 +64,12 @@ To detect and prevent malicious content *before* installation:
   as the "Mini Shai-Hulud" worm used it to bypass Node.js-based security tools
   [Plate2025, Lakshmanan2026].
   - *(Tool: (1) already implemented for install hooks -- `INSTALL_BOOTSTRAP_RUNTIME` in
-    `hooks_js.py:_INSTALL_CMD_CHECKS`. Runtime process monitoring of live IDE processes is an
+    `analyzer_js.py:_INSTALL_CMD_CHECKS`. Runtime process monitoring of live IDE processes is an
     EDR feature outside our scope.)*
 - **Shell Command Auditing:** Alert on VS Code child processes executing shell commands related to
   "MCP setup tasks" or hidden directory creation [Kurmi2026, Lakshmanan2026].
   - *(Tool: (1) already implemented for install hooks -- `INSTALL_IDE_CONFIG_WRITE` in
-    `hooks_js.py:_INSTALL_CMD_CHECKS` catches IDE config writes. Live process auditing is EDR.)*
+    `analyzer_js.py:_INSTALL_CMD_CHECKS` catches IDE config writes. Live process auditing is EDR.)*
 - **Credential Access:** Monitor for unauthorized access to `~/.aws/credentials`, `~/.ssh/`, or
   CLI tools like `op` (1Password) and `bw` (Bitwarden) [Kurmi2026, Lakshmanan2026].
   - *(Tool: (1) already implemented -- `INSTALL_CREDENTIAL_CLI` (install hooks), `credential-env-vars`
@@ -84,7 +84,7 @@ To detect and prevent malicious content *before* installation:
 - **Dead-Man's Switch:** The worm includes logic to detect token revocation. If it detects its
   harvested tokens are revoked within 24 hours without the device being isolated, it may attempt
   to execute `rm -rf ~/` [Dixit2026, McCarthy2026].
-  - *(Tool: (1) already implemented -- `INSTALL_DESTRUCTIVE_WIPE` in `hooks_js.py:_INSTALL_CMD_CHECKS`
+  - *(Tool: (1) already implemented -- `INSTALL_DESTRUCTIVE_WIPE` in `analyzer_js.py:_INSTALL_CMD_CHECKS`
     catches `rm -rf ~/` and similar patterns in install hooks.)*
 - **Isolation First:** Always isolate the compromised workstation from the network *before* revoking
   credentials.
@@ -112,7 +112,7 @@ Attackers use alternative runtimes to bypass static analysis or security filters
     the host environment.
 
 > **Tool assessment:** *(1) Implemented* -- `shadow-runtime` added to `DANGEROUS_PATTERNS` in all
-> three ecosystems (`hooks_js.py`, `hooks_python.py`, `hooks_ruby.py`), using shared constant
+> three ecosystems (`analyzer_js.py`, `analyzer_python.py`, `analyzer_ruby.py`), using shared constant
 > `SHADOW_RUNTIME_NAMES_RE` (`bun|deno|pkgx|tsx|ts-node`) in `analysis_shared.py`. Catches
 > exec/spawn calls invoking these runtimes across all source files, complementing the existing
 > install-hook check (`INSTALL_BOOTSTRAP_RUNTIME`). Cross-language: same pattern applied to Ruby
@@ -231,7 +231,7 @@ found in production code or install hooks.
       `mini-shai-hulud-reversed-string`, and `mini-shai-hulud-c2-url` added to
       `ADVERSARIAL_PATTERNS` and `ADVERSARIAL_ABORT_LABELS` in `analysis_shared.py`.*
 2.  **`DANGEROUS_PATTERNS` Expansion:** Add the "Kitty" and "Token-Monitor" patterns to
-    language-specific hooks (`hooks_js.py`, `hooks_python.py`).
+    language-specific hooks (`analyzer_js.py`, `analyzer_python.py`).
     - *(1) IMPLEMENTED: `MINI_SHAI_HULUD_PATHS_RE` constant added to `analysis_shared.py`
       covering `\.local/share/kitty/cat\.py`, `kitty-monitor`, `gh-token-monitor`. Referenced
       as `mini-shai-hulud-paths` in all three ecosystem `DANGEROUS_PATTERNS` lists.*

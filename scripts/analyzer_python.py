@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# hooks_python.py: Python language operations for the dependency analysis driver.
+# analyzer_python.py: Python language operations for the dependency analysis driver.
 #
 # Handles Python package formats (wheel .whl, source distribution .tar.gz)
 # and the PyPI registry API. Used for --from pypi; can be reused for other
@@ -64,211 +64,12 @@ _RE_UV_GIT_SOURCE = re.compile(
 
 
 # ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-def _find_dist_info(unpacked_dir: Path, pkgname: str) -> Path | None:
-    """Find the .dist-info directory inside an unpacked wheel.
-
-    Normalizes pkgname (PEP 427: hyphens become underscores, case-insensitive).
-
-    >>> # Returns None for a nonexistent directory
-    """
-    if not unpacked_dir.is_dir():
-        return None
-    norm = _NORM_RE.sub('_', pkgname).lower()
-    first_dist_info: Path | None = None
-    for candidate in unpacked_dir.iterdir():
-        if candidate.is_dir() and candidate.name.endswith('.dist-info'):
-            if first_dist_info is None:
-                first_dist_info = candidate
-            cname = _NORM_RE.sub('_', candidate.name.split('-')[0]).lower()
-            if cname == norm:
-                return candidate
-    return first_dist_info
-
-
-def _parse_metadata(metadata_text: str) -> dict:
-    """Parse an RFC 822-style METADATA or PKG-INFO file.
-
-    Returns a dict where multi-valued headers (like Requires-Dist) are lists
-    and single-valued headers are strings.
-
-    >>> m = _parse_metadata('Name: foo\\nVersion: 1.0\\nRequires-Dist: bar\\nRequires-Dist: baz\\n')
-    >>> m['Name']
-    'foo'
-    >>> m['Requires-Dist']
-    ['bar', 'baz']
-    """
-    result: dict[str, str | list[str]] = {}
-    multi_keys = {
-        'Requires-Dist', 'Classifier', 'Project-URL', 'Provides-Extra',
-        'Requires-External', 'Provides', 'Obsoletes', 'Requires',
-    }
-    for line in metadata_text.splitlines():
-        if ':' not in line:
-            continue
-        # Stop at the long description separator
-        if line.strip() == 'UNKNOWN' or line.startswith('        '):
-            continue
-        key, _, value = line.partition(':')
-        key = key.strip()
-        value = value.strip()
-        if not key or ' ' in key:
-            continue
-        if key in multi_keys:
-            lst = result.setdefault(key, [])
-            if isinstance(lst, list):
-                lst.append(value)
-            else:
-                result[key] = [str(lst), value]
-        else:
-            if key not in result:
-                result[key] = value
-    return result
-
-
-def _extract_source_url_from_meta(meta: dict) -> str:
-    """Extract source/homepage URL from parsed METADATA dict.
-
-    Tries Project-URL: Source, Repository, Homepage in that order,
-    then falls back to the Home-page header.
-
-    >>> _extract_source_url_from_meta({'Project-URL': ['Source, https://github.com/foo/bar']})
-    'https://github.com/foo/bar'
-    >>> _extract_source_url_from_meta({'Home-page': 'https://example.com'})
-    'https://example.com'
-    >>> _extract_source_url_from_meta({})
-    ''
-    """
-    project_urls = meta.get('Project-URL', [])
-    if isinstance(project_urls, str):
-        project_urls = [project_urls]
-    # Priority: Source > Repository > Code > Homepage
-    order = ('source', 'repository', 'code', 'homepage')
-    by_label: dict[str, str] = {}
-    for entry in project_urls:
-        if ',' in entry:
-            label, _, url = entry.partition(',')
-            by_label[label.strip().lower()] = url.strip()
-    for label in order:
-        if label in by_label:
-            return by_label[label]
-    # Also check direct Project-URL entries
-    hp = meta.get('Home-page', '') or meta.get('home-page', '')
-    if isinstance(hp, list):
-        hp = hp[0] if hp else ''
-    return str(hp).strip()
-
-
-def _extract_license_from_meta(meta: dict) -> str:
-    """Extract raw license string from METADATA dict.
-
-    Returns the License header value; falls back to extracting from
-    Classifier: License :: OSI Approved :: <SPDX_ID> entries.
-
-    >>> _extract_license_from_meta({'License': 'MIT'})
-    'MIT'
-    >>> _extract_license_from_meta({'Classifier': ['License :: OSI Approved :: MIT License']})
-    'MIT License'
-    >>> _extract_license_from_meta({})
-    ''
-    """
-    lic = meta.get('License', '') or ''
-    if isinstance(lic, list):
-        lic = lic[0] if lic else ''
-    lic = str(lic).strip()
-    if lic and lic.upper() != 'UNKNOWN':
-        return lic
-    classifiers = meta.get('Classifier', [])
-    if isinstance(classifiers, str):
-        classifiers = [classifiers]
-    for clf in classifiers:
-        m = re.search(r'License\s*::\s*OSI Approved\s*::\s*(.+)', clf)
-        if m:
-            return m.group(1).strip()
-        m2 = re.search(r'License\s*::\s*(.+)', clf)
-        if m2:
-            return m2.group(1).strip()
-    return ''
-
-
-def _unpack_pkg(
-    pkg_file: Path,
-    target_dir: Path,
-    failures: list[str],
-    failure_key: str,
-) -> str:
-    """Unpack a wheel (.whl) or sdist (.tar.gz/.zip) into target_dir.
-
-    Returns a dist_type string: 'wheel', 'sdist', 'sdist-zip', or 'unknown'.
-    Uses Python stdlib only (tarfile; zip via shared.extract_zip_securely).
-    """
-    name = pkg_file.name
-    try:
-        if pkg_file.suffix == '.whl' or name.endswith('.zip'):
-            # extract_zip_securely enforces size limits, filters symlinks, and
-            # checks paths during extraction (no post-extraction race window).
-            shared.extract_zip_securely(pkg_file, target_dir)
-            return 'wheel' if pkg_file.suffix == '.whl' else 'sdist-zip'
-        if name.endswith(('.tar.gz', '.tgz', '.tar.bz2', '.tar.xz')):
-            with tarfile.open(str(pkg_file), 'r:*') as tf:
-                members = []
-                for m in tf.getmembers():
-                    # Strip top-level directory (typically pkgname-version/)
-                    parts = Path(m.name).parts
-                    if len(parts) > 1:
-                        m.name = '/'.join(parts[1:])
-                        # Guard against path traversal
-                        if '..' in Path(m.name).parts:
-                            continue
-                        members.append(m)
-                shared.tarfile_extractall_safe(tf, target_dir, members)
-            # tarfile_extractall_safe already filters symlinks; belt-and-suspenders.
-            shared.remove_symlinks(target_dir)
-            return 'sdist'
-    except shared.ArchiveSecurityError as exc:
-        # An ArchiveSecurityError (size limit, file count, path traversal, or
-        # symlink in a zip) is a strong indicator of a malicious package: benign
-        # packages do not contain zip bombs or path-traversal payloads.
-        failures.append(f'SECURITY_VIOLATION:{failure_key}: {exc}')
-    except Exception as exc:
-        failures.append(f'{failure_key}: {exc}')
-    return 'unknown'
-
-
-def _get_pkg_file(directory: Path, pkgname: str, version: str) -> Path | None:
-    """Find the downloaded package file (wheel preferred, then sdist)."""
-    # Wheels use normalized names (hyphens to underscores, case-insensitive)
-    norm = _NORM_RE.sub('_',pkgname)
-    ver_norm = _NORM_RE.sub('_',version)
-    # Search in order of preference: wheels first, then source dists
-    for pattern in ('*.whl', '*.tar.gz', '*.tar.bz2', '*.tar.xz', '*.zip'):
-        candidates = list(directory.glob(pattern))
-        if len(candidates) == 1:
-            return candidates[0]
-        # Multiple candidates: pick one matching name+version
-        for c in candidates:
-            cname = _NORM_RE.sub('_',c.stem.split('-')[0]).lower()
-            if cname == norm.lower():
-                return c
-        if candidates:
-            return candidates[0]
-    return None
-
-
-# Size thresholds for Python install scripts (setup.py).
-# Even numpy's historically large setup.py was under 1000 lines;
-# 40 KB or 1000 lines is extremely unusual for any legitimate package.
-_SETUP_PY_WARN_BYTES = 40_000
-_SETUP_PY_WARN_LINES = 1_000
-
-
-# ---------------------------------------------------------------------------
 # Public API: called by dep_review.py
 # ---------------------------------------------------------------------------
 
-class Hooks(shared.EcosystemHooks):
+class PythonAnalyzer(shared.EcosystemAnalyzer):
+    """EcosystemAnalyzer implementation for Python packages (PyPI/wheels)."""
+
     ECOSYSTEM = 'python'
     OSV_ECOSYSTEM = 'PyPI'
     OSS_REBUILD_ECOSYSTEM = 'pypi'
@@ -284,55 +85,56 @@ class Hooks(shared.EcosystemHooks):
     MANIFEST_FILE = 'pyproject-metadata.txt'
 
     # Human-readable summary of what DANGEROUS_PATTERNS scans for.
-    DANGEROUS_WHAT = (
-        'eval/exec variants, shell execution (os.system, subprocess with shell=True), '
-        'obfuscated execution, unsafe deserialization (pickle, yaml.load, marshal), '
-        'network calls at import scope, credential env-var access, home-dir writes, '
-        'dynamic imports on external input, atexit/registration hooks, '
-        'self-publish (worm propagation), IDE config writes, cloud secret-manager API calls, '
-        'shadow runtimes (bun/deno/pkgx spawned from source), '
-        'cross-language spawn (curl/wget/nc as second-stage loaders), '
-        'GitHub raw-content fetch by direct commit SHA (orphan-commit injection), '
-        'GitHub commit-search API used as a C2 dead-drop channel, '
-        'Discord token format (harvested credential), '
-        'string-split obfuscation (char-by-char keyword assembly), '
-        'unusually long lines (embedded payload or single-line obfuscation), '
-        'reverse-shell indicators (bash /dev/tcp, nc -e, socat EXEC), '
-        'cron/systemd/LaunchAgent persistence, '
-        'cryptominer tools and Stratum mining protocol'
-    )
-
-    DANGEROUS_PATTERNS: list[tuple[str, str]] = [
+    # ReDoS prevention (CWE-400): all patterns use bounded quantifiers so that
+    # worst-case PCRE backtracking is O(bound^2) rather than O(n^2) or worse.
+    # Unbounded character-class repetitions ([^x]+, [^x]*) are capped with
+    # {1,N} or {0,N}.  See AGENTS.md for the full policy.
+    DANGEROUS_PATTERNS: list[tuple[str, str, str]] = [
         ('eval-exec',
-         r'\b(?:eval|exec)\s*\('),
+         r'\b(?:eval|exec)\s*\(',
+         'eval/exec variants'),
         ('shell-exec',
-         r'\b(?:os\.system|os\.popen|commands\.getoutput)\s*\('),
+         r'\b(?:os\.system|os\.popen|commands\.getoutput)\s*\(',
+         'shell execution (os.system, os.popen, commands.getoutput)'),
         ('subprocess-shell',
-         r'\bsubprocess\.(?:call|run|Popen|check_output|check_call)\b[^;#\n]*shell\s*=\s*True'),
+         r'\bsubprocess\.(?:call|run|Popen|check_output|check_call)\b[^;#\n]*shell\s*=\s*True',
+         'subprocess with shell=True'),
         ('obfuscated-exec',
          r'(?:base64\.b64decode|codecs\.decode|zlib\.decompress)\b'
-         r'(?:[^\n]{0,120})(?:eval|exec)\b'),
+         r'(?:[^\n]{0,120})(?:eval|exec)\b',
+         'obfuscated execution (base64/zlib decode into eval/exec)'),
         ('pickle-load',
-         r'\bpickle\.(?:load|loads|Unpickler)\b'),
+         r'\bpickle\.(?:load|loads|Unpickler)\b',
+         'unsafe deserialization via pickle'),
+        # yaml.load without a safe Loader argument.
+        # Variable-width lookbehinds are unsupported; use a lookahead instead.
+        # [^)]{0,200} bounds backtracking in the lookahead (ReDoS: O(200^2) max).
         ('unsafe-yaml',
-         # Match yaml.load(...) calls that do NOT pass a safe Loader argument.
-         # Variable-width lookbehinds are unsupported; use a lookahead to exclude safe forms.
-         r'\byaml\.load\s*\((?![^)]*\bLoader\s*=\s*yaml\.(?:SafeLoader|FullLoader|BaseLoader))'),
+         r'\byaml\.load\s*\((?![^)]{0,200}\bLoader\s*=\s*yaml\.(?:SafeLoader|FullLoader|BaseLoader))',
+         'unsafe YAML deserialization (yaml.load without SafeLoader)'),
         ('marshal-loads',
-         r'\bmarshal\.(?:load|loads)\b'),
+         r'\bmarshal\.(?:load|loads)\b',
+         'unsafe deserialization via marshal'),
         ('network-at-load-scope',
-         r'^\s*(?:urllib\.request\.|requests\.|http\.client\.|httpx\.|aiohttp\.|socket\.|ftplib\.|smtplib\.)'),
+         r'^\s*(?:urllib\.request\.|requests\.|http\.client\.|httpx\.|aiohttp\.|socket\.|ftplib\.|smtplib\.)',
+         'network calls at import scope'),
         ('credential-env-vars',
          r'os\.environ\s*(?:\[|\s*\.get\s*\()\s*["\'][A-Z_]*(?:'
-         + shared.CRED_KEYWORDS_RE + r')[A-Z_]*["\']'),
+         + shared.CRED_KEYWORDS_RE + r')[A-Z_]*["\']',
+         'credential environment variable access (AWS/cloud keys)'),
+        # [^)]{0,200} rather than [^)]* to cap backtracking (ReDoS: O(200^2) max).
         ('home-or-shell-write',
-         r'(?:open|io\.open|pathlib\.Path)\s*\([^)]*["\'](?:'
-         + shared.HOME_PATHS_RE + r')'),
+         r'(?:open|io\.open|pathlib\.Path)\s*\([^)]{0,200}["\'](?:'
+         + shared.HOME_PATHS_RE + r')',
+         'home-dir or shell-config writes'),
+        # [^)]{0,200} caps backtracking before the keyword alternatives.
         ('dynamic-import',
-         r'\b(?:importlib\.import_module|__import__)\s*\([^)]*'
-         r'(?:request|user|input|argv|environ|getenv)\b'),
+         r'\b(?:importlib\.import_module|__import__)\s*\([^)]{0,200}'
+         r'(?:request|user|input|argv|environ|getenv)\b',
+         'dynamic imports on external input (importlib/__import__ with user data)'),
         ('atexit-hooks',
-         r'^\s*(?:import\s+atexit\b|atexit\.register\s*\()'),
+         r'^\s*(?:import\s+atexit\b|atexit\.register\s*\()',
+         'atexit/cleanup hook registration'),
         # Worm propagation: publishing to PyPI from inside an install hook.
         # Two twine forms: shell string "twine upload" and list ["twine","upload"].
         ('self-publish',
@@ -341,10 +143,8 @@ class Hooks(shared.EcosystemHooks):
          r'|\bpoetry\s+publish\b'
          r'|\bflit\s+publish\b'
          r'|\bhatch\s+publish\b'
-         r'|\bpython[^\n]{0,60}setup\.py[^\n]{0,40}\bupload\b'),
-        # Persistence: writing to IDE or AI-tool config directories.
-        ('ide-config-write', shared.IDE_CONFIG_PATHS_RE),
-        # Credential harvesting via cloud secret-manager SDKs or direct API calls.
+         r'|\bpython[^\n]{0,60}setup\.py[^\n]{0,40}\bupload\b',
+         'self-publish worm propagation (twine/poetry/flit/hatch upload from install hook)'),
         # boto3 calls are not caught by network-at-load-scope (which checks urllib etc.).
         # Shared provider hostnames come from shared.CLOUD_SECRET_HOSTS_RE.
         ('cloud-secret-api',
@@ -353,70 +153,236 @@ class Hooks(shared.EcosystemHooks):
          r'|google\.cloud\.secretmanager'
          r'|from\s+google\.cloud\s+import\s+secretmanager\b'
          r'|azure\.keyvault\.secrets\b'
-         r'|' + shared.CLOUD_SECRET_HOSTS_RE),
-        # Bulk env-var serialization: harvest pattern that dumps the entire
-        # environment to a string or structured object.  (?:dict\s*\(\s*)?
-        # is a short optional prefix (no backtracking cascade) that matches
-        # json.dumps(dict(os.environ)) as well as json.dumps(os.environ).
+         r'|' + shared.CLOUD_SECRET_HOSTS_RE,
+         'cloud secret-manager API calls (boto3, GCP Secret Manager, Azure Key Vault)'),
+        # (?:dict\s*\(\s*)? is a short optional prefix (no backtracking cascade)
+        # that matches json.dumps(dict(os.environ)) as well as json.dumps(os.environ).
         ('env-enumeration',
-         r'(?:json\.dumps|pprint\.pformat)\s*\(\s*(?:dict\s*\(\s*)?os\.environ\b'),
-        # Mini Shai-Hulud campaign: backdoor install path, LaunchAgent name,
-        # and dead-man's-switch script. No legitimate use in package code.
-        ('mini-shai-hulud-paths', shared.MINI_SHAI_HULUD_PATHS_RE),
-        # Exfiltration relay services and known campaign C2 domains.
-        ('exfil-relay-domain', shared.EXFIL_RELAY_DOMAINS_RE),
-        # Shadow runtimes: subprocess/os.system invoking bun/deno/pkgx etc.
-        # Highly suspicious in a Python package; no legitimate use case.
+         r'(?:json\.dumps|pprint\.pformat)\s*\(\s*(?:dict\s*\(\s*)?os\.environ\b',
+         'bulk environment variable serialization (credential harvest)'),
+        # [^)]{0,300} bounds backtracking to O(300) per anchor (safe).
         ('shadow-runtime',
          r'(?:subprocess\.(?:call|run|Popen|check_output|check_call)'
          r'|os\.(?:system|popen))\s*\([^)]{0,300}'
-         r'\b' + shared.SHADOW_RUNTIME_NAMES_RE + r'\b'),
-        # Cross-language spawn: Python invoking curl/wget/nc.
+         r'\b' + shared.SHADOW_RUNTIME_NAMES_RE + r'\b',
+         'shadow runtime invocation (bun/deno/pkgx spawned from source)'),
         # Python has requests/urllib; spawning curl/wget/nc is a strong
         # signal of a second-stage payload downloader.
         ('cross-lang-spawn',
          r'(?:subprocess\.(?:call|run|Popen|check_output|check_call)'
          r'|os\.(?:system|popen))\s*\([^)]{0,300}'
-         r'\b' + shared.CROSS_LANG_TOOLS_RE + r'\b'),
-        # Orphan-commit fetch: source file fetches from GitHub by a direct
-        # 40-hex commit SHA alongside a fetch verb on the same line.
-        # Python packages have no legitimate reason to download by SHA;
-        # requests/urllib are native and should use versioned releases.
-        ('github-fetch-by-sha', shared.GITHUB_SHA_FETCH_RE),
-        # GitHub commit-search API used as a C2 dead-drop channel.
-        # The specific ?q=firedalazer form is in ADVERSARIAL_PATTERNS (abort);
-        # this catches the general endpoint for novel campaign variants.
-        ('github-commit-search-c2', shared.GITHUB_COMMIT_SEARCH_RE),
-        # Discord bot token embedded in source: likely a harvested credential
-        # or token-extraction regex.  24.6.27 base64 format; exact quantifiers.
-        ('discord-token-format', shared.DISCORD_TOKEN_RE),
-        # String-split obfuscation: 5+ single chars joined by + to assemble
-        # a keyword character by character, evading simple string-match scans.
-        ('string-split-obfuscation', shared.STRING_SPLIT_RE),
-        # Unusually long lines: may embed base64/hex payloads or
-        # single-line obfuscated code.  Python source rarely exceeds this.
-        ('long-line-obfuscation', shared.LONG_LINE_RE),
-        # Reverse-shell: bash /dev/tcp redirect, nc -e, socat EXEC.
-        ('reverse-shell', shared.REVERSE_SHELL_RE),
-        # Cron/systemd/LaunchAgent persistence.
-        ('cron-persistence', shared.CRON_PERSISTENCE_RE),
-        ('system-persistence', shared.SYSTEM_PERSISTENCE_RE),
-        # Cryptominer: named miner binaries or Stratum pool protocol.
-        ('cryptominer', shared.CRYPTOMINER_RE),
+         r'\b' + shared.CROSS_LANG_TOOLS_RE + r'\b',
+         'cross-language spawn (curl/wget/nc as second-stage downloader)'),
     ]
 
+    # ReDoS prevention: diff lines start with ^\+ so they are anchored, but
+    # .* before a keyword still causes O(n^2) backtracking on long lines.
+    # [^\n]{0,500} caps worst-case to O(500^2).  Two .* on the same pattern
+    # (keyword.*suffix) compounds to O(n^2) even for moderate line lengths;
+    # bounding both fixes it.
     DIFF_PATTERNS: list[tuple[str, str]] = [
+        # Two [^\n]{0,500} replace two .* to prevent the compounded O(n^2)
+        # backtracking of keyword.*suffix when neither keyword nor suffix appears.
         ('diff-sql-injection',
-         r'^\+.*\b(?:SELECT|INSERT|UPDATE|DELETE|WHERE|FROM|JOIN)\b.*["\x27]\s*\+'),
+         r'^\+[^\n]{0,500}\b(?:SELECT|INSERT|UPDATE|DELETE|WHERE|FROM|JOIN)\b[^\n]{0,500}["\x27]\s*\+'),
         ('diff-cmd-injection',
-         r'^\+.*(?:os\.system|subprocess\.(?:call|run|Popen)|shell\s*=\s*True)\s*[\(]'),
+         r'^\+[^\n]{0,500}(?:os\.system|subprocess\.(?:call|run|Popen)|shell\s*=\s*True)\s*[\(]'),
+        # [^"\x27]{6,200}: lower bound ensures a non-trivial value; upper bound
+        # prevents O(n^2) backtracking when no closing quote follows.
         ('diff-hardcoded-secrets',
-         r'^\+.*(?:password|passwd|secret|api_key|token)\s*=\s*["\x27][^"\x27]{6,}["\x27]'),
+         r'^\+[^\n]{0,500}(?:password|passwd|secret|api_key|token)\s*=\s*["\x27][^"\x27]{6,200}["\x27]'),
         ('diff-eval',
-         r'^\+.*(?:eval|exec)\s*\('),
+         r'^\+[^\n]{0,500}(?:eval|exec)\s*\('),
         ('diff-pickle',
-         r'^\+.*pickle\.(?:load|loads|Unpickler)\b'),
+         r'^\+[^\n]{0,500}pickle\.(?:load|loads|Unpickler)\b'),
     ]
+
+    # Size thresholds for setup.py.
+    # Even numpy's historically large setup.py was under 1000 lines;
+    # 40 KB or 1000 lines is extremely unusual for any legitimate package.
+    SETUP_PY_WARN_BYTES: int = 40_000
+    SETUP_PY_WARN_LINES: int = 1_000
+
+    def extract_source_url(self, raw_data: object) -> str:
+        """Extract source URL from a parsed METADATA dict.
+
+        Tries Project-URL: Source, Repository, Homepage in that order,
+        then falls back to the Home-page header.
+
+        >>> PythonAnalyzer(None).extract_source_url({'Project-URL': ['Source, https://github.com/foo/bar']})
+        'https://github.com/foo/bar'
+        >>> PythonAnalyzer(None).extract_source_url({'Home-page': 'https://example.com'})
+        'https://example.com'
+        >>> PythonAnalyzer(None).extract_source_url({})
+        ''
+        """
+        meta = raw_data if isinstance(raw_data, dict) else {}
+        project_urls = meta.get('Project-URL', [])
+        if isinstance(project_urls, str):
+            project_urls = [project_urls]
+        order = ('source', 'repository', 'code', 'homepage')
+        by_label: dict[str, str] = {}
+        for entry in project_urls:
+            if ',' in entry:
+                label, _, url = entry.partition(',')
+                by_label[label.strip().lower()] = url.strip()
+        for label in order:
+            if label in by_label:
+                return by_label[label]
+        hp = meta.get('Home-page', '') or meta.get('home-page', '')
+        if isinstance(hp, list):
+            hp = hp[0] if hp else ''
+        return str(hp).strip()
+
+    def extract_license(self, raw_data: object) -> str:
+        """Extract raw license string from a parsed METADATA dict.
+
+        Returns the License header value; falls back to Classifier entries.
+
+        >>> PythonAnalyzer(None).extract_license({'License': 'MIT'})
+        'MIT'
+        >>> PythonAnalyzer(None).extract_license({'Classifier': ['License :: OSI Approved :: MIT License']})
+        'MIT License'
+        >>> PythonAnalyzer(None).extract_license({})
+        ''
+        """
+        meta = raw_data if isinstance(raw_data, dict) else {}
+        lic = meta.get('License', '') or ''
+        if isinstance(lic, list):
+            lic = lic[0] if lic else ''
+        lic = str(lic).strip()
+        if lic and lic.upper() != 'UNKNOWN':
+            return lic
+        classifiers = meta.get('Classifier', [])
+        if isinstance(classifiers, str):
+            classifiers = [classifiers]
+        for clf in classifiers:
+            m = re.search(r'License\s*::\s*OSI Approved\s*::\s*(.+)', clf)
+            if m:
+                return m.group(1).strip()
+            m2 = re.search(r'License\s*::\s*(.+)', clf)
+            if m2:
+                return m2.group(1).strip()
+        return ''
+
+    def _find_dist_info(
+        self, unpacked_dir: Path, pkgname: str,
+    ) -> Path | None:
+        """Find the .dist-info directory inside an unpacked wheel.
+
+        Normalizes pkgname (PEP 427: hyphens become underscores,
+        case-insensitive).
+        """
+        if not unpacked_dir.is_dir():
+            return None
+        norm = _NORM_RE.sub('_', pkgname).lower()
+        first_dist_info: Path | None = None
+        for candidate in unpacked_dir.iterdir():
+            if candidate.is_dir() and candidate.name.endswith('.dist-info'):
+                if first_dist_info is None:
+                    first_dist_info = candidate
+                cname = _NORM_RE.sub('_', candidate.name.split('-')[0]).lower()
+                if cname == norm:
+                    return candidate
+        return first_dist_info
+
+    def _parse_metadata(self, metadata_text: str) -> dict:
+        """Parse an RFC 822-style METADATA or PKG-INFO file.
+
+        Returns a dict where multi-valued headers (like Requires-Dist) are
+        lists and single-valued headers are strings.
+
+        >>> m = PythonAnalyzer(None)._parse_metadata('Name: foo\\nVersion: 1.0\\nRequires-Dist: bar\\nRequires-Dist: baz\\n')
+        >>> m['Name']
+        'foo'
+        >>> m['Requires-Dist']
+        ['bar', 'baz']
+        """
+        result: dict[str, str | list[str]] = {}
+        multi_keys = {
+            'Requires-Dist', 'Classifier', 'Project-URL', 'Provides-Extra',
+            'Requires-External', 'Provides', 'Obsoletes', 'Requires',
+        }
+        for line in metadata_text.splitlines():
+            if ':' not in line:
+                continue
+            if line.strip() == 'UNKNOWN' or line.startswith('        '):
+                continue
+            key, _, value = line.partition(':')
+            key = key.strip()
+            value = value.strip()
+            if not key or ' ' in key:
+                continue
+            if key in multi_keys:
+                lst = result.setdefault(key, [])
+                if isinstance(lst, list):
+                    lst.append(value)
+                else:
+                    result[key] = [str(lst), value]
+            else:
+                if key not in result:
+                    result[key] = value
+        return result
+
+    def _unpack_pkg(
+        self,
+        pkg_file: Path,
+        target_dir: Path,
+        failures: list[str],
+        failure_key: str,
+    ) -> str:
+        """Unpack a wheel (.whl) or sdist (.tar.gz/.zip) into target_dir.
+
+        Returns a dist_type string: 'wheel', 'sdist', 'sdist-zip', or
+        'unknown'. Uses Python stdlib only (tarfile; zip via
+        shared.extract_zip_securely).
+        """
+        name = pkg_file.name
+        try:
+            if pkg_file.suffix == '.whl' or name.endswith('.zip'):
+                # extract_zip_securely enforces size limits, filters symlinks,
+                # and checks paths during extraction (no race window).
+                shared.extract_zip_securely(pkg_file, target_dir)
+                return 'wheel' if pkg_file.suffix == '.whl' else 'sdist-zip'
+            if name.endswith(('.tar.gz', '.tgz', '.tar.bz2', '.tar.xz')):
+                with tarfile.open(str(pkg_file), 'r:*') as tf:
+                    members = []
+                    for m in tf.getmembers():
+                        parts = Path(m.name).parts
+                        if len(parts) > 1:
+                            m.name = '/'.join(parts[1:])
+                            if '..' in Path(m.name).parts:
+                                continue
+                            members.append(m)
+                    shared.tarfile_extractall_safe(tf, target_dir, members)
+                # tarfile_extractall_safe already filters symlinks;
+                # belt-and-suspenders.
+                shared.remove_symlinks(target_dir)
+                return 'sdist'
+        except shared.ArchiveSecurityError as exc:
+            # An ArchiveSecurityError (size limit, file count, path traversal,
+            # or symlink in a zip) is a strong indicator of a malicious package.
+            failures.append(f'SECURITY_VIOLATION:{failure_key}: {exc}')
+        except Exception as exc:
+            failures.append(f'{failure_key}: {exc}')
+        return 'unknown'
+
+    def _get_pkg_file(
+        self, directory: Path, pkgname: str, version: str,
+    ) -> Path | None:
+        """Find the downloaded package file (wheel preferred, then sdist)."""
+        norm = _NORM_RE.sub('_', pkgname)
+        for pattern in ('*.whl', '*.tar.gz', '*.tar.bz2', '*.tar.xz', '*.zip'):
+            candidates = list(directory.glob(pattern))
+            if len(candidates) == 1:
+                return candidates[0]
+            for c in candidates:
+                cname = _NORM_RE.sub('_', c.stem.split('-')[0]).lower()
+                if cname == norm.lower():
+                    return c
+            if candidates:
+                return candidates[0]
+        return None
 
     def get_lockfile_path(self, project_root: Path) -> Path:
         """Return the path to the first existing Python lockfile.
@@ -460,7 +426,7 @@ class Hooks(shared.EcosystemHooks):
 
         rc, _out, err = shared.run_cmd(dl_cmd, cwd=work, timeout=180)
 
-        pkg_file = _get_pkg_file(work, pkgname, version)
+        pkg_file = self._get_pkg_file(work, pkgname, version)
         sha256 = ''
         dist_type = 'unknown'
 
@@ -469,7 +435,7 @@ class Hooks(shared.EcosystemHooks):
             (work / 'package-hash.txt').write_text(
                 f'{sha256}  {pkg_file.name}\n', encoding='utf-8'
             )
-            dist_type = _unpack_pkg(pkg_file, unpacked_dir, failures, 'unpack-new')
+            dist_type = self._unpack_pkg(pkg_file, unpacked_dir, failures, 'unpack-new')
             if dist_type == 'unknown' and 'unpack-new' not in ' '.join(failures):
                 failures.append('unpack-new')
         else:
@@ -496,14 +462,8 @@ class Hooks(shared.EcosystemHooks):
         work: Path,
         failures: list[str],
         p: 'shared.Printer',
-    ) -> dict:
-        """Parse METADATA (wheel) or PKG-INFO (sdist); write manifest-analysis.txt.
-
-        Returns dict with keys: source_url, extensions, executables,
-        executables_list, post_install_msg, has_build_hooks, has_install_scripts,
-        runtime_dep_lines, manifest_license_raw, manifest_text,
-        manifest_extra_file, install_hook_context.
-        """
+    ) -> shared.PackageManifest:
+        """Parse METADATA (wheel) or PKG-INFO (sdist); write manifest-analysis.txt."""
         source_url = ''
         extensions = 'NO'
         executables = 'NO'
@@ -515,7 +475,7 @@ class Hooks(shared.EcosystemHooks):
         runtime_dep_lines: list[str] = []
 
         # Locate METADATA (wheel) or PKG-INFO (sdist)
-        dist_info = _find_dist_info(unpacked_dir, pkgname) if unpacked_dir.is_dir() else None
+        dist_info = self._find_dist_info(unpacked_dir, pkgname) if unpacked_dir.is_dir() else None
         metadata_file: Path | None = None
         meta: dict = {}
 
@@ -536,7 +496,7 @@ class Hooks(shared.EcosystemHooks):
             dest_meta = work / 'pyproject-metadata.txt'
             if metadata_file != dest_meta:
                 dest_meta.write_text(manifest_text, encoding='utf-8', errors='replace')
-            meta = _parse_metadata(manifest_text)
+            meta = self._parse_metadata(manifest_text)
         else:
             failures.append('metadata-missing')
 
@@ -598,6 +558,7 @@ class Hooks(shared.EcosystemHooks):
         # setup.py with code beyond bare metadata; pyproject.toml build hooks;
         # RECORD present (wheel has one) is normal but setup.py is a risk signal.
         install_script_files: list[tuple[str, Path]] = []
+        install_cmd_warnings: list[str] = []
         has_setup_py = False
         if unpacked_dir.is_dir():
             setup_py = unpacked_dir / 'setup.py'
@@ -612,7 +573,7 @@ class Hooks(shared.EcosystemHooks):
                 ))
                 _sp_size_warn = shared.report_install_script_size(
                     sp_text, 'setup.py', p,
-                    _SETUP_PY_WARN_BYTES, _SETUP_PY_WARN_LINES,
+                    self.SETUP_PY_WARN_BYTES, self.SETUP_PY_WARN_LINES,
                 )
                 if _sp_size_warn:
                     install_cmd_warnings.append(_sp_size_warn)
@@ -644,7 +605,6 @@ class Hooks(shared.EcosystemHooks):
             p('  (none declared)')
 
         # VCS dependency check: URL-based deps in Requires-Dist bypass PyPI.
-        install_cmd_warnings: list[str] = []
         _vcs_hash_deps: list[str] = []
         _vcs_named_deps: list[str] = []
         for rdl in runtime_dep_lines:
@@ -672,7 +632,7 @@ class Hooks(shared.EcosystemHooks):
             p(f'REQUIRES_PYTHON: {shared.sanitize_line(py_req)}')
 
         # Homepage / source URL
-        source_url = _extract_source_url_from_meta(meta)
+        source_url = self.extract_source_url(meta)
         hp_display = shared.sanitize_line(source_url) if source_url else '(not found)'
         p('')
         p(f'HOMEPAGE: {hp_display}')
@@ -684,7 +644,7 @@ class Hooks(shared.EcosystemHooks):
         p(f'AUTHOR: {shared.sanitize_line(str(author)[:200])}')
 
         # License
-        manifest_license_raw = _extract_license_from_meta(meta)
+        manifest_license_raw = self.extract_license(meta)
         p('')
         p(f'LICENSE_DECLARED: {shared.sanitize_line(manifest_license_raw) or "(not declared)"}')
 
@@ -739,21 +699,21 @@ class Hooks(shared.EcosystemHooks):
                 'Review install-scripts.txt if present, and confirm the build system is benign.'
             )
 
-        return {
-            'source_url': source_url,
-            'extensions': extensions,
-            'executables': executables,
-            'executables_list': executables_list,
-            'post_install_msg': post_install_msg,
-            'has_build_hooks': has_build_hooks,
-            'has_install_scripts': 'YES' if has_install_scripts else 'NO',
-            'runtime_dep_lines': runtime_dep_lines,
-            'manifest_license_raw': manifest_license_raw,
-            'manifest_text': manifest_text,
-            'manifest_extra_file': 'pyproject-metadata.txt',
-            'install_hook_context': install_hook_context,
-            'install_cmd_warnings': install_cmd_warnings,
-        }
+        return shared.PackageManifest(
+            source_url=source_url,
+            extensions=extensions,
+            executables=executables,
+            executables_list=executables_list,
+            post_install_msg=post_install_msg,
+            has_build_hooks=has_build_hooks,
+            has_install_scripts='YES' if has_install_scripts else 'NO',
+            runtime_dep_lines=runtime_dep_lines,
+            manifest_license_raw=manifest_license_raw,
+            manifest_text=manifest_text,
+            manifest_extra_file='pyproject-metadata.txt',
+            install_hook_context=install_hook_context,
+            install_cmd_warnings=install_cmd_warnings,
+        )
 
     def download_old(
         self,
@@ -802,7 +762,7 @@ class Hooks(shared.EcosystemHooks):
                     break
 
         if pkg_file_cached:
-            dist_type = _unpack_pkg(pkg_file_cached, old_dir, failures, 'unpack-old')
+            dist_type = self._unpack_pkg(pkg_file_cached, old_dir, failures, 'unpack-old')
             if dist_type != 'unknown':
                 ok = True
                 source = 'pip-cache'
@@ -819,9 +779,9 @@ class Hooks(shared.EcosystemHooks):
             dl_cmd += ['--', f'{pkgname}=={old_ver}']
             rc_dl, _, _ = shared.run_cmd(dl_cmd, cwd=raw_old, timeout=180)
             if rc_dl == 0:
-                pkg_file = _get_pkg_file(raw_old, pkgname, old_ver)
+                pkg_file = self._get_pkg_file(raw_old, pkgname, old_ver)
                 if pkg_file and pkg_file.is_file():
-                    dist_type = _unpack_pkg(pkg_file, old_dir, failures, 'unpack-old')
+                    dist_type = self._unpack_pkg(pkg_file, old_dir, failures, 'unpack-old')
                     if dist_type != 'unknown':
                         ok = True
                         source = 'fetched'
@@ -838,59 +798,25 @@ class Hooks(shared.EcosystemHooks):
 
         return {'ok': ok, 'source': source, 'unpacked_dir': old_dir}
 
-    def get_old_dep_lines(
-        self,
-        pkgname: str,
-        old_ver: str,
-        old_result: dict,
-    ) -> list[str]:
-        """Extract runtime Requires-Dist lines from the old version's METADATA.
-
-        Returns list of Requires-Dist strings (without extras markers).
-        """
-        if not old_result.get('ok'):
-            return []
-        old_unpacked = old_result.get('unpacked_dir')
-        if not old_unpacked or not Path(old_unpacked).is_dir():
-            return []
-        old_unpacked = Path(old_unpacked)
-        dist_info = _find_dist_info(old_unpacked, pkgname)
-        metadata_file = None
-        if dist_info and (dist_info / 'METADATA').is_file():
-            metadata_file = dist_info / 'METADATA'
-        elif (old_unpacked / 'PKG-INFO').is_file():
-            metadata_file = old_unpacked / 'PKG-INFO'
-        if not metadata_file:
-            return []
-        meta = _parse_metadata(metadata_file.read_text(encoding='utf-8', errors='replace'))
-        requires = meta.get('Requires-Dist', [])
-        if isinstance(requires, str):
-            requires = [requires]
-        return [r for r in requires if r and '; extra ==' not in str(r)]
-
-    def get_old_license(
-        self,
-        pkgname: str,
-        old_ver: str,
-        old_unpacked_dir: Path,
-    ) -> str | None:
-        """Extract raw license string from old version METADATA.
-
-        Returns the raw string or None if not found.
-        """
-        if not old_unpacked_dir or not Path(old_unpacked_dir).is_dir():
-            return None
-        old_unpacked_dir = Path(old_unpacked_dir)
-        dist_info = _find_dist_info(old_unpacked_dir, pkgname)
-        metadata_file = None
+    def _read_old_manifest(self, old_unpacked_dir: Path, pkgname: str) -> dict | None:
+        dist_info = self._find_dist_info(old_unpacked_dir, pkgname)
         if dist_info and (dist_info / 'METADATA').is_file():
             metadata_file = dist_info / 'METADATA'
         elif (old_unpacked_dir / 'PKG-INFO').is_file():
             metadata_file = old_unpacked_dir / 'PKG-INFO'
-        if not metadata_file:
+        else:
             return None
-        meta = _parse_metadata(metadata_file.read_text(encoding='utf-8', errors='replace'))
-        return _extract_license_from_meta(meta) or None
+        return self._parse_metadata(
+            metadata_file.read_text(encoding='utf-8', errors='replace'))
+
+    def _extract_old_dep_lines(self, old_unpacked_dir: Path, pkgname: str) -> list[str]:
+        meta = self._read_old_manifest(old_unpacked_dir, pkgname)
+        if meta is None:
+            return []
+        requires = meta.get('Requires-Dist', [])
+        if isinstance(requires, str):
+            requires = [requires]
+        return [r for r in requires if r and '; extra ==' not in str(r)]
 
     def fetch_all_registry_data(
         self,
@@ -1154,17 +1080,12 @@ class Hooks(shared.EcosystemHooks):
             '_dep_lines_old': dep_lines_old,
         }
 
-    def _detect_lockfile_format(self, filename: str) -> str:
-        """Return the lockfile format name for a given filename."""
-        if filename == 'requirements.txt':
-            return 'pip-requirements'
-        if filename == 'poetry.lock':
-            return 'poetry'
-        if filename == 'uv.lock':
-            return 'uv'
-        if filename == 'Pipfile.lock':
-            return 'pipenv'
-        return 'unknown'
+    LOCKFILE_FORMAT_MAP: dict[str, str] = {
+        'requirements.txt': 'pip-requirements',
+        'poetry.lock': 'poetry',
+        'uv.lock': 'uv',
+        'Pipfile.lock': 'pipenv',
+    }
 
     def _dep_in_lockfile(self, dep_name: str, norm_dep: str, lf_text: str, fmt: str) -> bool:
         """Return True if dep_name appears in the lockfile text for the given format.
@@ -1316,34 +1237,26 @@ class Hooks(shared.EcosystemHooks):
         concerns: list[str] = []
         notes: list[str] = []
         pkg_lower = pkgname.lower()
-        norm_pkg = _NORM_RE.sub('_',pkg_lower)
+        norm_pkg = _NORM_RE.sub('_', pkg_lower)
 
         # --- A: Python stdlib module names ---
         stdlib_names = self._get_stdlib_names()
-
-        for mod in stdlib_names:
-            mod_lower = mod.lower()
-            if mod_lower == pkg_lower or _NORM_RE.sub('_',mod_lower) == norm_pkg:
-                concerns.append(
-                    f'EXACT_STDLIB_MATCH: "{pkgname}" matches Python stdlib module "{mod}". '
-                    'This is a strong dependency-confusion signal: the stdlib will shadow '
-                    'an external package of the same name in most Python contexts.'
-                )
-            else:
-                dist = shared.levenshtein(pkg_lower, mod_lower)
-                if dist == 1:
-                    concerns.append(
-                        f'NEAR_MATCH(dist=1): "{pkgname}" is one edit from stdlib module "{mod}". '
-                        'Classic typosquat pattern.'
-                    )
-                elif dist == 2:
-                    notes.append(
-                        f'NEAR_MATCH(dist=2): "{pkgname}" is two edits from stdlib module "{mod}".'
-                    )
+        stdlib_exact = {m for m in stdlib_names
+                        if m.lower() == pkg_lower or _NORM_RE.sub('_', m.lower()) == norm_pkg}
+        for mod in stdlib_exact:
+            concerns.append(
+                f'EXACT_STDLIB_MATCH: "{pkgname}" matches Python stdlib module "{mod}". '
+                'This is a strong dependency-confusion signal: the stdlib will shadow '
+                'an external package of the same name in most Python contexts.'
+            )
+        self._lev_check(pkgname, pkg_lower,
+                        [m for m in stdlib_names if m not in stdlib_exact],
+                        'stdlib module', concerns, notes)
 
         # --- B: Installed packages via pip list ---
         installed_names: list[str] = []
-        rc_pip, pip_out, _ = shared.run_cmd(['python3', '-m', 'pip', 'list', '--format=columns'], timeout=30)
+        rc_pip, pip_out, _ = shared.run_cmd(
+            ['python3', '-m', 'pip', 'list', '--format=columns'], timeout=30)
         if rc_pip == 0:
             for line in pip_out.splitlines()[2:]:  # skip header rows
                 parts = line.split()
@@ -1351,27 +1264,18 @@ class Hooks(shared.EcosystemHooks):
                     installed_names.append(parts[0])
 
         stdlib_lower = {m.lower() for m in stdlib_names}
-        for pkg in installed_names:
-            pkg_inst_lower = pkg.lower()
-            if pkg_inst_lower in stdlib_lower:
-                continue  # already checked in A
-            if pkg_inst_lower == pkg_lower or _NORM_RE.sub('_',pkg_inst_lower) == norm_pkg:
-                concerns.append(
-                    f'EXACT_INSTALLED_MATCH: "{pkgname}" matches already-installed package "{pkg}". '
-                    'Installing an external package with the same name as an existing installation '
-                    'could be a dependency-confusion or supply-chain attack.'
-                )
-            else:
-                dist = shared.levenshtein(pkg_lower, pkg_inst_lower)
-                if dist == 1:
-                    concerns.append(
-                        f'NEAR_MATCH(dist=1): "{pkgname}" is one edit from installed package "{pkg}". '
-                        'Classic typosquat pattern.'
-                    )
-                elif dist == 2:
-                    notes.append(
-                        f'NEAR_MATCH(dist=2): "{pkgname}" is two edits from installed package "{pkg}".'
-                    )
+        non_stdlib = [p for p in installed_names if p.lower() not in stdlib_lower]
+        inst_exact = {p for p in non_stdlib
+                      if p.lower() == pkg_lower or _NORM_RE.sub('_', p.lower()) == norm_pkg}
+        for pkg in inst_exact:
+            concerns.append(
+                f'EXACT_INSTALLED_MATCH: "{pkgname}" matches already-installed package "{pkg}". '
+                'Installing an external package with the same name as an existing installation '
+                'could be a dependency-confusion or supply-chain attack.'
+            )
+        self._lev_check(pkgname, pkg_lower,
+                        [p for p in non_stdlib if p not in inst_exact],
+                        'installed package', concerns, notes)
 
         # --- C: Project lockfile deps ---
         lockfile = self.get_lockfile_path(project_root)
@@ -1402,31 +1306,24 @@ class Hooks(shared.EcosystemHooks):
                     pass
 
         installed_and_stdlib_lower = {p.lower() for p in installed_names} | stdlib_lower
-        for dep in lockfile_names:
-            dep_lower = dep.lower()
-            if dep_lower in installed_and_stdlib_lower:
-                continue  # already checked
-            if dep_lower == pkg_lower or _NORM_RE.sub('_',dep_lower) == norm_pkg:
-                concerns.append(
-                    f'EXACT_LOCKFILE_MATCH: "{pkgname}" matches existing lockfile dep "{dep}". '
-                    'This name is already in use in this project.'
-                )
-            else:
-                dist = shared.levenshtein(pkg_lower, dep_lower)
-                if dist == 1:
-                    concerns.append(
-                        f'NEAR_LOCKFILE_MATCH(dist=1): "{pkgname}" is one edit from '
-                        f'lockfile dep "{dep}". Possible targeted typosquat.'
-                    )
-                elif dist == 2:
-                    notes.append(
-                        f'NEAR_LOCKFILE_MATCH(dist=2): "{pkgname}" is two edits from '
-                        f'lockfile dep "{dep}".'
-                    )
+        new_lf_deps = [d for d in lockfile_names
+                       if d.lower() not in installed_and_stdlib_lower]
+        lf_exact = {d for d in new_lf_deps
+                    if d.lower() == pkg_lower or _NORM_RE.sub('_', d.lower()) == norm_pkg}
+        for dep in lf_exact:
+            concerns.append(
+                f'EXACT_LOCKFILE_MATCH: "{pkgname}" matches existing lockfile dep "{dep}". '
+                'This name is already in use in this project.'
+            )
+        self._lev_check(pkgname, pkg_lower,
+                        [d for d in new_lf_deps if d not in lf_exact],
+                        'lockfile dep', concerns, notes)
 
         # --- D: Structural heuristics ---
         # D1: hyphen/underscore normalization (PyPI treats these as equivalent)
-        all_known_lower = {p.lower() for p in installed_names} | stdlib_lower | {d.lower() for d in lockfile_names}
+        all_known_lower = ({p.lower() for p in installed_names}
+                           | stdlib_lower
+                           | {d.lower() for d in lockfile_names})
         if norm_pkg != pkg_lower and norm_pkg in all_known_lower:
             concerns.append(
                 f'NORMALIZATION_MATCH: "{pkgname}" normalizes to the same name as an existing '
@@ -1435,26 +1332,9 @@ class Hooks(shared.EcosystemHooks):
             )
 
         # D2: Python-specific prefix/suffix stripping
-        strip_prefixes = ('python-', 'py-', 'pypi-')
-        strip_suffixes = ('-python', '-py')
-        for prefix in strip_prefixes:
-            if pkg_lower.startswith(prefix):
-                base = pkg_lower[len(prefix):]
-                if base in all_known_lower:
-                    concerns.append(
-                        f'PREFIX_SHADOW: "{pkgname}" appears to wrap existing package/module '
-                        f'"{base}" (stripped prefix "{prefix}"). '
-                        'Verify this wrapper is intentional.'
-                    )
-        for suffix in strip_suffixes:
-            if pkg_lower.endswith(suffix):
-                base = pkg_lower[: -len(suffix)]
-                if base in all_known_lower:
-                    concerns.append(
-                        f'SUFFIX_SHADOW: "{pkgname}" appears to wrap existing package/module '
-                        f'"{base}" (stripped suffix "{suffix}"). '
-                        'Verify this wrapper is intentional.'
-                    )
+        self._check_strip_rules(pkgname, pkg_lower, all_known_lower,
+                                ('python-', 'py-', 'pypi-'), ('-python', '-py'),
+                                concerns)
 
         with shared.Printer(work / 'alternatives.txt') as _p_alt:
             return shared.write_alternatives(
@@ -1564,126 +1444,97 @@ class Hooks(shared.EcosystemHooks):
         """Return deep source comparison config for Python."""
         return {'primary_label': 'Python', 'primary_pattern': r'\.(py|pyx|pxd)$'}
 
-    def reproducible_build(
-        self,
-        pkgname: str,
-        version: str,
-        work: Path,
-        sandbox: str,
-        p: 'shared.Printer',
-    ) -> tuple[str, int, int]:
-        """Attempt to build a wheel from source and compare with the distributed wheel.
+    REPRO_BUILT_DIR_SUFFIX = 'raw-built-whl'
 
-        Uses 'python -m build --wheel --no-isolation' to build from the cloned source.
-        Returns (repro_result, code_diffs, metadata_diffs).
-
-        repro_result is one of:
-          SKIPPED
-          INCONCLUSIVE
-          EXACTLY REPRODUCIBLE (sha256 match)
-          EXACTLY REPRODUCIBLE (content match)
-          FUNCTIONALLY EQUIVALENT (metadata-only diffs)
-          UNEXPECTED DIFFERENCES
-        """
-        clone_dir = work / 'source'
-        built_whl_dir = work / 'raw-built-whl'
-        built_whl_dir.mkdir(exist_ok=True)
-
-        p(f'=== Reproducible build: {pkgname} {version} ===')
-        p(f'Sandbox: {sandbox}')
-        p('')
-
-        if not clone_dir.is_dir():
-            return shared.finish_reproducible_build(p, work, 'SKIPPED (no source clone)')
-
+    def _repro_setup(
+        self, clone_dir: Path, work: Path, p: 'shared.Printer',
+    ) -> 'Path | str':
         rc_pv, pv_out, _ = shared.run_cmd(['python3', '--version'], timeout=10)
-        python_ver = shared.sanitize_line(pv_out.strip()) if rc_pv == 0 else 'unknown'
+        python_ver = (
+            shared.sanitize_line(pv_out.strip()) if rc_pv == 0 else 'unknown')
         p(f'PYTHON_VERSION: {python_ver}')
-
-        # Locate pyproject.toml or setup.py in the clone
         build_root = clone_dir
         for candidate in (clone_dir / 'pyproject.toml', clone_dir / 'setup.py'):
             if candidate.is_file():
-                build_root = clone_dir
                 break
         else:
-            # Try one level down
             for child in clone_dir.iterdir():
-                if child.is_dir() and ((child / 'pyproject.toml').is_file()
-                                       or (child / 'setup.py').is_file()):
+                if child.is_dir() and (
+                    (child / 'pyproject.toml').is_file()
+                    or (child / 'setup.py').is_file()
+                ):
                     build_root = child
                     break
-
-        if not (build_root / 'pyproject.toml').is_file() and not (build_root / 'setup.py').is_file():
-            return shared.finish_reproducible_build(p, work, 'SKIPPED (no pyproject.toml or setup.py in source)')
-
+        if (not (build_root / 'pyproject.toml').is_file()
+                and not (build_root / 'setup.py').is_file()):
+            return 'SKIPPED (no pyproject.toml or setup.py in source)'
         p(f'BUILD_ROOT: {shared.sanitize_line(str(build_root))}')
-        build_log_path = work / 'raw-build-output.txt'
+        return build_root
 
+    def _repro_run_build(
+        self, build_root: Path, built_dir: Path, sandbox: str,
+    ) -> 'tuple[int, str] | None':
         rc_pv2, pv2_out, _ = shared.run_cmd(
-            ['python3', '-c', 'import sys; print(sys.version_info[:2])'], timeout=5
+            ['python3', '-c', 'import sys; print(sys.version_info[:2])'],
+            timeout=5,
         )
         py_img_tag = '3'
         if rc_pv2 == 0:
             m = re.search(r'\((\d+),\s*(\d+)\)', pv2_out)
             if m:
                 py_img_tag = f'{m.group(1)}.{m.group(2)}'
-
-        build_result = shared.run_sandboxed(
-            sandbox, build_root, built_whl_dir,
+        # python:X images don't pre-install 'build'; install it first.
+        # container_allow_network=True is required for that pip install step.
+        return shared.run_sandboxed(
+            sandbox, build_root, built_dir,
             'python3 -m build --wheel --no-isolation --outdir {out} {src}',
             f'python:{py_img_tag}',
-            # python:X images don't pre-install 'build', so install it first.
-            # container_allow_network=True is required for that pip install step.
             container_shell_cmd=(
-                'python3 -m pip install build --quiet --disable-pip-version-check && '
+                'python3 -m pip install build --quiet'
+                ' --disable-pip-version-check && '
                 'python -m build --wheel --no-isolation --outdir {out} {src}'
             ),
             container_allow_network=True,
         )
-        if build_result is None:
-            return shared.finish_reproducible_build(
-                p, work,
-                'SKIPPED (no sandbox available: install bwrap, firejail, docker, or podman)',
-            )
-        rc_b, combined = build_result
-        build_log_path.write_text(combined, encoding='utf-8', errors='replace')
-        build_ok = rc_b == 0
 
-        p(f'BUILD_STATUS: {"yes" if build_ok else "no"}')
-
-        if not build_ok:
-            return shared.finish_reproducible_build(p, work, 'INCONCLUSIVE (build failed)')
-
-        built_whls = list(built_whl_dir.glob('*.whl'))
+    def _repro_compare(
+        self,
+        pkgname: str,
+        version: str,
+        built_dir: Path,
+        work: Path,
+        p: 'shared.Printer',
+    ) -> tuple[str, int, int]:
+        built_whls = list(built_dir.glob('*.whl'))
         if not built_whls:
-            return shared.finish_reproducible_build(p, work, 'INCONCLUSIVE (no .whl produced)')
+            return shared.finish_reproducible_build(
+                p, work, 'INCONCLUSIVE (no .whl produced)')
         built_whl = built_whls[0]
-
         built_sha = shared.sha256_file(built_whl)
         if (repro := shared.compare_repro_sha256(built_sha, work, p)) is not None:
             return repro
-
-        # Hashes differ: unpack both and compare contents
         built_unpacked = work / 'raw-built-unpacked'
         built_unpacked.mkdir(exist_ok=True)
-        _unpack_pkg(built_whl, built_unpacked, [], 'repro-unpack')
-
+        self._unpack_pkg(built_whl, built_unpacked, [], 'repro-unpack')
         dist_unpacked = work / 'unpacked'
         if not dist_unpacked.is_dir():
-            return shared.finish_reproducible_build(p, work, 'INCONCLUSIVE (hashes differ, no dist unpacked dir)')
-
+            return shared.finish_reproducible_build(
+                p, work,
+                'INCONCLUSIVE (hashes differ, no dist unpacked dir)')
         rc_diff, diff_out, _ = shared.run_cmd(
             ['diff', '-r', str(built_unpacked), str(dist_unpacked),
              '--exclude=*.pyc', '--exclude=__pycache__', '--exclude=RECORD'],
             timeout=60,
         )
-        (work / 'raw-repro-diff.txt').write_text(diff_out, encoding='utf-8', errors='replace')
-
+        (work / 'raw-repro-diff.txt').write_text(
+            diff_out, encoding='utf-8', errors='replace')
         diff_line_count = len(diff_out.splitlines())
         p(f'CONTENT_DIFF_LINES: {diff_line_count}')
-
         if diff_line_count == 0:
-            return shared.finish_reproducible_build(p, work, 'EXACTLY REPRODUCIBLE (content match)')
+            return shared.finish_reproducible_build(
+                p, work, 'EXACTLY REPRODUCIBLE (content match)')
+        return shared.classify_repro_diffs(
+            diff_out, p, work, _RE_REPRO_CODE, _RE_REPRO_META)
 
-        return shared.classify_repro_diffs(diff_out, p, work, _RE_REPRO_CODE, _RE_REPRO_META)
+
+Analyzer = PythonAnalyzer   # used by dep_review.py for instantiation

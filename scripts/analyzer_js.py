@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# hooks_js.py: JavaScript/Node.js language operations for the
+# analyzer_js.py: JavaScript/Node.js language operations for the
 # dependency analysis driver.
 #
 # Handles the npm package format (download with npm pack, unpack tarball) and
@@ -160,339 +160,18 @@ _INSTALL_CMD_CHECKS: list[tuple[str, re.Pattern[str]]] = [
     )),
 ]
 
-# Size thresholds for install hook command strings (combined preinstall +
-# install + postinstall). Inline hook commands in package.json are almost
-# always a short shell invocation; 10 KB or 50 lines is extremely unusual
-# even for the most complex legitimate packages.
-_INSTALL_HOOK_WARN_BYTES = 10_000
-_INSTALL_HOOK_WARN_LINES = 50
-
-
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-def _extract_license(pkg_json: dict) -> str:
-    """Extract raw license string from a parsed package.json dict.
-
-    Handles both string form ("MIT") and SPDX object form ({"type": "MIT"}).
-
-    >>> _extract_license({"license": "MIT"})
-    'MIT'
-    >>> _extract_license({"license": {"type": "Apache-2.0"}})
-    'Apache-2.0'
-    >>> _extract_license({})
-    ''
-    """
-    lic = pkg_json.get('license', '') or ''
-    if isinstance(lic, dict):
-        lic = lic.get('type', '') or ''
-    return str(lic).strip()
-
-
-def _extract_source_url(pkg_json: dict) -> str:
-    """Extract source/repository URL from package.json.
-
-    >>> _extract_source_url({"repository": {"url": "https://github.com/foo/bar"}})
-    'https://github.com/foo/bar'
-    >>> _extract_source_url({"repository": "https://github.com/foo/bar"})
-    'https://github.com/foo/bar'
-    >>> _extract_source_url({})
-    ''
-    """
-    repo = pkg_json.get('repository', '') or ''
-    if isinstance(repo, dict):
-        url = repo.get('url', '') or ''
-    elif isinstance(repo, str):
-        url = repo
-    else:
-        url = ''
-    url = re.sub(r'^git\+', '', str(url).strip())
-    url = re.sub(r'^git://', 'https://', url)
-    url = re.sub(r'\.git$', '', url).rstrip('/')
-    return url
-
-
-def _load_package_json(unpacked_dir: Path) -> dict:
-    """Load and parse package.json from the unpacked directory.
-
-    Returns {} on failure.
-    """
-    pkg_json_path = unpacked_dir / 'package.json'
-    if not pkg_json_path.is_file():
-        return {}
-    try:
-        return json.loads(
-            pkg_json_path.read_text(encoding='utf-8', errors='replace'))
-    except (ValueError, OSError):
-        return {}
-
-
-def _unpack_tgz(
-    tgz_file: Path, target_dir: Path,
-    failures: list[str], key: str,
-) -> bool:
-    """Unpack a .tgz, stripping the top-level 'package/' directory.
-
-    npm tarballs always place files under a 'package/' top-level directory.
-    Returns True on success.
-    """
-    try:
-        with tarfile.open(str(tgz_file), 'r:gz') as tf:
-            members = []
-            for m in tf.getmembers():
-                parts = Path(m.name).parts
-                if len(parts) >= 2 and parts[0] == 'package':
-                    m.name = '/'.join(parts[1:])
-                elif len(parts) >= 2:
-                    # Strip whatever the first-level directory is
-                    m.name = '/'.join(parts[1:])
-                else:
-                    continue
-                if not m.name or '..' in Path(m.name).parts:
-                    continue
-                members.append(m)
-            shared.tarfile_extractall_safe(tf, target_dir, members)
-        # Belt-and-suspenders: tarfile_extractall_safe already filters
-        # symlinks at the member level; this catches any edge cases.
-        shared.remove_symlinks(target_dir)
-        return True
-    except shared.ArchiveSecurityError as exc:
-        # An ArchiveSecurityError is a strong indicator of a malicious package:
-        # legitimate npm packages do not contain tar bombs or traversal payloads.
-        failures.append(f'SECURITY_VIOLATION:{key}: {exc}')
-        return False
-    except Exception as exc:
-        failures.append(f'{key}: {exc}')
-        return False
-
-
-# ---------------------------------------------------------------------------
-# Idea 14-16 helpers: registry and provenance API checks
-# ---------------------------------------------------------------------------
-
-
-
-def _slsa_signer_repo(attest: dict) -> tuple[str, str]:
-    """Extract (signer_repo_url, workflow_path) from one SLSA attestation.
-
-    Handles two provenance predicate formats:
-      SLSA v1  (predicateType .../provenance/v1):
-        predicate.buildDefinition.externalParameters.workflow.{repository,path}
-      SLSA v0.2 (predicateType .../provenance/v0.2):
-        predicate.materials[0].uri  (git+https://github.com/owner/repo@ref)
-    Returns ('', '') when no usable URI is found.
-    """
-    predicate = attest.get('predicate', {}) or {}
-
-    # SLSA v1 path
-    workflow = (
-        predicate
-        .get('buildDefinition', {})
-        .get('externalParameters', {})
-        .get('workflow', {})
-    )
-    if isinstance(workflow, dict):
-        repo = str(workflow.get('repository', '') or '')
-        if repo:
-            return repo, str(workflow.get('path', '') or '')
-
-    # SLSA v0.2 path: materials[0].uri contains "git+https://...@ref"
-    materials = predicate.get('materials', []) or []
-    if materials and isinstance(materials[0], dict):
-        uri = str(materials[0].get('uri', '') or '')
-        if uri.startswith('git+'):
-            # Strip git+ prefix and @ref suffix to get bare repo URL.
-            repo = re.sub(r'^git\+', '', uri)
-            repo = re.sub(r'@[^@]{0,200}$', '', repo)
-            if repo:
-                return repo, ''
-
-    return '', ''
-
-
-def _norm_repo_url(url: str) -> str:
-    """Normalise a source/signer repo URL for comparison.
-
-    Strips scheme prefix, git+ transport prefix, .git suffix, and trailing
-    slash, then lowercases. Two URLs that differ only in these ways refer
-    to the same repo.
-    """
-    url = re.sub(r'^git\+', '', url.strip().lower().rstrip('/'))
-    url = re.sub(r'^https?://', '', url)
-    url = re.sub(r'^ssh://git@', '', url)
-    url = re.sub(r'^git@([^:]+):', r'\1/', url)
-    url = re.sub(r'\.git$', '', url)
-    return url
-
-
-def _check_slsa_provenance(
-    api_base: str, encoded_name: str, source_url: str, p: 'shared.Printer',
-) -> None:
-    """Idea 15: compare SLSA provenance signer repo against declared source.
-
-    Fetches the npm provenance attestation and checks whether the signing
-    repository matches the package's declared source URL. A mismatch
-    is the Shai-Halud OIDC-token-theft signature (the signature appears
-    cryptographically valid but was produced by a different repo's workflow).
-    """
-    p('')
-    p('=== SLSA provenance ===')
-    prov_url = f'{api_base}/-/package/{encoded_name}/provenance'
-    prov_data = shared.http_get(prov_url)
-    if not prov_data:
-        p('SLSA_PROVENANCE: none (package not published with --provenance)')
-        return
-    try:
-        prov_json = json.loads(prov_data.decode('utf-8', errors='replace'))
-    except ValueError:
-        p('SLSA_PROVENANCE: parse error')
-        return
-
-    attestations = prov_json.get('attestations', []) or []
-    if not attestations:
-        p('SLSA_PROVENANCE: none (no attestations in registry response)')
-        return
-
-    signer_repo, workflow_path = '', ''
-    for attest in attestations:
-        signer_repo, workflow_path = _slsa_signer_repo(attest)
-        if signer_repo:
-            break
-
-    if not signer_repo:
-        p('SLSA_PROVENANCE: present but signer repository URI not found')
-        return
-
-    p(f'SLSA_SIGNER_REPO: {shared.sanitize_line(signer_repo[:300])}')
-    if workflow_path:
-        p(f'SLSA_WORKFLOW_PATH: {shared.sanitize_line(workflow_path[:200])}')
-
-    if not source_url:
-        p('SIGSTORE_REPO_MISMATCH: N/A (no declared source URL to compare)')
-        return
-
-    if _norm_repo_url(signer_repo) != _norm_repo_url(source_url):
-        p('SIGSTORE_REPO_MISMATCH: YES')
-        p(f'  declared: {shared.sanitize_line(source_url[:300])}')
-        p(f'  signer:   {shared.sanitize_line(signer_repo[:300])}')
-        p('  NOTE: surface for human review; monorepos may sign from a')
-        p('  parent repo. A mismatch combined with other signals is HIGH.')
-    else:
-        p('SIGSTORE_REPO_MISMATCH: NO')
-
-
 # npm username allowlist: letters, digits, hyphens, underscores, dots.
 # Used before constructing search API URLs (command-injection prevention).
 _RE_NPM_USER = re.compile(r'^[A-Za-z0-9._-]{1,80}$')
-# 72 hours in seconds; packages published more recently than this count
-# toward the velocity total.
-_VELOCITY_WINDOW_SECS = 72 * 3600
-# Packages published within 72 hours by a single user to qualify as anomalous.
-_VELOCITY_THRESHOLD = 10
-# Publisher tenure in days below which they are considered a "new" publisher.
-_NEW_PUBLISHER_DAYS = 90
-
-
-def _parse_npm_date(date_str: str) -> 'datetime | None':
-    """Parse an ISO-8601 date string (with or without trailing Z/offset).
-
-    Returns a timezone-aware datetime or None on failure.
-    """
-    try:
-        clean = date_str.rstrip('Z').split('+')[0].split('.')[0]
-        return datetime.fromisoformat(clean).replace(tzinfo=timezone.utc)
-    except (ValueError, OverflowError):
-        return None
-
-
-def _check_publisher_velocity(
-    api_base: str,
-    npm_user_name: str,
-    p: 'shared.Printer',
-) -> None:
-    """Idea 14: detect anomalous publish velocity for this package's publisher.
-
-    Queries the npm search API for all packages maintained by the publisher,
-    counts those published in the last 72 hours, and emits
-    PUBLISHER_VELOCITY_ANOMALOUS if the count exceeds the threshold.
-
-    Severity is HIGH when the publisher is also new (their oldest maintained
-    package is less than _NEW_PUBLISHER_DAYS days old); MEDIUM otherwise.
-    This uses the oldest package date from the search results as a proxy for
-    publisher tenure, since npm does not expose direct account creation dates.
-    """
-    if not npm_user_name or not _RE_NPM_USER.match(npm_user_name):
-        return
-    if 'registry.npmjs.org' not in api_base:
-        return
-
-    p('')
-    p(f'=== Publisher velocity: {shared.sanitize_line(npm_user_name)} ===')
-
-    search_url = (
-        'https://registry.npmjs.org/-/v1/search'
-        f'?text=maintainer:{urllib.parse.quote(npm_user_name, safe="")}'
-        '&size=250'
-    )
-    search_data = shared.http_get(search_url, timeout=20)
-    if not search_data:
-        p('PUBLISHER_VELOCITY: (search API unavailable)')
-        return
-
-    try:
-        search_json = json.loads(search_data.decode('utf-8', errors='replace'))
-    except ValueError:
-        p('PUBLISHER_VELOCITY: (parse error)')
-        return
-
-    now = datetime.now(timezone.utc)
-    recent_count = 0
-    oldest_dt: 'datetime | None' = None
-    objects = search_json.get('objects', []) or []
-    for obj in objects:
-        pkg = obj.get('package', {}) or {}
-        date_str = str(pkg.get('date', '') or '')
-        if not date_str:
-            continue
-        pub_dt = _parse_npm_date(date_str)
-        if pub_dt is None:
-            continue
-        age_secs = (now - pub_dt).total_seconds()
-        if 0 <= age_secs <= _VELOCITY_WINDOW_SECS:
-            recent_count += 1
-        if oldest_dt is None or pub_dt < oldest_dt:
-            oldest_dt = pub_dt
-
-    total_count = len(objects)
-    p(f'PUBLISHER_TOTAL_PACKAGES: {total_count}')
-    p(f'PUBLISHER_RECENT_72H: {recent_count}')
-
-    if recent_count >= _VELOCITY_THRESHOLD:
-        tenure_days = (
-            int((now - oldest_dt).total_seconds() / 86400)
-            if oldest_dt else None
-        )
-        is_new = tenure_days is not None and tenure_days < _NEW_PUBLISHER_DAYS
-        severity = 'HIGH' if is_new else 'MEDIUM'
-        p(f'PUBLISHER_VELOCITY_ANOMALOUS: YES ({severity})')
-        p(f'  {recent_count} packages published in last 72h '
-          f'(threshold: {_VELOCITY_THRESHOLD})')
-        if is_new:
-            p(f'  Publisher tenure: {tenure_days} days '
-              f'(<{_NEW_PUBLISHER_DAYS} days; new publisher + high velocity = HIGH)')
-        elif tenure_days is not None:
-            p(f'  Publisher tenure: {tenure_days} days '
-              f'(consider: may be a high-volume CI pipeline such as a monorepo)')
-    else:
-        p('PUBLISHER_VELOCITY_ANOMALOUS: NO')
 
 
 # ---------------------------------------------------------------------------
 # Public API: called by dep_review.py
 # ---------------------------------------------------------------------------
 
-class Hooks(shared.EcosystemHooks):
+class JavaScriptAnalyzer(shared.EcosystemAnalyzer):
+    """EcosystemAnalyzer implementation for JavaScript packages (npm/tarballs)."""
+
     ECOSYSTEM = 'javascript'
     OSV_ECOSYSTEM = 'npm'
     OSS_REBUILD_ECOSYSTEM = 'npm'
@@ -508,67 +187,51 @@ class Hooks(shared.EcosystemHooks):
 
     MANIFEST_FILE = 'package-json.txt'
 
-    DANGEROUS_WHAT = (
-        'eval/new Function/vm execution, child_process execution, '
-        'obfuscated execution (Buffer.from base64+eval, hex decode+eval), '
-        'network calls at module load scope, credential env-var access '
-        '(AWS/GitHub/cloud keys at load time), '
-        'dynamic require on external input, '
-        'prototype pollution '
-        '(Object.prototype assignment, __proto__ assignment), '
-        'home-dir writes, IDE config writes, cloud secret-manager API calls, '
-        'shadow runtimes (bun/deno/pkgx spawned from source), '
-        'cross-language spawn (python/curl/wget/nc as second-stage loaders), '
-        'GitHub raw-content fetch by direct commit SHA (orphan-commit injection), '
-        'GitHub commit-search API used as a C2 dead-drop channel, '
-        'Discord token format (harvested credential), '
-        'string-split obfuscation (char-by-char keyword assembly), '
-        'unusually long lines (embedded payload or single-line obfuscation), '
-        'reverse-shell indicators (bash /dev/tcp, nc -e, socat EXEC), '
-        'cron/systemd/LaunchAgent persistence, '
-        'cryptominer tools and Stratum mining protocol'
-    )
-
     # ReDoS prevention (CWE-400): all patterns use bounded quantifiers so that
     # worst-case PCRE backtracking is O(bound^2) rather than O(n^2) or worse.
     # Unbounded character-class repetitions ([^x]+, [^x]*) are capped with
     # {1,N} or {0,N}.  See AGENTS.md for the full policy.
-    DANGEROUS_PATTERNS: list[tuple[str, str]] = [
+    DANGEROUS_PATTERNS: list[tuple[str, str, str]] = [
         ('eval-variants',
-         r'\beval\s*\(|new\s+Function\s*\(|vm\.runIn(?:This|New)Context\s*\('),
+         r'\beval\s*\(|new\s+Function\s*\(|vm\.runIn(?:This|New)Context\s*\(',
+         'eval/new Function/vm execution'),
         ('child-process-exec',
          r'\brequire\s*\(\s*["\x27]child_process["\x27]\s*\)'
-         r'|child_process\.(?:exec|execSync|execFile|execFileSync|spawn|spawnSync)\s*\('),
+         r'|child_process\.(?:exec|execSync|execFile|execFileSync|spawn|spawnSync)\s*\(',
+         'child_process execution (exec, spawn, execFile, etc.)'),
         ('obfuscated-exec',
          r'Buffer\.from\s*\([^)]{0,200}["\x27]base64["\x27][^)]{0,200}\)'
          r'(?:[^\n]{0,200})(?:eval|Function)\b'
-         r'|(?:toString\s*\(\s*(?:16|8)\s*\)|fromCharCode)[^\n]{0,120}(?:eval|Function)\b'),
+         r'|(?:toString\s*\(\s*(?:16|8)\s*\)|fromCharCode)[^\n]{0,120}(?:eval|Function)\b',
+         'obfuscated execution (Buffer.from base64+eval, hex/charCode+eval)'),
         ('network-at-load-scope',
          r'^\s*require\s*\(\s*["\x27](?:http|https|net|dgram|tls)["\x27]\s*\)'
          r'\.(?:get|request|connect|createServer|createConnection)\s*\('
-         r'|^\s*fetch\s*\('),
+         r'|^\s*fetch\s*\(',
+         'network calls at module load scope (require(http).get, fetch)'),
         # NPM_TOKEN is covered by NPM_ + [A-Z_]* from CRED_KEYWORDS_RE.
         ('credential-env-vars',
          r'process\.env\s*(?:\.\s*|\[\s*["\x27])(?:'
-         + shared.CRED_KEYWORDS_RE + r'|HEROKU_|VERCEL_|NETLIFY_)[A-Z_]*'),
+         + shared.CRED_KEYWORDS_RE + r'|HEROKU_|VERCEL_|NETLIFY_)[A-Z_]*',
+         'credential environment variable access (AWS/GitHub/Heroku/cloud keys at load time)'),
         ('dynamic-require',
          r'\brequire\s*\(\s*(?:process\.env\.|[^"\'`\)]{0,80}'
-         r'(?:user|input|argv|env|request))'),
+         r'(?:user|input|argv|env|request))',
+         'dynamic require on external input'),
         # [^\]]{1,200} rather than [^\]]+ to cap backtracking when no closing
         # quote is found (ReDoS: O(200^2) worst case, not O(n^2)).
         ('prototype-pollution',
          r'Object\.prototype\s*\[["\x27][^\]]{1,200}["\x27]\s*='
-         r'|__proto__\s*[=:]\s*\{'),
+         r'|__proto__\s*[=:]\s*\{',
+         'prototype pollution (Object.prototype assignment, __proto__ assignment)'),
         ('module-load-socket',
-         r'^\s*new\s+(?:net\.Socket|tls\.TLSSocket|dgram\.Socket)\s*\('),
-        # Persistence: writing to home-dir or shell-config paths.
+         r'^\s*new\s+(?:net\.Socket|tls\.TLSSocket|dgram\.Socket)\s*\(',
+         'raw socket creation at module load scope'),
         # fs.open() is included because callers often follow with a write.
         ('home-or-shell-write',
          r'fs\.(?:writeFile(?:Sync)?|appendFile(?:Sync)?|open(?:Sync)?)\s*\([^,)]{0,100}["\x27](?:'
-         + shared.HOME_PATHS_RE + r')'),
-        # Persistence: writing to IDE or AI-tool config directories.
-        ('ide-config-write', shared.IDE_CONFIG_PATHS_RE),
-        # Credential harvesting via cloud secret-manager SDKs or direct API calls.
+         + shared.HOME_PATHS_RE + r')',
+         'home-dir or shell-config writes (fs.writeFile, fs.appendFile)'),
         # AWS SDK v3 require() calls are not caught by network-at-load-scope.
         # Shared provider hostnames come from shared.CLOUD_SECRET_HOSTS_RE.
         ('cloud-secret-api',
@@ -578,63 +241,29 @@ class Hooks(shared.EcosystemHooks):
          r'|new\s+SSMClient\s*\('
          r'|require\s*\(\s*["\x27]@google-cloud/secret-manager["\x27]'
          r'|require\s*\(\s*["\x27]@azure/keyvault-secrets["\x27]'
-         r'|' + shared.CLOUD_SECRET_HOSTS_RE),
-        # Bulk env-var collection: harvest pattern that serializes or iterates
-        # all of process.env at once.  The existing credential-env-vars pattern
-        # catches named prefixes; this catches the bulk-collect variant worms
-        # use to avoid known-prefix detection.  \w{1,40} bounds the loop var.
+         r'|' + shared.CLOUD_SECRET_HOSTS_RE,
+         'cloud secret-manager API calls (AWS SDK v3, GCP, Azure)'),
+        # credential-env-vars catches named prefixes; this catches the
+        # bulk-collect variant worms use to avoid known-prefix detection.
+        # \w{1,40} bounds the loop variable (ReDoS-safe).
         ('env-enumeration',
          r'(?:JSON\.stringify|Object\.(?:keys|values|entries|assign|fromEntries))'
          r'\s*\(\s*process\.env\s*\)'
-         r'|for\s*\(\s*(?:const|let|var)\s+\w{1,40}\s+(?:in|of)\s+process\.env\s*\)'),
-        # Mini Shai-Hulud campaign: backdoor install path, LaunchAgent name,
-        # and dead-man's-switch script. No legitimate use in package code.
-        ('mini-shai-hulud-paths', shared.MINI_SHAI_HULUD_PATHS_RE),
-        # Exfiltration relay services and known campaign C2 domains.
-        # Shared domain list from analysis_shared; no ecosystem-specific additions.
-        ('exfil-relay-domain', shared.EXFIL_RELAY_DOMAINS_RE),
-        # Shadow runtimes: exec/spawn invoking bun/deno/pkgx/tsx/ts-node.
-        # These are covered in install hooks by _INSTALL_CMD_CHECKS; this
-        # pattern catches the same runtimes in broader source-file scans.
+         r'|for\s*\(\s*(?:const|let|var)\s+\w{1,40}\s+(?:in|of)\s+process\.env\s*\)',
+         'bulk process.env enumeration (credential harvest)'),
+        # Also covered in install hooks by _INSTALL_CMD_CHECKS; this
+        # catches the same runtimes in broader source-file scans.
         # [^)]{0,300} bounds backtracking to O(300) per anchor (safe).
         ('shadow-runtime',
          r'(?:exec(?:Sync|File(?:Sync)?)?|spawn(?:Sync)?)\s*\([^)]{0,300}'
-         r'\b' + shared.SHADOW_RUNTIME_NAMES_RE + r'\b'),
-        # Cross-language spawn: JS invoking python/curl/wget/nc.
+         r'\b' + shared.SHADOW_RUNTIME_NAMES_RE + r'\b',
+         'shadow runtime invocation (bun/deno/pkgx/tsx/ts-node from JS source)'),
         # A JS package that spawns these tools is almost certainly a second-stage
         # payload downloader or data exfiltration step.
         ('cross-lang-spawn',
          r'(?:exec(?:Sync|File(?:Sync)?)?|spawn(?:Sync)?)\s*\([^)]{0,300}'
-         r'\b' + shared.CROSS_LANG_TOOLS_RE + r'\b'),
-        # Orphan-commit fetch: source file fetches from GitHub by a direct
-        # 40-hex commit SHA alongside a fetch verb on the same line.
-        # A SHA URL in a fetch call is a supply-chain red flag; legitimate
-        # pinning uses lockfiles.  Whole-file multi-line coverage is handled
-        # for install hooks via INSTALL_GITHUB_SHA_FETCH in _INSTALL_CMD_CHECKS.
-        ('github-fetch-by-sha', shared.GITHUB_SHA_FETCH_RE),
-        # GitHub commit-search API used as a C2 dead-drop channel.
-        # The specific ?q=firedalazer form is in ADVERSARIAL_PATTERNS (abort);
-        # this catches the general endpoint for novel campaign variants.
-        ('github-commit-search-c2', shared.GITHUB_COMMIT_SEARCH_RE),
-        # Discord bot token embedded in source: likely a harvested credential
-        # or token-extraction regex.  24.6.27 base64 format; exact quantifiers.
-        ('discord-token-format', shared.DISCORD_TOKEN_RE),
-        # String-split obfuscation: 5+ single chars joined by + to assemble
-        # a keyword character by character, evading simple string-match scans.
-        ('string-split-obfuscation', shared.STRING_SPLIT_RE),
-        # Unusually long lines: may embed base64/hex payloads or
-        # single-line obfuscated code.  Matches in dist/ are expected.
-        ('long-line-obfuscation', shared.LONG_LINE_RE),
-        # Reverse-shell: bash /dev/tcp redirect, nc -e, socat EXEC.
-        # No legitimate use in package source code.
-        ('reverse-shell', shared.REVERSE_SHELL_RE),
-        # Cron persistence: writing to cron directories or piping to
-        # crontab; establishes a payload that survives reboots.
-        ('cron-persistence', shared.CRON_PERSISTENCE_RE),
-        # System-level persistence: systemd service or macOS LaunchAgent.
-        ('system-persistence', shared.SYSTEM_PERSISTENCE_RE),
-        # Cryptominer: named miner binaries or Stratum pool protocol.
-        ('cryptominer', shared.CRYPTOMINER_RE),
+         r'\b' + shared.CROSS_LANG_TOOLS_RE + r'\b',
+         'cross-language spawn (python/curl/wget/nc as second-stage downloader)'),
     ]
 
     # ReDoS prevention: diff lines start with ^\+ so they are anchored, but
@@ -658,6 +287,128 @@ class Hooks(shared.EcosystemHooks):
         ('diff-prototype-pollution',
          r'^\+[^\n]{0,500}__proto__\s*[=:]\s*\{|^\+[^\n]{0,500}Object\.prototype\s*\['),
     ]
+
+    # Size thresholds for install hook command strings (preinstall + install
+    # + postinstall combined). 10 KB or 50 lines is extremely unusual even
+    # for the most complex legitimate packages.
+    INSTALL_HOOK_WARN_BYTES: int = 10_000
+    INSTALL_HOOK_WARN_LINES: int = 50
+
+    def extract_license(self, raw_data: object) -> str:
+        """Extract raw license string from a parsed package.json dict.
+
+        Handles both string form ("MIT") and SPDX object form
+        ({"type": "MIT"}).
+
+        >>> JavaScriptAnalyzer(None).extract_license({"license": "MIT"})
+        'MIT'
+        >>> JavaScriptAnalyzer(None).extract_license({"license": {"type": "Apache-2.0"}})
+        'Apache-2.0'
+        >>> JavaScriptAnalyzer(None).extract_license({})
+        ''
+        """
+        pkg_json = raw_data if isinstance(raw_data, dict) else {}
+        lic = pkg_json.get('license', '') or ''
+        if isinstance(lic, dict):
+            lic = lic.get('type', '') or ''
+        return str(lic).strip()
+
+    def extract_source_url(self, raw_data: object) -> str:
+        """Extract source/repository URL from package.json.
+
+        >>> JavaScriptAnalyzer(None).extract_source_url({"repository": {"url": "https://github.com/foo/bar"}})
+        'https://github.com/foo/bar'
+        >>> JavaScriptAnalyzer(None).extract_source_url({"repository": "https://github.com/foo/bar"})
+        'https://github.com/foo/bar'
+        >>> JavaScriptAnalyzer(None).extract_source_url({})
+        ''
+        """
+        pkg_json = raw_data if isinstance(raw_data, dict) else {}
+        repo = pkg_json.get('repository', '') or ''
+        if isinstance(repo, dict):
+            url = repo.get('url', '') or ''
+        elif isinstance(repo, str):
+            url = repo
+        else:
+            url = ''
+        url = re.sub(r'^git\+', '', str(url).strip())
+        url = re.sub(r'^git://', 'https://', url)
+        url = re.sub(r'\.git$', '', url).rstrip('/')
+        return url
+
+    def _load_package_json(self, unpacked_dir: Path) -> dict:
+        """Load and parse package.json from the unpacked directory.
+
+        Returns {} on failure.
+        """
+        pkg_json_path = unpacked_dir / 'package.json'
+        if not pkg_json_path.is_file():
+            return {}
+        try:
+            return json.loads(
+                pkg_json_path.read_text(encoding='utf-8', errors='replace'))
+        except (ValueError, OSError):
+            return {}
+
+    def _unpack_tgz(
+        self,
+        tgz_file: Path,
+        target_dir: Path,
+        failures: list[str],
+        key: str,
+    ) -> bool:
+        """Unpack a .tgz, stripping the top-level 'package/' directory.
+
+        npm tarballs always place files under a 'package/' top-level
+        directory. Returns True on success.
+        """
+        try:
+            with tarfile.open(str(tgz_file), 'r:gz') as tf:
+                members = []
+                for m in tf.getmembers():
+                    parts = Path(m.name).parts
+                    if len(parts) >= 2 and parts[0] == 'package':
+                        m.name = '/'.join(parts[1:])
+                    elif len(parts) >= 2:
+                        m.name = '/'.join(parts[1:])
+                    else:
+                        continue
+                    if not m.name or '..' in Path(m.name).parts:
+                        continue
+                    members.append(m)
+                shared.tarfile_extractall_safe(tf, target_dir, members)
+            # Belt-and-suspenders: tarfile_extractall_safe already filters
+            # symlinks at the member level; this catches any edge cases.
+            shared.remove_symlinks(target_dir)
+            return True
+        except shared.ArchiveSecurityError as exc:
+            # An ArchiveSecurityError is a strong indicator of a malicious
+            # package: legitimate npm packages do not contain tar bombs.
+            failures.append(f'SECURITY_VIOLATION:{key}: {exc}')
+            return False
+        except Exception as exc:
+            failures.append(f'{key}: {exc}')
+            return False
+
+    def _parse_npm_date(self, date_str: str) -> 'datetime | None':
+        """Parse an ISO-8601 date string (with or without trailing Z/offset).
+
+        Handles the formats returned by the npm registry time object.
+        Returns None for unparseable strings rather than raising.
+
+        >>> a = JavaScriptAnalyzer(None)
+        >>> a._parse_npm_date('2023-04-15T10:30:00.000Z') is not None
+        True
+        >>> a._parse_npm_date('2023-04-15T10:30:00+05:30') is not None
+        True
+        >>> a._parse_npm_date('not-a-date') is None
+        True
+        """
+        try:
+            clean = date_str.rstrip('Z').split('+')[0].split('.')[0]
+            return datetime.fromisoformat(clean).replace(tzinfo=timezone.utc)
+        except (ValueError, OverflowError):
+            return None
 
     def get_lockfile_path(self, project_root: Path) -> Path:
         """Return the path to the first existing JavaScript lockfile.
@@ -708,7 +459,7 @@ class Hooks(shared.EcosystemHooks):
                 (work / 'package-hash.txt').write_text(
                     f'{sha256}  {tgz_file.name}\n', encoding='utf-8'
                 )
-                if not _unpack_tgz(
+                if not self._unpack_tgz(
                         tgz_file, unpacked_dir, failures, 'unpack-new'):
                     failures.append('unpack-new-failed')
             else:
@@ -736,15 +487,9 @@ class Hooks(shared.EcosystemHooks):
         work: Path,
         failures: list[str],
         p: 'shared.Printer',
-    ) -> dict:
+    ) -> shared.PackageManifest:
         """Parse package.json from the unpacked tarball; write
         manifest-analysis.txt.
-
-        Returns dict with keys: source_url, extensions, executables,
-        executables_list, post_install_msg, has_build_hooks,
-        has_install_scripts, runtime_dep_lines, manifest_license_raw,
-        manifest_text, manifest_extra_file, install_hook_context,
-        install_cmd_warnings.
         """
         source_url = ''
         extensions = 'NO'
@@ -763,7 +508,7 @@ class Hooks(shared.EcosystemHooks):
         pkg_json: dict = {}
 
         if unpacked_dir.is_dir():
-            pkg_json = _load_package_json(unpacked_dir)
+            pkg_json = self._load_package_json(unpacked_dir)
 
         if pkg_json:
             manifest_text = json.dumps(pkg_json, indent=2, ensure_ascii=False)
@@ -859,7 +604,7 @@ class Hooks(shared.EcosystemHooks):
             if _hook_combined:
                 _size_warn = shared.report_install_script_size(
                     _hook_combined, 'install hooks (combined)',
-                    p, _INSTALL_HOOK_WARN_BYTES, _INSTALL_HOOK_WARN_LINES,
+                    p, self.INSTALL_HOOK_WARN_BYTES, self.INSTALL_HOOK_WARN_LINES,
                 )
                 if _size_warn:
                     install_cmd_warnings.append(_size_warn)
@@ -912,7 +657,7 @@ class Hooks(shared.EcosystemHooks):
                 install_cmd_warnings.append(
                     'VCS_DEPENDENCY:package.json (named ref)')
 
-            source_url = _extract_source_url(pkg_json)
+            source_url = self.extract_source_url(pkg_json)
             hp_display = (
                 shared.sanitize_line(source_url) if source_url
                 else '(not found)')
@@ -924,7 +669,7 @@ class Hooks(shared.EcosystemHooks):
                 author = author.get('name', '') or ''
             p(f'AUTHOR: {shared.sanitize_line(str(author)[:200])}')
 
-            manifest_license_raw = _extract_license(pkg_json)
+            manifest_license_raw = self.extract_license(pkg_json)
             p('')
             lic_str = (
                 shared.sanitize_line(manifest_license_raw)
@@ -995,21 +740,21 @@ class Hooks(shared.EcosystemHooks):
         install_cmd_warnings.extend(
             shared.check_bundled_ide_dirs(unpacked_dir, p))
 
-        return {
-            'source_url': source_url,
-            'extensions': extensions,
-            'executables': executables,
-            'executables_list': executables_list,
-            'post_install_msg': post_install_msg,
-            'has_build_hooks': has_build_hooks,
-            'has_install_scripts': 'YES' if has_install_scripts else 'NO',
-            'runtime_dep_lines': runtime_dep_lines,
-            'manifest_license_raw': manifest_license_raw,
-            'manifest_text': manifest_text,
-            'manifest_extra_file': 'package-json.txt',
-            'install_hook_context': install_hook_context,
-            'install_cmd_warnings': install_cmd_warnings,
-        }
+        return shared.PackageManifest(
+            source_url=source_url,
+            extensions=extensions,
+            executables=executables,
+            executables_list=executables_list,
+            post_install_msg=post_install_msg,
+            has_build_hooks=has_build_hooks,
+            has_install_scripts='YES' if has_install_scripts else 'NO',
+            runtime_dep_lines=runtime_dep_lines,
+            manifest_license_raw=manifest_license_raw,
+            manifest_text=manifest_text,
+            manifest_extra_file='package-json.txt',
+            install_hook_context=install_hook_context,
+            install_cmd_warnings=install_cmd_warnings,
+        )
 
     def download_old(
         self,
@@ -1041,7 +786,7 @@ class Hooks(shared.EcosystemHooks):
             if tgz_candidates:
                 tgz_file = max(
                     tgz_candidates, key=lambda p: p.stat().st_mtime)
-                if _unpack_tgz(tgz_file, old_dir, failures, 'unpack-old'):
+                if self._unpack_tgz(tgz_file, old_dir, failures, 'unpack-old'):
                     ok = True
                     source = 'fetched'
                 else:
@@ -1057,32 +802,14 @@ class Hooks(shared.EcosystemHooks):
         )
         return {'ok': ok, 'source': source, 'unpacked_dir': old_dir}
 
-    def get_old_license(
-        self,
-        pkgname: str,
-        old_ver: str,
-        old_unpacked_dir: Path,
-    ) -> str | None:
-        """Extract raw license from the old version's package.json."""
-        if not old_unpacked_dir or not Path(old_unpacked_dir).is_dir():
-            return None
-        pkg_json = _load_package_json(Path(old_unpacked_dir))
-        return _extract_license(pkg_json) or None
+    def _read_old_manifest(self, old_unpacked_dir: Path, pkgname: str) -> dict | None:
+        pkg_json = self._load_package_json(old_unpacked_dir)
+        return pkg_json if pkg_json else None
 
-    def get_old_dep_lines(
-        self,
-        pkgname: str,
-        old_ver: str,
-        old_result: dict,
-    ) -> list[str]:
-        """Extract runtime dependency lines from the old version's
-        package.json."""
-        if not old_result.get('ok'):
+    def _extract_old_dep_lines(self, old_unpacked_dir: Path, pkgname: str) -> list[str]:
+        pkg_json = self._read_old_manifest(old_unpacked_dir, pkgname)
+        if not pkg_json:
             return []
-        old_unpacked = old_result.get('unpacked_dir')
-        if not old_unpacked or not Path(old_unpacked).is_dir():
-            return []
-        pkg_json = _load_package_json(Path(old_unpacked))
         deps = pkg_json.get('dependencies', {}) or {}
         opt_deps = pkg_json.get('optionalDependencies', {}) or {}
         all_runtime = dict(deps)
@@ -1263,14 +990,64 @@ class Hooks(shared.EcosystemHooks):
         # Idea 16: GitHub repo campaign marker (cross-ecosystem shared helper).
         shared.emit_github_repo_meta(source_url, p)
 
-        # Idea 15: SLSA provenance signer/repo mismatch (JS only).
-        # npm exposes provenance attestations without external tooling.
-        _check_slsa_provenance(api_base, encoded_name, source_url, p)
+        # Idea 15: SLSA provenance signer/repo mismatch.
+        # Fetch attestations; base class check_provenance() emits the report.
+        prov_url = f'{api_base}/-/package/{encoded_name}/provenance'
+        prov_data = shared.http_get(prov_url)
+        if not prov_data:
+            _provenance: dict = {'status': 'no_data'}
+        else:
+            try:
+                prov_json = json.loads(
+                    prov_data.decode('utf-8', errors='replace'))
+                attestations = prov_json.get('attestations', []) or []
+                _provenance = {'status': 'ok', 'attestations': attestations}
+            except ValueError:
+                _provenance = {'status': 'error'}
 
-        # Idea 14: Publisher velocity anomaly (JS only).
-        # A publisher who pushed many packages in the last 72 hours is a
-        # strong account-takeover or worm indicator.
-        _check_publisher_velocity(api_base, npm_user_name, p)
+        # Idea 14: Publisher velocity anomaly.
+        # Fetch search results; base class check_publisher_velocity() emits.
+        _publisher_stats: dict | None = None
+        if (npm_user_name
+                and _RE_NPM_USER.match(npm_user_name)
+                and 'registry.npmjs.org' in api_base):
+            search_url = (
+                'https://registry.npmjs.org/-/v1/search'
+                f'?text=maintainer:'
+                f'{urllib.parse.quote(npm_user_name, safe="")}'
+                '&size=250'
+            )
+            search_data = shared.http_get(search_url, timeout=20)
+            if search_data:
+                try:
+                    search_json = json.loads(
+                        search_data.decode('utf-8', errors='replace'))
+                    now = datetime.now(timezone.utc)
+                    window = self.VELOCITY_WINDOW_SECS
+                    recent_count = 0
+                    oldest_dt: 'datetime | None' = None
+                    objects = search_json.get('objects', []) or []
+                    for obj in objects:
+                        pkg = obj.get('package', {}) or {}
+                        date_str = str(pkg.get('date', '') or '')
+                        if not date_str:
+                            continue
+                        pub_dt = self._parse_npm_date(date_str)
+                        if pub_dt is None:
+                            continue
+                        age_secs = (now - pub_dt).total_seconds()
+                        if 0 <= age_secs <= window:
+                            recent_count += 1
+                        if oldest_dt is None or pub_dt < oldest_dt:
+                            oldest_dt = pub_dt
+                    _publisher_stats = {
+                        'publisher_name': npm_user_name,
+                        'recent_72h_count': recent_count,
+                        'total_count': len(objects),
+                        'oldest_dt': oldest_dt,
+                    }
+                except (ValueError, KeyError, TypeError):
+                    pass
 
         return {
             'mfa_status': mfa_status,
@@ -1281,6 +1058,8 @@ class Hooks(shared.EcosystemHooks):
             'version_stability': version_stability,
             'license_from_registry': license_from_registry,
             'ver_info_lines': ver_info_lines,
+            '_provenance': _provenance,
+            '_publisher_stats': _publisher_stats,
         }
 
     def check_lockfile(
@@ -1366,17 +1145,12 @@ class Hooks(shared.EcosystemHooks):
             '_dep_lines_old': dep_lines_old,
         }
 
-    def _detect_lockfile_format(self, filename: str) -> str:
-        """Return the lockfile format name for a given filename."""
-        if filename == 'package-lock.json':
-            return 'npm'
-        if filename == 'yarn.lock':
-            return 'yarn'
-        if filename == 'pnpm-lock.yaml':
-            return 'pnpm'
-        if filename == 'bun.lockb':
-            return 'bun'
-        return 'unknown'
+    LOCKFILE_FORMAT_MAP: dict[str, str] = {
+        'package-lock.json': 'npm',
+        'yarn.lock': 'yarn',
+        'pnpm-lock.yaml': 'pnpm',
+        'bun.lockb': 'bun',
+    }
 
     def _dep_in_lockfile(
         self, dep_name: str, lf_text: str, fmt: str,
@@ -1540,32 +1314,21 @@ class Hooks(shared.EcosystemHooks):
         # --- A: Node.js built-in module names ---
         builtin_names = self._get_node_builtin_names()
         builtin_lower = {m.lower() for m in builtin_names}
-
-        for mod in builtin_names:
-            mod_lower = mod.lower()
-            if mod_lower == bare_name or mod_lower == pkg_lower:
-                concerns.append(
-                    f'EXACT_BUILTIN_MATCH: "{pkgname}" matches '
-                    f'Node.js built-in "{mod}". '
-                    'Installing an external package with the same '
-                    'name as a built-in is a '
-                    'strong dependency-confusion signal: '
-                    'the built-in will shadow the '
-                    'external package in most Node.js contexts.'
-                )
-            else:
-                dist = shared.levenshtein(bare_name, mod_lower)
-                if dist == 1:
-                    concerns.append(
-                        f'NEAR_MATCH(dist=1): "{pkgname}" is one edit'
-                        f' from built-in "{mod}". '
-                        'Classic typosquat pattern.'
-                    )
-                elif dist == 2:
-                    notes.append(
-                        f'NEAR_MATCH(dist=2): "{pkgname}" is two edits'
-                        f' from built-in "{mod}".'
-                    )
+        builtin_exact = {m for m in builtin_names
+                         if m.lower() == bare_name or m.lower() == pkg_lower}
+        for mod in builtin_exact:
+            concerns.append(
+                f'EXACT_BUILTIN_MATCH: "{pkgname}" matches '
+                f'Node.js built-in "{mod}". '
+                'Installing an external package with the same '
+                'name as a built-in is a '
+                'strong dependency-confusion signal: '
+                'the built-in will shadow the '
+                'external package in most Node.js contexts.'
+            )
+        self._lev_check(pkgname, bare_name,
+                        [m for m in builtin_names if m not in builtin_exact],
+                        'built-in', concerns, notes)
 
         # --- B: Project lockfile deps ---
         lockfile = self.get_lockfile_path(project_root)
@@ -1643,28 +1406,9 @@ class Hooks(shared.EcosystemHooks):
                 )
 
         # C2: common JS wrapper prefix/suffix stripping
-        strip_prefixes = ('node-', 'js-', 'browser-')
-        strip_suffixes = ('-js', '-node')
-        for prefix in strip_prefixes:
-            if bare_name.startswith(prefix):
-                base = bare_name[len(prefix):]
-                if base in all_known_bare:
-                    concerns.append(
-                        f'PREFIX_SHADOW: "{pkgname}" appears to wrap '
-                        f'existing module/package '
-                        f'"{base}" (stripped prefix "{prefix}"). '
-                        'Verify this external wrapper is intentional.'
-                    )
-        for suffix in strip_suffixes:
-            if bare_name.endswith(suffix):
-                base = bare_name[: -len(suffix)]
-                if base in all_known_bare:
-                    concerns.append(
-                        f'SUFFIX_SHADOW: "{pkgname}" appears to wrap '
-                        f'existing module/package '
-                        f'"{base}" (stripped suffix "{suffix}"). '
-                        'Verify this external wrapper is intentional.'
-                    )
+        self._check_strip_rules(pkgname, bare_name, all_known_bare,
+                                ('node-', 'js-', 'browser-'), ('-js', '-node'),
+                                concerns)
 
         with shared.Printer(work / 'alternatives.txt') as _p_alt:
             return shared.write_alternatives(
@@ -1742,51 +1486,16 @@ class Hooks(shared.EcosystemHooks):
             'primary_pattern': r'\.(js|mjs|cjs|ts|jsx|tsx)$',
         }
 
-    def reproducible_build(
-        self,
-        pkgname: str,
-        version: str,
-        work: Path,
-        sandbox: str,
-        p: 'shared.Printer',
-    ) -> tuple[str, int, int]:
-        """Attempt to reproduce the npm pack output from the source clone.
+    REPRO_BUILT_DIR_SUFFIX = 'raw-built-tgz'
 
-        Runs 'npm pack' in the cloned source and compares the resulting
-        tarball contents against the distributed package. Note: npm tarballs
-        are not bitwise-reproducible across machines due to embedded
-        timestamps; this check therefore compares unpacked file contents
-        rather than SHA256 hashes.
-
-        Returns (repro_result, code_diffs, metadata_diffs).
-        repro_result is one of:
-          SKIPPED
-          INCONCLUSIVE
-          EXACTLY REPRODUCIBLE (sha256 match)
-          EXACTLY REPRODUCIBLE (content match)
-          FUNCTIONALLY EQUIVALENT (metadata-only diffs)
-          UNEXPECTED DIFFERENCES
-        """
-        clone_dir = work / 'source'
-        built_tgz_dir = work / 'raw-built-tgz'
-        built_tgz_dir.mkdir(exist_ok=True)
-
-        p(f'=== Reproducible build: {pkgname} {version} ===')
-        p(f'Sandbox: {sandbox}')
-        p('')
-
-        if not clone_dir.is_dir():
-            return shared.finish_reproducible_build(
-                p, work, 'SKIPPED (no source clone)')
-
+    def _repro_setup(
+        self, clone_dir: Path, work: Path, p: 'shared.Printer',
+    ) -> 'Path | str':
         rc_nv, nv_out, _ = shared.run_cmd(['npm', '--version'], timeout=10)
         npm_ver = (
-            shared.sanitize_line(nv_out.strip()) if rc_nv == 0
-            else 'unknown')
+            shared.sanitize_line(nv_out.strip()) if rc_nv == 0 else 'unknown')
         p(f'NPM_VERSION: {npm_ver}')
-
-        # Find package.json in the source clone; check one level deep
-        # for monorepos
+        # Find package.json; check one level deep for monorepos.
         pkg_json_path = clone_dir / 'package.json'
         if not pkg_json_path.is_file():
             for child in clone_dir.iterdir():
@@ -1795,75 +1504,70 @@ class Hooks(shared.EcosystemHooks):
                     pkg_json_path = clone_dir / 'package.json'
                     break
         if not pkg_json_path.is_file():
-            return shared.finish_reproducible_build(
-                p, work, 'SKIPPED (no package.json in source)')
-
+            return 'SKIPPED (no package.json in source)'
         p(f'BUILD_ROOT: {shared.sanitize_line(str(clone_dir))}')
-        build_log_path = work / 'raw-build-output.txt'
+        return clone_dir
 
+    def _repro_run_build(
+        self, build_root: Path, built_dir: Path, sandbox: str,
+    ) -> 'tuple[int, str] | None':
         rc_nv2, nv2_out, _ = shared.run_cmd(['node', '--version'], timeout=5)
         node_tag = 'lts'
         if rc_nv2 == 0:
             m = re.match(r'v(\d+)', nv2_out.strip())
             if m:
                 node_tag = m.group(1)
-
-        build_result = shared.run_sandboxed(
-            sandbox, clone_dir, built_tgz_dir,
+        return shared.run_sandboxed(
+            sandbox, build_root, built_dir,
             'cd {src} && npm pack --pack-destination {out}',
             f'node:{node_tag}',
             container_shell_cmd=(
                 'cp -r {src} /tmp/src && cd /tmp/src'
                 ' && npm pack --pack-destination {out}'
             ),
-            firejail_cwd=clone_dir,
+            firejail_cwd=build_root,
         )
-        if build_result is None:
-            return shared.finish_reproducible_build(
-                p, work,
-                'SKIPPED (no sandbox available: install bwrap, '
-                'firejail, docker, or podman)',
-            )
-        rc_b, combined = build_result
-        build_log_path.write_text(
-            combined, encoding='utf-8', errors='replace')
-        build_ok = (rc_b == 0)
 
-        p(f'BUILD_STATUS: {"yes" if build_ok else "no"}')
-
-        if not build_ok:
-            return shared.finish_reproducible_build(
-                p, work, 'INCONCLUSIVE (build failed)')
-
-        built_tgzs = list(built_tgz_dir.glob('*.tgz'))
+    def _repro_compare(
+        self,
+        pkgname: str,
+        version: str,
+        built_dir: Path,
+        work: Path,
+        p: 'shared.Printer',
+    ) -> tuple[str, int, int]:
+        built_tgzs = list(built_dir.glob('*.tgz'))
         if not built_tgzs:
             return shared.finish_reproducible_build(
                 p, work, 'INCONCLUSIVE (no .tgz produced)')
+        # Select newest: npm pack timestamps vary across runs.
         built_tgz = max(built_tgzs, key=lambda tgz: tgz.stat().st_mtime)
-
         built_sha = shared.sha256_file(built_tgz)
         if (repro := shared.compare_repro_sha256(built_sha, work, p)) is not None:
             return repro
-
-        # Hashes will nearly always differ (timestamps); compare unpacked contents
+        # Hashes nearly always differ (timestamps); compare unpacked contents.
         built_unpacked = work / 'raw-built-unpacked'
         built_unpacked.mkdir(exist_ok=True)
-        _unpack_tgz(built_tgz, built_unpacked, [], 'repro-unpack')
-
+        self._unpack_tgz(built_tgz, built_unpacked, [], 'repro-unpack')
         dist_unpacked = work / 'unpacked'
         if not dist_unpacked.is_dir():
-            return shared.finish_reproducible_build(p, work, 'INCONCLUSIVE (hashes differ, no dist unpacked dir)')
-
+            return shared.finish_reproducible_build(
+                p, work,
+                'INCONCLUSIVE (hashes differ, no dist unpacked dir)')
         rc_diff, diff_out, _ = shared.run_cmd(
-            ['diff', '-r', str(built_unpacked), str(dist_unpacked), '--exclude=*.map'],
+            ['diff', '-r', str(built_unpacked), str(dist_unpacked),
+             '--exclude=*.map'],
             timeout=60,
         )
-        (work / 'raw-repro-diff.txt').write_text(diff_out, encoding='utf-8', errors='replace')
-
+        (work / 'raw-repro-diff.txt').write_text(
+            diff_out, encoding='utf-8', errors='replace')
         diff_line_count = len(diff_out.splitlines())
         p(f'CONTENT_DIFF_LINES: {diff_line_count}')
-
         if diff_line_count == 0:
-            return shared.finish_reproducible_build(p, work, 'EXACTLY REPRODUCIBLE (content match)')
+            return shared.finish_reproducible_build(
+                p, work, 'EXACTLY REPRODUCIBLE (content match)')
+        return shared.classify_repro_diffs(
+            diff_out, p, work, _RE_REPRO_CODE, _RE_REPRO_META)
 
-        return shared.classify_repro_diffs(diff_out, p, work, _RE_REPRO_CODE, _RE_REPRO_META)
+
+Analyzer = JavaScriptAnalyzer   # used by dep_review.py for instantiation

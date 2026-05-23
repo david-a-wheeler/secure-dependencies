@@ -232,6 +232,33 @@ included in the SKILL.md prompt provided to the sub-agent. The orchestrator
 the correct token. This prevents a compromised package from injecting a fake
 `NEXT_ACTION: APPROVE` that the orchestrator would accept.
 
+## Tier 2 partial exposure to package-derived data
+
+Tier 2 cannot be completely shielded from package-derived content:
+it must read `signals.txt` and related structured files to do its job,
+and those files include values drawn from the package (name, version,
+source URL, pattern-match results, etc.).
+
+Several measures limit the risk from this unavoidable exposure:
+
+- **Character-level sanitization**: all values pass through `Printer`
+  before being written to any file tier 2 reads, stripping bidi controls,
+  zero-width characters, terminal escape sequences, and other non-printable
+  characters used in "Trojan Source" and similar attacks.
+- **Structured field labels**: each piece of package-derived data appears
+  after an explicit label (`PACKAGE:`, `VERSION:`, `SOURCE_URL:`, etc.),
+  providing framing that makes it harder for a field value to be
+  mistaken for an instruction.
+- **Adversarial gate**: before tier 2 reads anything, the deterministic
+  scripts scan for explicit prompt-injection patterns and known campaign
+  fingerprints; a match aborts the analysis immediately (see above).
+- **No raw content**: tier 2 never reads raw source files, diffs, or file
+  listings; only summarized signals and validated tier 3 JSON reach it.
+
+A sufficiently crafted package name or description could still attempt
+injection through a structured field. The field-label framing reduces this
+risk; the adversarial gate is the primary defense against explicit attempts.
+
 ## "Download before install" principle
 
 A core workflow constraint: the package is always downloaded and analyzed
@@ -440,14 +467,158 @@ Scripts live in `scripts/`:
 | `dep_review.py` | Per-package analysis: download, inspect, diff, health |
 | `analysis_shared.py` | Shared utilities including tier 3 AI sandbox |
 | `fetch_json.py` | Registry JSON fetcher with caching |
-| `hooks_ruby.py` | Ruby-specific ecosystem hooks (RubyGems) |
-| `hooks_python.py` | Python-specific ecosystem hooks (PyPI) |
+| `analyzer_ruby.py` | Ruby-specific ecosystem analyzer (RubyGems) |
+| `analyzer_python.py` | Python-specific ecosystem analyzer (PyPI) |
+| `analyzer_js.py` | JavaScript-specific ecosystem analyzer (npm) |
 
 Run the test suite with:
 
 ```
 make test
 ```
+
+### Key constructs in scripts
+
+**`analysis_shared.py`**: the shared foundation used by all other scripts.
+
+- Classes and dataclasses:
+  - `Printer`: write-through printer that auto-sanitizes every line
+    through `sanitize()` before writing; used everywhere output might
+    contain attacker-controlled text.
+  - `ArchiveSecurityError`: raised by the extraction helpers when an
+    archive violates security limits (path traversal, decompression
+    bomb, etc.).
+  - `PackageManifest` (dataclass): typed result from
+    `EcosystemAnalyzer.read_manifest()`; holds name, version, license,
+    deps, source URL, and other fields with safe defaults.
+  - `SignalContext` (dataclass): bundles all inputs to `write_signals()`
+    so the call site stays stable as new signals are added.
+  - `SignalReport` (dataclass): machine-readable summary written as
+    `signals.json` alongside `signals.txt`; mirrors what
+    `_parse_signals()` extracts.
+  - `EcosystemAnalyzer` (ABC): abstract base class implemented by each
+    ecosystem module; defines the full analysis contract (manifest
+    reading, lockfile checks, registry queries, typosquat detection,
+    reproducible build). Notable members:
+    - `LOCKFILE_FORMAT_MAP` (class attribute): maps lockfile filenames
+      to format tokens; used by the concrete `_detect_lockfile_format()`
+      helper.
+    - `REPRO_BUILT_DIR_SUFFIX` (class attribute): names the work
+      subdirectory for built artifacts (e.g., `raw-built-whl`).
+    - `reproducible_build()` (template method): orchestrates the common
+      build/compare skeleton; delegates ecosystem-specific steps to
+      `_repro_setup()`, `_repro_run_build()`, `_repro_compare()`.
+    - `_lev_check()` / `_check_strip_rules()` (concrete helpers):
+      shared typosquat detection logic (Levenshtein near-match and
+      prefix/suffix shadow checks).
+    - `get_old_license()` / `get_old_dep_lines()` (concrete helpers):
+      extract license and dep lines from the old version's manifest
+      via the abstract `_read_old_manifest()`.
+
+- Key module-level functions:
+  - `sanitize()` / `sanitize_line()`: strip terminal escapes, bidi
+    controls, and disallowed Unicode; the foundation of output safety.
+  - `run_cmd()`: run a subprocess, return `(rc, stdout, stderr)`,
+    never raises; each stream capped at 10 MB.
+  - `run_sandboxed()`: run a build command inside bwrap/firejail/
+    docker/podman; returns `(rc, combined_output)` or `None` if no
+    sandbox is available.
+  - `run_ai_sandbox()`: invoke the tier-3 AI subprocess, validate the
+    JSON response against a schema, return a parsed dict or a FAILED
+    sentinel.
+  - `levenshtein()`: edit distance between two strings; used for
+    typosquat detection.
+  - `extract_zip_securely()` / `tarfile_extractall_safe()`: archive
+    extraction with size, file-count, path-traversal, and symlink
+    limits.
+  - `clone_source_repo()`: shallow-clone the upstream source at the
+    version tag into the work directory.
+  - `http_get()` / `http_post()`: HTTPS-only fetches capped at 10 MB;
+    reject `file://` and other non-HTTPS schemes.
+  - `blind_scan()`: run grep on package files, save raw matches (never
+    read by AI), write a sanitized count summary.
+  - `compare_pkg_vs_source()`: compare the distributed package file
+    tree vs the cloned source; finds files present in the tarball but
+    absent from the repo.
+  - `finish_reproducible_build()` / `compare_repro_sha256()` /
+    `classify_repro_diffs()`: helpers used by the `reproducible_build()`
+    template method after the build step.
+
+**`analyzer_python.py`**, **`analyzer_ruby.py`**,
+**`analyzer_js.py`**: one file per ecosystem; each contains a single
+class that implements `EcosystemAnalyzer`:
+
+- `PythonAnalyzer`: PyPI/wheel ecosystem.
+- `RubyAnalyzer`: RubyGems/gem ecosystem.
+- `JavaScriptAnalyzer`: npm/tarball ecosystem.
+
+Each class defines class-level constants (`ECOSYSTEM`,
+`LOCKFILE_FORMAT_MAP`, `REPRO_BUILT_DIR_SUFFIX`, `DANGEROUS_PATTERNS`,
+`DIFF_PATTERNS`, `NATIVE_BINARY_SUFFIXES`) and implements:
+
+- `read_manifest()`: parse the ecosystem manifest (METADATA, gemspec,
+  package.json) into a `PackageManifest`.
+- `fetch_all_registry_data()`: query the ecosystem registry (PyPI,
+  RubyGems, npm) for metadata signals.
+- `check_lockfile()`: compare new vs. old runtime deps; flag VCS deps
+  and deps absent from the lockfile.
+- `check_alternatives()`: screen the package name for typosquatting,
+  slopsquatting, and dependency confusion.
+- `get_transitive_deps()`: look up declared dependencies and
+  cross-check against the lockfile.
+- `_repro_setup()` / `_repro_run_build()` / `_repro_compare()`: the
+  three ecosystem-specific hooks for `reproducible_build()`.
+- `_read_old_manifest()` / `_extract_old_dep_lines()`: read the old
+  version's manifest for license and dep comparison.
+
+**`dep_review.py`**: orchestrates the full per-package analysis
+pipeline; no classes.
+
+- `run_analysis()`: top-level driver: downloads, unpacks, scans,
+  diffs, clones, and writes all per-package output files.
+- `write_signals()`: writes `signals.txt` (the main structured output
+  read by the tier-2 AI) using a `SignalContext`.
+- `run_scans()`: runs adversarial, TODO, and dangerous-pattern grep
+  scans over the full package source.
+- `run_diff_scans()`: runs diff-specific pattern scans on
+  `raw-diff-full.txt`.
+- `write_dep_files()`: writes `new-deps.txt`, `dep-lockfile-check.txt`,
+  `dep-registry.txt`.
+- `write_health_file()` / `write_license_file()`: write
+  `project-health.txt` and `license.txt`.
+- `main()`: CLI entry point; dispatches subcommands (`--basic`,
+  `--deeper`, `--alternatives`, `--install-probe`).
+
+**`dep_session.py`**: manages the BFS session queue and all
+cross-package state; no classes.
+
+- `cmd_init()`: create a new session file with the initial package
+  queue.
+- `cmd_complete()`: mark a package done, consume its
+  `session-update.json`, advance the queue, and print the next
+  `NEXT_ACTION`.
+- `cmd_resolve()`: resolve an unknown version for a queued dep, then
+  print `NEXT_ACTION`.
+- `print_next_action()`: emit the machine-readable `NEXT_ACTION` block
+  with the session token (replay-prevention).
+- `cmd_report()` / `cmd_wrap_up()`: generate per-package summary cards
+  and the final session Markdown report.
+- `cmd_vuln_audit()`: run `bundler-audit`, `pip-audit`, or `npm audit`
+  and format the output.
+- `cmd_health_scan()`: fetch registry health metadata for all installed
+  packages and print a triage table.
+- `load_session()` / `save_session()`: read and write the JSON session
+  file; `load_session` validates the `session_version` field and exits
+  on any mismatch.
+
+**`fetch_json.py`**: a small standalone CLI tool for fetching and
+caching registry JSON; no classes.
+
+- `fetch_json()`: fetch an HTTPS URL and parse as JSON.
+- `get_nested()`: walk a dot-separated key path into a nested
+  dict/list; returns `None` if any step is missing.
+- `main()`: CLI entry point; caches fetched JSON to a local file for
+  reuse across calls.
 
 ## Security
 

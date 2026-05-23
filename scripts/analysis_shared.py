@@ -39,9 +39,11 @@ import urllib.parse
 import urllib.request
 import zipfile
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import IO
 
 
 # ---------------------------------------------------------------------------
@@ -343,6 +345,14 @@ _TERMINAL_ESCAPE_RE = re.compile(
 
 
 def _sanitize_char(m: re.Match) -> str:
+    """Replacement callback for sanitize(): allow safe Unicode, map the rest to '?'.
+
+    Called for each character matched by _SANITIZE_RE (control characters,
+    non-ASCII, or stray ESC) in the text after escape-sequence removal.
+    Keeps letters, numbers, punctuation, symbols, combining marks, and space
+    separators (Unicode categories L, N, P, S, M, Zs). Everything else --
+    including unrecognized control characters -- becomes '?'.
+    """
     ch = m.group(0)
     if ch == '\x1b':  # naked or malformed ESC not consumed by _TERMINAL_ESCAPE_RE
         return '?'
@@ -432,15 +442,20 @@ class Printer:
     'hello ? world\\n'
     """
 
-    def __init__(self, dest: 'Path | io.IOBase' = sys.stdout) -> None:
+    def __init__(self, dest: 'Path | IO[str]' = sys.stdout) -> None:
         if isinstance(dest, Path):
-            self._f: io.IOBase = dest.open('w', encoding='utf-8')
+            self._f: IO[str] = dest.open('w', encoding='utf-8')
             self._owned = True
         else:
             self._f = dest
             self._owned = False
 
     def __call__(self, *args: object, sep: str = ' ', end: str = '\n') -> None:
+        """Write sanitized text; mirrors the print() signature.
+
+        All arguments are joined by sep, sanitized to strip terminal escapes
+        and disallowed Unicode, then written with end appended.
+        """
         self._f.write(sanitize(sep.join(str(a) for a in args)) + end)  # type: ignore[attr-defined]
 
     def getvalue(self) -> str:
@@ -961,7 +976,20 @@ def remove_symlinks(directory: Path) -> int:
     return removed
 
 
-def safe_dir_component(name: str, version: str) -> str:
+def safe_dir_component(name: str, version: str | None) -> str:
+    """Return a filesystem-safe 'name-version' directory component.
+
+    Replaces path separators so a malicious package name like '../evil'
+    cannot escape the work directory. Also collapses any remaining '..'
+    sequences that could be assembled from the name and version together.
+
+    >>> safe_dir_component('requests', '2.31.0')
+    'requests-2.31.0'
+    >>> safe_dir_component('../evil', '1.0')
+    '___evil-1.0'
+    >>> safe_dir_component('a', None)
+    'a-unknown'
+    """
     safe_name = name.replace('/', '_').replace('\\', '_')
     safe_ver = version.replace('/', '_').replace('\\', '_') if version else 'unknown'
     component = f'{safe_name}-{safe_ver}'
@@ -1404,8 +1432,9 @@ def cmd_available(name: str) -> bool:
 
 # ---------------------------------------------------------------------------
 # Adversarial scan patterns: language-agnostic; apply to every ecosystem.
-# DANGEROUS_PATTERNS (language-specific eval/exec/etc.) live in each
-# ecosystem script because the idioms differ across languages.
+# BASE_DANGEROUS_PATTERNS (language-agnostic) live in EcosystemAnalyzer and
+# apply to every ecosystem.  DANGEROUS_PATTERNS (eval/exec/etc.) live in
+# each ecosystem script because the idioms differ across languages.
 # ---------------------------------------------------------------------------
 
 ADVERSARIAL_PATTERNS: list[tuple[str, str]] = [
@@ -2734,7 +2763,7 @@ def run_sandboxed(
     used and containers have their own container_shell_cmd.
     IMPORTANT: must never be constructed from attacker-controlled data such as
     filenames discovered via rglob. Use cmd= for that; see the cmd description
-    and hooks_ruby.py reproducible_build for the canonical pattern.
+    and analyzer_ruby.py reproducible_build for the canonical pattern.
 
     Example using cmd (no shell, safe for attacker-controlled paths):
         run_sandboxed(
@@ -2822,7 +2851,7 @@ def run_sandboxed(
         # data (e.g. filenames from rglob). Callers that need a discovered path
         # for bwrap/firejail must use cmd= (exec list, no shell) and supply a
         # static container_shell_cmd (e.g. a glob like '*.gemspec'). See
-        # hooks_ruby.py reproducible_build for the canonical pattern.
+        # analyzer_ruby.py reproducible_build for the canonical pattern.
         raw = container_shell_cmd if container_shell_cmd is not None else shell_cmd
         script = raw.format(src='/src', out='/out')
         args = [sandbox, 'run', '--rm']
@@ -3025,7 +3054,7 @@ def write_transitive_deps(
     note: str = '',
 ) -> dict:
     """Write transitive-deps.txt (via p) and return the standard result dict."""
-    (work / 'raw-transitive-deps.txt')  # raw file written by caller; not touched here
+    # raw-transitive-deps.txt is written by the caller; not touched here
     p(f'=== Transitive dependency footprint: {pkgname} {version} ===')
     if note:
         p(f'NOTE: {note}')
@@ -3641,10 +3670,193 @@ def lookup_oss_rebuild(
 
 
 # ---------------------------------------------------------------------------
+# Sigstore / SLSA provenance helpers (shared across ecosystems)
+# ---------------------------------------------------------------------------
+
+def slsa_signer_repo(attest: dict) -> tuple[str, str]:
+    """Extract (signer_repo_url, workflow_path) from one SLSA attestation.
+
+    Handles two predicate formats:
+      SLSA v1  (predicateType .../provenance/v1):
+        predicate.buildDefinition.externalParameters.workflow.{repository,path}
+      SLSA v0.2 (predicateType .../provenance/v0.2):
+        predicate.materials[0].uri  (git+https://github.com/owner/repo@ref)
+    Returns ('', '') when no usable URI is found.
+    """
+    import re as _re
+    predicate = attest.get('predicate', {}) or {}
+
+    # SLSA v1 path
+    workflow = (
+        predicate
+        .get('buildDefinition', {})
+        .get('externalParameters', {})
+        .get('workflow', {})
+    )
+    if isinstance(workflow, dict):
+        repo = str(workflow.get('repository', '') or '')
+        if repo:
+            return repo, str(workflow.get('path', '') or '')
+
+    # SLSA v0.2: materials[0].uri contains "git+https://...@ref"
+    materials = predicate.get('materials', []) or []
+    if materials and isinstance(materials[0], dict):
+        uri = str(materials[0].get('uri', '') or '')
+        if uri.startswith('git+'):
+            repo = _re.sub(r'^git\+', '', uri)
+            repo = _re.sub(r'@[^@]{0,200}$', '', repo)
+            if repo:
+                return repo, ''
+
+    return '', ''
+
+
+def norm_repo_url(url: str) -> str:
+    """Normalise a source/signer repo URL for comparison.
+
+    Strips scheme, git+ transport, .git suffix, and trailing slash, then
+    lowercases. Two URLs that differ only in these ways refer to the same repo.
+    """
+    import re as _re
+    url = _re.sub(r'^git\+', '', url.strip().lower().rstrip('/'))
+    url = _re.sub(r'^https?://', '', url)
+    url = _re.sub(r'^ssh://git@', '', url)
+    url = _re.sub(r'^git@([^:]+):', r'\1/', url)
+    url = _re.sub(r'\.git$', '', url)
+    return url
+
+
+# ---------------------------------------------------------------------------
+# Manifest data object
+# ---------------------------------------------------------------------------
+
+@dataclass
+class PackageManifest:
+    """Typed result from EcosystemAnalyzer.read_manifest().
+
+    All fields have safe defaults so a partially-populated instance is valid.
+    String 'YES'/'NO' fields match the established signal vocabulary used
+    throughout write_signals() and the AI prompt.
+    """
+    source_url: str = ''
+    extensions: str = 'NO'
+    executables: str = 'NO'
+    executables_list: str = ''
+    post_install_msg: str = 'NO'
+    has_build_hooks: str = 'NO'
+    has_install_scripts: str = 'NO'
+    manifest_license_raw: str = ''
+    manifest_text: str = ''
+    manifest_extra_file: str = ''
+    runtime_dep_lines: list[str] = field(default_factory=list)
+    install_hook_context: list[str] = field(default_factory=list)
+    install_cmd_warnings: list[str] = field(default_factory=list)
+    dangerous_what: str = ''
+
+
+# ---------------------------------------------------------------------------
+# Signal context object
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SignalContext:
+    """All inputs to write_signals(), bundled so the call site is stable.
+
+    Adding a new signal requires adding one field here and one reference
+    inside write_signals(); the call site itself does not change.
+    """
+    # Package identity
+    work: 'Path'
+    pkgname: str
+    old_ver: str
+    new_ver: str
+    diff_mode: bool
+    ecosystem: str
+    # Archive
+    sha256: str
+    # Manifest
+    manifest: PackageManifest
+    # Scans
+    scan_details: 'list[tuple[str, int]]'
+    total_matches: int
+    diff_scan_details: 'list[tuple[str, int]]'
+    diff_scan_matches: int
+    source_lines: int
+    # Source clone
+    clone_ok: bool
+    version_tag: str
+    commit_guessed: bool
+    source_url: str
+    source_likely_incompatible: bool
+    # Registry
+    registry: dict
+    badge: dict
+    scorecard: str
+    health_concerns: 'list[str]'
+    # Package content
+    extra_files: int
+    binary_files: int
+    # Diff (update mode)
+    diff_lines: int
+    changed_files: str
+    # Analysis results
+    license_result: dict
+    dep_result: dict
+    dep_registry: dict
+    transitive: dict
+    deeper_result: dict
+    failures: 'list[str]'
+    # Mode flags
+    deeper: bool
+    deeper_mode: bool = False
+    install_probe: bool = False
+    install_probe_mode: bool = False
+    # Optional results
+    vuln_result: 'dict | None' = None
+    has_security_policy: 'bool | None' = None
+    scorecard_checks: 'dict | None' = None
+    recent_commits: 'int | None' = None
+    commit_activity: 'dict | None' = None
+    ecosystems_data: 'dict | None' = None
+    oss_rebuild_result: 'dict | None' = None
+    diff_semantic_result: 'dict | None' = None
+    source_review_result: 'dict | None' = None
+
+
+# ---------------------------------------------------------------------------
+# Signal report object
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SignalReport:
+    """Machine-readable summary written as signals.json alongside signals.txt.
+
+    Fields mirror what _parse_signals() in dep_session.py extracts from
+    the text file, but are typed and authoritative. dep_session.py reads
+    signals.json when present rather than parsing text.
+    """
+    sha256: str = ''
+    risk_flags: str = 'NONE'
+    positive_flags: str = 'NONE'
+    adversarial_gate: str = 'CLEAR'
+    concern_count: int = 0
+    concern_level: str = 'NONE'
+    mode: str = ''
+    old_version: str = ''
+    license_line: str = ''
+    health_line: str = ''
+    clone_url: str = ''
+    clone_status: str = ''
+    extensions: str = 'NO'
+    executables: str = 'NO'
+    new_transitive_deps: str = ''
+
+
+# ---------------------------------------------------------------------------
 # Ecosystem hooks contract
 # ---------------------------------------------------------------------------
 
-class EcosystemHooks(ABC):
+class EcosystemAnalyzer(ABC):
     """Abstract base class for ecosystem-specific analysis hooks.
 
     Subclass this in each hooks_<ecosystem>.py module. Instantiate with the
@@ -3655,23 +3867,264 @@ class EcosystemHooks(ABC):
         LOCKFILE_NAME        Single lockfile filename, or None if the ecosystem
                              uses multiple formats (see LOCKFILE_NAMES).
         MANIFEST_FILE        Canonical manifest filename written to the work dir.
-        DANGEROUS_WHAT       Human-readable description of DANGEROUS_PATTERNS.
-        DANGEROUS_PATTERNS   list[tuple[str, str]] of (label, regex) pairs.
+        DANGEROUS_PATTERNS   Ecosystem-specific (label, regex, description) triples;
+                             combined with BASE_DANGEROUS_PATTERNS by
+                             all_dangerous_patterns().
         DIFF_PATTERNS        list[tuple[str, str]] of (label, regex) pairs.
     """
 
     ECOSYSTEM: str
     LOCKFILE_NAME: str | None
     MANIFEST_FILE: str
-    DANGEROUS_WHAT: str
-    DANGEROUS_PATTERNS: list[tuple[str, str]]
+    DANGEROUS_PATTERNS: list[tuple[str, str, str]]
     DIFF_PATTERNS: list[tuple[str, str]]
     OSV_ECOSYSTEM: str
     OSS_REBUILD_ECOSYSTEM: str
     NATIVE_BINARY_SUFFIXES: frozenset[str]
+    REPRO_BUILT_DIR_SUFFIX: str   # e.g. 'raw-built-whl', 'raw-built-gem'
+    # Maps each lockfile filename to a format token used by _dep_in_lockfile.
+    # Override in subclasses that support multiple lockfile formats.
+    LOCKFILE_FORMAT_MAP: dict[str, str] = {}
+
+    # Language-agnostic patterns applied to every ecosystem.
+    # Subclasses must NOT repeat these; call all_dangerous_patterns() instead
+    # of DANGEROUS_PATTERNS to get the combined list.
+    BASE_DANGEROUS_PATTERNS: list[tuple[str, str, str]] = [
+        ('ide-config-write', IDE_CONFIG_PATHS_RE,
+         'IDE/AI-tool config writes (.vscode, .cursor, .claude, etc.)'),
+        ('mini-shai-hulud-paths', MINI_SHAI_HULUD_PATHS_RE,
+         'Mini Shai-Hulud campaign artifacts (known backdoor install paths)'),
+        ('exfil-relay-domain', EXFIL_RELAY_DOMAINS_RE,
+         'exfiltration relay services and known C2 domains'),
+        # Orphan-commit fetch: fetch verb on the same line as a bare 40-hex SHA.
+        # Legitimate pinning uses lockfiles, not bare commit SHAs.
+        ('github-fetch-by-sha', GITHUB_SHA_FETCH_RE,
+         'GitHub fetch by bare commit SHA (orphan-commit injection)'),
+        # The specific ?q=firedalazer form is in ADVERSARIAL_PATTERNS (abort);
+        # this catches the general endpoint for novel campaign variants.
+        ('github-commit-search-c2', GITHUB_COMMIT_SEARCH_RE,
+         'GitHub commit-search API as C2 dead-drop channel'),
+        # 24.6.27 base64 format; exact quantifiers keep this ReDoS-safe.
+        ('discord-token-format', DISCORD_TOKEN_RE,
+         'Discord bot token format (harvested credential)'),
+        # 5+ single chars joined by + to assemble a keyword char-by-char.
+        ('string-split-obfuscation', STRING_SPLIT_RE,
+         'string-split obfuscation (char-by-char keyword assembly)'),
+        ('long-line-obfuscation', LONG_LINE_RE,
+         'unusually long lines (embedded payload or obfuscated code)'),
+        ('reverse-shell', REVERSE_SHELL_RE,
+         'reverse-shell indicators (bash /dev/tcp, nc -e, socat EXEC)'),
+        # Establishes a payload that survives reboots.
+        ('cron-persistence', CRON_PERSISTENCE_RE,
+         'cron persistence (crontab writes)'),
+        ('system-persistence', SYSTEM_PERSISTENCE_RE,
+         'systemd/LaunchAgent persistence'),
+        ('cryptominer', CRYPTOMINER_RE,
+         'cryptominer tools and Stratum mining protocol'),
+    ]
+
+    def all_dangerous_patterns(self) -> list[tuple[str, str, str]]:
+        """Return ecosystem-specific patterns followed by base patterns."""
+        return self.DANGEROUS_PATTERNS + self.BASE_DANGEROUS_PATTERNS
+
+    def dangerous_what(self) -> str:
+        """Return a comma-separated summary of all patterns for the report."""
+        return ', '.join(desc for _, _, desc in self.all_dangerous_patterns())
+
+    # Publisher velocity policy (override in a subclass to tighten/loosen).
+    VELOCITY_WINDOW_SECS: int = 72 * 3600   # 72-hour publish window
+    VELOCITY_THRESHOLD: int = 10            # packages in window to flag
+    NEW_PUBLISHER_DAYS: int = 90            # tenure below which = HIGH severity
+
+    def check_provenance(
+        self, registry_data: dict, source_url: str, p: 'Printer',
+    ) -> None:
+        """Emit SLSA provenance report from registry_data['_provenance'].
+
+        Ecosystems populate registry_data['_provenance'] in
+        fetch_all_registry_data() using one of these sentinel values:
+          None                    provenance not checked (key absent or None)
+          {'status': 'no_data'}   HTTP fetch returned nothing
+          {'status': 'error'}     JSON parse failed
+          {'status': 'ok', 'attestations': [...]}  parsed attestation list
+        """
+        prov = registry_data.get('_provenance')
+        if not prov:
+            return
+        p('')
+        p('=== SLSA provenance ===')
+        status = prov.get('status', '')
+        if status == 'no_data':
+            p('SLSA_PROVENANCE: none (package not published with --provenance)')
+            return
+        if status == 'error':
+            p('SLSA_PROVENANCE: parse error')
+            return
+        attestations = prov.get('attestations') or []
+        if not attestations:
+            p('SLSA_PROVENANCE: none (no attestations in registry response)')
+            return
+
+        signer_repo, workflow_path = '', ''
+        for attest in attestations:
+            signer_repo, workflow_path = slsa_signer_repo(attest)
+            if signer_repo:
+                break
+
+        if not signer_repo:
+            p('SLSA_PROVENANCE: present but signer repository URI not found')
+            return
+
+        p(f'SLSA_SIGNER_REPO: {sanitize_line(signer_repo[:300])}')
+        if workflow_path:
+            p(f'SLSA_WORKFLOW_PATH: {sanitize_line(workflow_path[:200])}')
+
+        if not source_url:
+            p('SIGSTORE_REPO_MISMATCH: N/A (no declared source URL to compare)')
+            return
+
+        if norm_repo_url(signer_repo) != norm_repo_url(source_url):
+            p('SIGSTORE_REPO_MISMATCH: YES')
+            p(f'  declared: {sanitize_line(source_url[:300])}')
+            p(f'  signer:   {sanitize_line(signer_repo[:300])}')
+            p('  NOTE: surface for human review; monorepos may sign from a')
+            p('  parent repo. A mismatch combined with other signals is HIGH.')
+        else:
+            p('SIGSTORE_REPO_MISMATCH: NO')
+
+    def check_publisher_velocity(
+        self, registry_data: dict, p: 'Printer',
+    ) -> None:
+        """Emit publisher velocity report from registry_data['_publisher_stats'].
+
+        Ecosystems populate registry_data['_publisher_stats'] in
+        fetch_all_registry_data() as:
+          {'publisher_name': str, 'recent_72h_count': int,
+           'total_count': int, 'oldest_dt': datetime | None}
+        Absent or None means velocity was not checked for this ecosystem.
+        """
+        stats = registry_data.get('_publisher_stats')
+        if not stats:
+            return
+
+        publisher_name = stats.get('publisher_name', '')
+        recent_count = stats.get('recent_72h_count', 0)
+        total_count = stats.get('total_count', 0)
+        oldest_dt = stats.get('oldest_dt')
+
+        p('')
+        p(f'=== Publisher velocity: {sanitize_line(publisher_name)} ===')
+        p(f'PUBLISHER_TOTAL_PACKAGES: {total_count}')
+        p(f'PUBLISHER_RECENT_72H: {recent_count}')
+
+        if recent_count >= self.VELOCITY_THRESHOLD:
+            now = datetime.now(timezone.utc)
+            tenure_days = (
+                int((now - oldest_dt).total_seconds() / 86400)
+                if oldest_dt else None
+            )
+            is_new = (
+                tenure_days is not None and tenure_days < self.NEW_PUBLISHER_DAYS
+            )
+            severity = 'HIGH' if is_new else 'MEDIUM'
+            p(f'PUBLISHER_VELOCITY_ANOMALOUS: YES ({severity})')
+            p(f'  {recent_count} packages published in last 72h '
+              f'(threshold: {self.VELOCITY_THRESHOLD})')
+            if is_new:
+                p(f'  Publisher tenure: {tenure_days} days '
+                  f'(<{self.NEW_PUBLISHER_DAYS} days; '
+                  f'new publisher + high velocity = HIGH)')
+            elif tenure_days is not None:
+                p(f'  Publisher tenure: {tenure_days} days '
+                  f'(consider: may be a high-volume CI pipeline such as a monorepo)')
+        else:
+            p('PUBLISHER_VELOCITY_ANOMALOUS: NO')
+
+    def extract_source_url(self, raw_data: object) -> str:
+        """Extract source/repository URL from raw manifest/registry data.
+
+        Override in each ecosystem subclass with the ecosystem-specific
+        extraction logic. The base implementation returns ''.
+        """
+        return ''
+
+    def extract_license(self, raw_data: object) -> str:
+        """Extract raw license string from raw manifest/registry data.
+
+        Override in each ecosystem subclass with the ecosystem-specific
+        extraction logic. The base implementation returns ''.
+        """
+        return ''
 
     def __init__(self, registry_url: str | None = None) -> None:
         self.registry_url = registry_url
+
+    def _lev_check(
+        self,
+        pkgname: str,
+        compare_name: str,
+        candidates: list[str],
+        label: str,
+        concerns: list[str],
+        notes: list[str],
+    ) -> None:
+        """Append NEAR_MATCH concerns/notes for candidates within edit distance 2.
+
+        compare_name: normalized form of pkgname used for distance comparison
+          (e.g. pkg_lower, or the bare name for scoped JS packages).
+        label: what to call the candidate set in the message (e.g. 'stdlib module').
+        Exact matches are NOT handled here; callers check those separately.
+        """
+        for name in candidates:
+            dist = levenshtein(compare_name, name.lower())
+            if dist == 1:
+                concerns.append(
+                    f'NEAR_MATCH(dist=1): "{pkgname}" is one edit'
+                    f' from {label} "{name}". Classic typosquat pattern.')
+            elif dist == 2:
+                notes.append(
+                    f'NEAR_MATCH(dist=2): "{pkgname}" is two edits'
+                    f' from {label} "{name}".')
+
+    def _check_strip_rules(
+        self,
+        pkgname: str,
+        check_name: str,
+        known_set: set[str],
+        prefixes: tuple[str, ...],
+        suffixes: tuple[str, ...],
+        concerns: list[str],
+    ) -> None:
+        """Append PREFIX_SHADOW/SUFFIX_SHADOW concerns when stripping a
+        language-specific prefix or suffix reveals a name already in known_set.
+
+        check_name: normalized name to strip from (e.g. pkg_lower or bare_name).
+        """
+        for prefix in prefixes:
+            if check_name.startswith(prefix):
+                base = check_name[len(prefix):]
+                if base in known_set:
+                    concerns.append(
+                        f'PREFIX_SHADOW: "{pkgname}" appears to wrap'
+                        f' existing package "{base}"'
+                        f' (stripped prefix "{prefix}").'
+                        ' Verify this wrapper is intentional.')
+        for suffix in suffixes:
+            if check_name.endswith(suffix):
+                base = check_name[: -len(suffix)]
+                if base in known_set:
+                    concerns.append(
+                        f'SUFFIX_SHADOW: "{pkgname}" appears to wrap'
+                        f' existing package "{base}"'
+                        f' (stripped suffix "{suffix}").'
+                        ' Verify this wrapper is intentional.')
+
+    def _detect_lockfile_format(self, filename: str) -> str:
+        """Return the lockfile format token for a filename.
+
+        Uses LOCKFILE_FORMAT_MAP; returns 'unknown' for unrecognized names.
+        """
+        return self.LOCKFILE_FORMAT_MAP.get(filename, 'unknown')
 
     @abstractmethod
     def get_lockfile_path(self, project_root: Path) -> Path: ...
@@ -3685,7 +4138,7 @@ class EcosystemHooks(ABC):
     def read_manifest(
         self, pkgname: str, version: str, unpacked_dir: Path,
         work: Path, failures: list[str], p: 'Printer',
-    ) -> dict: ...
+    ) -> 'PackageManifest': ...
 
     @abstractmethod
     def download_old(
@@ -3693,14 +4146,52 @@ class EcosystemHooks(ABC):
     ) -> dict: ...
 
     @abstractmethod
-    def get_old_license(
-        self, pkgname: str, old_ver: str, old_unpacked_dir: Path,
-    ) -> str | None: ...
+    def _read_old_manifest(
+        self, old_unpacked_dir: Path, pkgname: str,
+    ) -> object | None:
+        """Return the parsed manifest for the old version, or None.
+
+        The returned type is ecosystem-specific (dict for Python/JS,
+        str for Ruby). Used by get_old_license and _extract_old_dep_lines.
+        """
 
     @abstractmethod
+    def _extract_old_dep_lines(
+        self, old_unpacked_dir: Path, pkgname: str,
+    ) -> list[str]:
+        """Return dep strings from the old version manifest."""
+
+    def get_old_license(
+        self, pkgname: str, old_ver: str, old_unpacked_dir: Path,
+    ) -> str | None:
+        """Return the SPDX license string from the old version, or None.
+
+        Returns None if old_unpacked_dir is absent or the manifest cannot
+        be parsed (missing file is not an error; old version may not have
+        been downloaded).
+        """
+        if not old_unpacked_dir or not Path(old_unpacked_dir).is_dir():
+            return None
+        manifest = self._read_old_manifest(Path(old_unpacked_dir), pkgname)
+        if manifest is None:
+            return None
+        return self.extract_license(manifest) or None
+
     def get_old_dep_lines(
         self, pkgname: str, old_ver: str, old_result: dict,
-    ) -> list[str]: ...
+    ) -> list[str]:
+        """Return dependency strings from the old version manifest.
+
+        Returns an empty list if the old download failed or the unpacked
+        directory is absent; callers treat an empty list as "no comparison
+        available" rather than "no dependencies".
+        """
+        if not old_result.get('ok'):
+            return []
+        old_unpacked = old_result.get('unpacked_dir')
+        if not old_unpacked or not Path(old_unpacked).is_dir():
+            return []
+        return self._extract_old_dep_lines(Path(old_unpacked), pkgname)
 
     @abstractmethod
     def fetch_all_registry_data(
@@ -3740,9 +4231,72 @@ class EcosystemHooks(ABC):
     def get_deep_source_config(self) -> dict: ...
 
     @abstractmethod
+    def _repro_setup(
+        self, clone_dir: Path, work: Path, p: 'Printer',
+    ) -> 'Path | str':
+        """Locate build manifest, print runtime version, return build root.
+
+        Returns the build root Path on success, or a SKIPPED/INCONCLUSIVE
+        result string on failure (passed directly to finish_reproducible_build).
+        """
+
+    @abstractmethod
+    def _repro_run_build(
+        self, build_root: Path, built_dir: Path, sandbox: str,
+    ) -> 'tuple[int, str] | None':
+        """Run the ecosystem build in a sandbox.
+
+        Returns (rc, combined_output) from run_sandboxed, or None if no
+        sandbox is available.
+        """
+
+    @abstractmethod
+    def _repro_compare(
+        self,
+        pkgname: str,
+        version: str,
+        built_dir: Path,
+        work: Path,
+        p: 'Printer',
+    ) -> tuple[str, int, int]:
+        """Find built artifact, compare with dist, return result tuple.
+
+        Returns (repro_result, code_diffs, meta_diffs).
+        """
+
     def reproducible_build(
         self, pkgname: str, version: str, work: Path, sandbox: str, p: 'Printer',
-    ) -> tuple[str, int, int]: ...
+    ) -> tuple[str, int, int]:
+        """Template method: orchestrate the reproducible-build check.
+
+        Common skeleton for all ecosystems; ecosystem-specific steps are
+        in _repro_setup, _repro_run_build, and _repro_compare.
+        """
+        clone_dir = work / 'source'
+        built_dir = work / self.REPRO_BUILT_DIR_SUFFIX
+        built_dir.mkdir(exist_ok=True)
+        p(f'=== Reproducible build: {pkgname} {version} ===')
+        p(f'Sandbox: {sandbox}')
+        p('')
+        if not clone_dir.is_dir():
+            return finish_reproducible_build(p, work, 'SKIPPED (no source clone)')
+        build_root = self._repro_setup(clone_dir, work, p)
+        if isinstance(build_root, str):
+            return finish_reproducible_build(p, work, build_root)
+        build_result = self._repro_run_build(build_root, built_dir, sandbox)
+        if build_result is None:
+            return finish_reproducible_build(
+                p, work,
+                'SKIPPED (no sandbox available:'
+                ' install bwrap, firejail, docker, or podman)',
+            )
+        rc_b, combined = build_result
+        (work / 'raw-build-output.txt').write_text(
+            combined, encoding='utf-8', errors='replace')
+        p(f'BUILD_STATUS: {"yes" if rc_b == 0 else "no"}')
+        if rc_b != 0:
+            return finish_reproducible_build(p, work, 'INCONCLUSIVE (build failed)')
+        return self._repro_compare(pkgname, version, built_dir, work, p)
 
 
 # ---------------------------------------------------------------------------

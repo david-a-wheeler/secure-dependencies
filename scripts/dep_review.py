@@ -15,7 +15,7 @@
 #
 # Known registries: rubygems, pypi, npm
 #
-# Loads language hooks via REGISTRY_TO_HOOKS map (e.g. rubygems → hooks_ruby).
+# Loads ecosystem analyzers via REGISTRY_TO_HOOKS map (e.g. rubygems → analyzer_ruby).
 # Output directory: ROOT/temp/dep-review/PKGNAME-NEW_VERSION/  (ROOT defaults to cwd)
 #
 # AI agents: read signals.txt for the complete self-describing report.
@@ -28,15 +28,17 @@ import sys
 if sys.version_info < (3, 10):
     sys.exit(f'dep_review.py requires Python 3.10 or later (running {sys.version})')
 
+import dataclasses
 import importlib
 import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import NoReturn
 
 sys.path.insert(0, str(Path(__file__).parent))
 import analysis_shared as shared
-from analysis_shared import Printer
+from analysis_shared import PackageManifest, Printer, SignalContext, SignalReport
 
 
 # ---------------------------------------------------------------------------
@@ -58,7 +60,7 @@ def sec(title: str) -> str:
 # Scan orchestration
 # ---------------------------------------------------------------------------
 
-def run_scans(hooks, unpacked_dir: Path, work: Path) -> tuple[int, list[tuple[str, int]], int]:
+def run_scans(analyzer, unpacked_dir: Path, work: Path) -> tuple[int, list[tuple[str, int]], int]:
     """Run adversarial + todo + dangerous-pattern scans on the full package.
 
     Returns (total_matches, [(label, count), ...], source_lines).
@@ -73,7 +75,11 @@ def run_scans(hooks, unpacked_dir: Path, work: Path) -> tuple[int, list[tuple[st
     if not unpacked_dir.is_dir():
         return 0, [], 0
     todo_labels = {label for label, _ in shared.TODO_PATTERNS}
-    for label, pattern in shared.ADVERSARIAL_PATTERNS + shared.TODO_PATTERNS + hooks.DANGEROUS_PATTERNS:
+    scan_patterns = (
+        [(lbl, pat) for lbl, pat in shared.ADVERSARIAL_PATTERNS + shared.TODO_PATTERNS]
+        + [(lbl, pat) for lbl, pat, _ in analyzer.all_dangerous_patterns()]
+    )
+    for label, pattern in scan_patterns:
         globs = shared.CODE_FILE_GLOBS if label in shared.ADVERSARIAL_CODE_ONLY_LABELS else None
         with shared.Printer(work / f'summary-scan-{label}.txt') as _p_scan:
             n = shared.blind_scan(label, pattern, unpacked_dir, work, _p_scan, include_globs=globs)
@@ -84,7 +90,7 @@ def run_scans(hooks, unpacked_dir: Path, work: Path) -> tuple[int, list[tuple[st
     return total, details, source_lines
 
 
-def run_diff_scans(hooks, work: Path, diff_lines: int) -> int:
+def run_diff_scans(analyzer, work: Path, diff_lines: int) -> int:
     """Run diff security scans on raw-diff-full.txt.
 
     Returns total diff scan matches.
@@ -93,7 +99,7 @@ def run_diff_scans(hooks, work: Path, diff_lines: int) -> int:
     if not diff_full_path.is_file() or diff_lines == 0:
         return 0
     total = 0
-    for label, pattern in hooks.DIFF_PATTERNS:
+    for label, pattern in analyzer.DIFF_PATTERNS:
         with shared.Printer(work / f'summary-scan-{label}.txt') as _p_scan:
             n = shared.blind_scan(label, pattern, diff_full_path, work, _p_scan)
         total += n
@@ -148,64 +154,64 @@ def _write_source_review(p: 'Printer', result: dict) -> None:
 # Old dep lines extraction
 # ---------------------------------------------------------------------------
 
-def _get_old_dep_lines(hooks, pkgname: str, old_ver: str, old_result: dict) -> list[str]:
-    """Extract runtime dep lines from old package manifest, via ecosystem hooks."""
-    return hooks.get_old_dep_lines(pkgname, old_ver, old_result)
+def _get_old_dep_lines(analyzer, pkgname: str, old_ver: str, old_result: dict) -> list[str]:
+    """Extract runtime dep lines from old package manifest."""
+    return analyzer.get_old_dep_lines(pkgname, old_ver, old_result)
 
 
 # ---------------------------------------------------------------------------
 # Signals writer
 # ---------------------------------------------------------------------------
 
-def write_signals(  # noqa: C901
-    work: Path,
-    p: Printer,
-    pkgname: str,
-    old_ver: str,
-    new_ver: str,
-    diff_mode: bool,
-    deeper: bool,
-    sha256: str,
-    manifest: dict,
-    scan_details: list[tuple[str, int]],
-    total_matches: int,
-    diff_scan_details: list[tuple[str, int]],
-    diff_scan_matches: int,
-    clone_ok: bool,
-    version_tag: str,
-    commit_guessed: bool,
-    source_url: str,
-    badge: dict,
-    extra_files: int,
-    binary_files: int,
-    diff_lines: int,
-    changed_files: str,
-    registry: dict,
-    scorecard: str,
-    health_concerns: list[str],
-    license_result: dict,
-    dep_result: dict,
-    dep_registry: dict,
-    transitive: dict,
-    deeper_result: dict,
-    failures: list[str],
-    ecosystem: str,
-    deeper_mode: bool = False,
-    install_probe: bool = False,
-    install_probe_mode: bool = False,
-    vuln_result: dict | None = None,
-    has_security_policy: bool | None = None,
-    scorecard_checks: dict | None = None,
-    recent_commits: int | None = None,
-    commit_activity: dict | None = None,
-    source_likely_incompatible: bool = False,
-    source_lines: int = 0,
-    ecosystems_data: dict | None = None,
-    oss_rebuild_result: dict | None = None,
-    diff_semantic_result: dict | None = None,
-    source_review_result: dict | None = None,
-) -> None:
+def write_signals(ctx: SignalContext, p: Printer) -> SignalReport:  # noqa: C901
     """Write the rich self-describing signals.txt report."""
+    # Unpack context fields into local names used throughout this function.
+    work = ctx.work
+    pkgname = ctx.pkgname
+    old_ver = ctx.old_ver
+    new_ver = ctx.new_ver
+    diff_mode = ctx.diff_mode
+    ecosystem = ctx.ecosystem
+    sha256 = ctx.sha256
+    manifest = ctx.manifest
+    scan_details = ctx.scan_details
+    total_matches = ctx.total_matches
+    diff_scan_details = ctx.diff_scan_details
+    diff_scan_matches = ctx.diff_scan_matches
+    source_lines = ctx.source_lines
+    clone_ok = ctx.clone_ok
+    version_tag = ctx.version_tag
+    commit_guessed = ctx.commit_guessed
+    source_url = ctx.source_url
+    source_likely_incompatible = ctx.source_likely_incompatible
+    registry = ctx.registry
+    badge = ctx.badge
+    scorecard = ctx.scorecard
+    health_concerns = ctx.health_concerns
+    extra_files = ctx.extra_files
+    binary_files = ctx.binary_files
+    diff_lines = ctx.diff_lines
+    changed_files = ctx.changed_files
+    license_result = ctx.license_result
+    dep_result = ctx.dep_result
+    dep_registry = ctx.dep_registry
+    transitive = ctx.transitive
+    deeper_result = ctx.deeper_result
+    failures = ctx.failures
+    deeper = ctx.deeper
+    deeper_mode = ctx.deeper_mode
+    install_probe = ctx.install_probe
+    install_probe_mode = ctx.install_probe_mode
+    vuln_result = ctx.vuln_result
+    has_security_policy = ctx.has_security_policy
+    scorecard_checks = ctx.scorecard_checks
+    recent_commits = ctx.recent_commits
+    commit_activity = ctx.commit_activity
+    ecosystems_data = ctx.ecosystems_data
+    oss_rebuild_result = ctx.oss_rebuild_result
+    diff_semantic_result = ctx.diff_semantic_result
+    source_review_result = ctx.source_review_result
+
     timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
     mode_label = 'UPDATE' if diff_mode else 'NEW/CURRENT'
 
@@ -223,11 +229,11 @@ def write_signals(  # noqa: C901
         risk_parts.append(f'MANY_EXTRA_FILES({extra_files})')
     if binary_files > 0:
         risk_parts.append(f'EMBEDDED_EXECUTABLES({binary_files})')
-    if manifest.get('extensions') == 'YES':
+    if manifest.extensions == 'YES':
         risk_parts.append('NATIVE_EXTENSION')
-    if manifest.get('post_install_msg') == 'YES':
+    if manifest.post_install_msg == 'YES':
         risk_parts.append('POST_INSTALL_MESSAGE')
-    _install_cmd_warns = manifest.get('install_cmd_warnings', [])
+    _install_cmd_warns = manifest.install_cmd_warnings
     if _install_cmd_warns:
         risk_parts.append(f'INSTALL_CMD_ATTACK({len(_install_cmd_warns)})')
     if diff_scan_matches > 0:
@@ -400,17 +406,17 @@ def write_signals(  # noqa: C901
             'extra_files',
             f'{extra_files}  [unusually high; threshold is 5; review extra-in-package.txt]',
         ))
-    if manifest.get('extensions') == 'YES':
+    if manifest.extensions == 'YES':
         _concerns.append((
             'native_extensions',
             'YES  [compiled code runs at install time; review build scripts in source for malicious steps]',
         ))
-    if manifest.get('executables') == 'YES':
+    if manifest.executables == 'YES':
         _concerns.append((
             'executables',
             'YES  [new executables added to PATH; risk of persistence or path hijacking]',
         ))
-    for _icw in manifest.get('install_cmd_warnings', []):
+    for _icw in manifest.install_cmd_warnings:
         _icw_sig, _, _icw_rest = _icw.partition(':')
         _icw_hook = _icw_rest or 'install script'
         if _icw_sig == 'INSTALL_SCRIPT_LARGE':
@@ -456,6 +462,7 @@ def write_signals(  # noqa: C901
             f'{diff_lines}  [large update diff; threshold is 500; read diff-filenames.txt and key changed files for semantic meaning]',
         ))
     _not_in_lockfile = transitive.get('not_in_lockfile', [])
+    new_trans_str = str(len(_not_in_lockfile))
     if _not_in_lockfile:
         _lf_note = '  [unusually large transitive footprint; review each new dep]' if len(_not_in_lockfile) > 10 \
             else '  [not in lockfile; each is a new unreviewed code surface]'
@@ -567,7 +574,8 @@ def write_signals(  # noqa: C901
 
     # ---- LICENSE ----
     p(sec('LICENSE'))
-    p(f'SPDX: {license_spdx}  |  OSI-approved: {license_osi}  |  Status: {license_status}')
+    license_line_str = f'SPDX: {license_spdx}  |  OSI-approved: {license_osi}  |  Status: {license_status}'
+    p(license_line_str)
     if license_changed:
         old_raw = license_result.get('old_raw', '')
         p(f'[!] License changed from previous version: "{old_raw}" -> "{license_result.get("current_raw", license_spdx)}"')
@@ -583,7 +591,8 @@ def write_signals(  # noqa: C901
     ver_pub_str = f'{ver_pub} days ago' if ver_pub is not None else 'unknown'
     owner_str = str(registry.get('owner_count_int')) if registry.get('owner_count_int') is not None else 'unknown'
     sc_str = scorecard
-    p(f'Age: {age_str} yr  |  Last release: {last_rel_str}  |  Owners: {owner_str}  |  Scorecard: {sc_str}')
+    health_line_str = f'Age: {age_str} yr  |  Last release: {last_rel_str}  |  Owners: {owner_str}  |  Scorecard: {sc_str}'
+    p(health_line_str)
     p(f'This version published: {ver_pub_str}')
     p(f'Stability: {registry.get("version_stability", "unknown")}')
     if recent_commits is not None:
@@ -620,9 +629,9 @@ def write_signals(  # noqa: C901
     if health_concerns:
         for hc in health_concerns:
             p(f'[!] {hc}')
-            for key, ctx in health_context.items():
+            for key, ctx_text in health_context.items():
                 if key.lower() in hc.lower():
-                    p(f'    Context: {ctx}')
+                    p(f'    Context: {ctx_text}')
                     break
     else:
         p('No health concerns.')
@@ -699,13 +708,12 @@ def write_signals(  # noqa: C901
 
     # ---- DANGEROUS CODE PATTERNS ----
     p(sec('DANGEROUS CODE PATTERNS'))
-    # Use ecosystem-specific description if the hooks module provides one,
+    # Use ecosystem-specific description if the analyzer module provides one,
     # otherwise fall back to a generic summary.
-    dangerous_what = manifest.get(
-        '_dangerous_what',
+    dangerous_what = manifest.dangerous_what or (
         'eval/exec variants, shell execution, obfuscated execution, unsafe deserialization, '
         'network calls at import/load scope, credential env-var access, home-dir writes, '
-        'dynamic dispatch on external input, install-time hooks',
+        'dynamic dispatch on external input, install-time hooks'
     )
     p(f'Scanned for: {dangerous_what}')
     todo_labels_set = {label for label, _ in shared.TODO_PATTERNS}
@@ -724,6 +732,16 @@ def write_signals(  # noqa: C901
         p('All clean.')
 
     # ---- SOURCE REPOSITORY ----
+    if clone_ok and commit_guessed:
+        clone_status_str = 'GUESSED'
+    elif source_likely_incompatible:
+        clone_status_str = 'INCOMPATIBLE'
+    elif clone_ok:
+        clone_status_str = 'OK'
+    elif not source_url:
+        clone_status_str = 'SKIPPED'
+    else:
+        clone_status_str = 'FAILED'
     p(sec('SOURCE REPOSITORY'))
     p(f'URL  : {shared.sanitize_line(source_url) if source_url else "(not found in manifest)"}')
     if clone_ok and commit_guessed:
@@ -843,28 +861,25 @@ def write_signals(  # noqa: C901
 
     # ---- MANIFEST / INSTALL HOOKS ----
     p(sec('MANIFEST / INSTALL HOOKS'))
-    ext = manifest.get('extensions', 'NO')
+    ext = manifest.extensions
     p(f'Native extensions (compile at install): {ext}')
     if ext == 'YES':
         p('Context: Compiled code runs during package installation. The build')
         p('  process can execute arbitrary code. Verify build scripts in the source.')
-    exe = manifest.get('executables', 'NO')
+    exe = manifest.executables
     p(f'Executables added to PATH: {exe}')
     if exe == 'YES':
-        p(f'  Files: {manifest.get("executables_list", "(see manifest-analysis.txt)")}')
-    p(f'Post-install message: {manifest.get("post_install_msg", "NO")}')
-    _build_hooks = manifest.get('has_build_hooks', 'NO')
-    p(f'Build hooks / install-time code: {_build_hooks}')
-    if manifest.get('has_install_scripts') == 'YES':
+        p(f'  Files: {manifest.executables_list or "(see manifest-analysis.txt)"}')
+    p(f'Post-install message: {manifest.post_install_msg}')
+    p(f'Build hooks / install-time code: {manifest.has_build_hooks}')
+    if manifest.has_install_scripts == 'YES':
         p('Install-time scripts extracted: YES  [READ install-scripts.txt]')
-        # Use ecosystem-specific context if provided; fall back to a generic message
-        for ctx_line in manifest.get('install_hook_context', [
+        for ctx_line in manifest.install_hook_context or [
             '  Context: code was found that executes during package installation.',
             '  Review install-scripts.txt for malicious or unexpected behavior.',
-        ]):
+        ]:
             p(ctx_line)
-    _manifest_detail = manifest.get('manifest_extra_file', '')
-    _detail_suffix = f', {_manifest_detail}' if _manifest_detail else ''
+    _detail_suffix = f', {manifest.manifest_extra_file}' if manifest.manifest_extra_file else ''
     p(f'Details: manifest-analysis.txt{_detail_suffix}')
 
     # ---- DEPENDENCIES ----
@@ -1068,8 +1083,10 @@ def write_signals(  # noqa: C901
     # ---- FILES FOR FURTHER REVIEW ----
     p(sec('FILES FOR FURTHER REVIEW'))
     p('Always useful:')
-    _extra_manifest = manifest.get('manifest_extra_file', '')
-    _manifest_files = f'manifest-analysis.txt, {_extra_manifest}' if _extra_manifest else 'manifest-analysis.txt'
+    _manifest_files = (
+        f'manifest-analysis.txt, {manifest.manifest_extra_file}'
+        if manifest.manifest_extra_file else 'manifest-analysis.txt'
+    )
     p(f'  {_manifest_files}')
     p('  license.txt, project-health.txt')
     p('  clone-status.txt, source-url.txt')
@@ -1120,6 +1137,24 @@ def write_signals(  # noqa: C901
     p('raw-*.txt, raw-*.json')
     if deeper:
         p('raw-repro-diff.txt, raw-build-output.txt')
+
+    return SignalReport(
+        sha256=stored_sha,
+        risk_flags=risk_flags,
+        positive_flags=positive_flags,
+        adversarial_gate=_gate_str,
+        concern_count=_concern_count,
+        concern_level=_concern_level,
+        mode=mode_label,
+        old_version=old_ver if diff_mode else '',
+        license_line=license_line_str,
+        health_line=health_line_str,
+        clone_url=source_url,
+        clone_status=clone_status_str,
+        extensions=manifest.extensions,
+        executables=manifest.executables,
+        new_transitive_deps=new_trans_str,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1304,7 +1339,7 @@ def _write_session_update(
 
 
 def run_analysis(  # noqa: C901
-    hooks,
+    analyzer,
     pkgname: str,
     old_ver: str,
     new_ver: str,
@@ -1352,7 +1387,7 @@ def run_analysis(  # noqa: C901
         probe_backend = 'n/a'
 
     print('============================================================')
-    print(f' dep_review.py [{hooks.ECOSYSTEM}]')
+    print(f' dep_review.py [{analyzer.ECOSYSTEM}]')
     print(f' Package : {pkgname}')
     print(f' Mode    : {mode_label}')
     if diff_mode:
@@ -1368,7 +1403,7 @@ def run_analysis(  # noqa: C901
 
     # 1. Download new version
     print(f'--- Download: {pkgname} {new_ver} ---')
-    dl = hooks.download_new(pkgname, new_ver, work, failures)
+    dl = analyzer.download_new(pkgname, new_ver, work, failures)
     sha256 = dl.get('sha256', '')
     unpacked_dir = dl.get('unpacked_dir')
     if sha256:
@@ -1380,29 +1415,29 @@ def run_analysis(  # noqa: C901
     print()
     print('--- Manifest analysis ---')
     with Printer(work / 'manifest-analysis.txt') as _p_manifest:
-        manifest = hooks.read_manifest(pkgname, new_ver, unpacked_dir, work, failures, _p_manifest)
+        manifest = analyzer.read_manifest(pkgname, new_ver, unpacked_dir, work, failures, _p_manifest)
     # Inject ecosystem-level metadata into manifest for write_signals
-    if hasattr(hooks, 'DANGEROUS_WHAT') and '_dangerous_what' not in manifest:
-        manifest['_dangerous_what'] = hooks.DANGEROUS_WHAT
-    source_url = manifest.get('source_url', '')
+    if not manifest.dangerous_what:
+        manifest.dangerous_what = analyzer.dangerous_what()
+    source_url = manifest.source_url
     if not source_url:
-        _get_src = getattr(hooks, 'get_source_url_from_registry', None)
+        _get_src = getattr(analyzer, 'get_source_url_from_registry', None)
         if _get_src:
             source_url = _get_src(pkgname) or ''
             if source_url:
-                manifest['source_url'] = source_url
+                manifest.source_url = source_url
                 print(f'  Source URL (registry API fallback): {shared.sanitize_line(source_url)}')
-    print(f'  Extensions: {manifest.get("extensions", "?")}')
-    print(f'  Executables: {manifest.get("executables", "?")}')
-    print(f'  Post-install message: {manifest.get("post_install_msg", "?")}')
-    print(f'  Build hooks / install-time code: {manifest.get("has_build_hooks", "?")}')
-    print(f'  License (manifest): {shared.sanitize_line(str(manifest.get("manifest_license_raw", ""))) or "(not declared)"}')
+    print(f'  Extensions: {manifest.extensions}')
+    print(f'  Executables: {manifest.executables}')
+    print(f'  Post-install message: {manifest.post_install_msg}')
+    print(f'  Build hooks / install-time code: {manifest.has_build_hooks}')
+    print(f'  License (manifest): {shared.sanitize_line(manifest.manifest_license_raw) or "(not declared)"}')
 
     # 3. Scans
     print()
     print('--- Adversarial and dangerous-code scans ---')
     if unpacked_dir and unpacked_dir.is_dir():
-        total_matches, scan_details, source_lines = run_scans(hooks, unpacked_dir, work)
+        total_matches, scan_details, source_lines = run_scans(analyzer, unpacked_dir, work)
         for label, count in scan_details:
             if count > 0:
                 print(f'  {label}: {count} matches  [see summary-scan-{label}.txt]')
@@ -1508,9 +1543,9 @@ def run_analysis(  # noqa: C901
     print('--- Package vs source comparison ---')
     source_dir = work / 'source'
     if clone_ok and unpacked_dir:
-        # Allow ecosystem hooks to redirect to a package subdirectory (e.g. in monorepos)
-        source_dir = hooks.find_source_root(source_dir)
-        pkg_ex, src_ex = hooks.get_pkg_src_excludes()
+        # Allow the ecosystem analyzer to redirect to a package subdirectory (e.g. in monorepos)
+        source_dir = analyzer.find_source_root(source_dir)
+        pkg_ex, src_ex = analyzer.get_pkg_src_excludes()
         with Printer(work / 'extra-in-package.txt') as _p_extra:
             extra_files = shared.compare_pkg_vs_source(unpacked_dir, source_dir, work, pkg_ex, src_ex, _p_extra)
         print(f'  Extra files (package vs source): {extra_files}')
@@ -1528,7 +1563,7 @@ def run_analysis(  # noqa: C901
         with Printer(work / 'binary-files.txt') as _p_bin:
             binary_files = shared.detect_binary_files(
                 unpacked_dir, work, _p_bin,
-                hooks.NATIVE_BINARY_SUFFIXES,
+                analyzer.NATIVE_BINARY_SUFFIXES,
             )
     else:
         binary_files = 0
@@ -1544,7 +1579,7 @@ def run_analysis(  # noqa: C901
     if diff_mode:
         print()
         print('--- Old version download ---')
-        old_result = hooks.download_old(pkgname, old_ver, work, failures)
+        old_result = analyzer.download_old(pkgname, old_ver, work, failures)
         print(f'  Old version: {old_result.get("ok")} ({old_result.get("source") or "unavailable"})')
 
         print()
@@ -1552,7 +1587,7 @@ def run_analysis(  # noqa: C901
         old_unpacked = old_result.get('unpacked_dir')
         if old_result.get('ok') and old_unpacked and old_unpacked.is_dir() and unpacked_dir and unpacked_dir.is_dir():
             diff_lines, changed_files = shared.compute_diff(
-                old_unpacked, unpacked_dir, work, excludes=hooks.get_diff_excludes()
+                old_unpacked, unpacked_dir, work, excludes=analyzer.get_diff_excludes()
             )
             print(f'  Diff size: {diff_lines} lines changed')
             for line in changed_files.splitlines()[:10]:
@@ -1587,7 +1622,7 @@ def run_analysis(  # noqa: C901
         if diff_lines > 0:
             diff_full_path = work / 'raw-diff-full.txt'
             if diff_full_path.is_file():
-                for label, pattern in hooks.DIFF_PATTERNS:
+                for label, pattern in analyzer.DIFF_PATTERNS:
                     with shared.Printer(work / f'summary-scan-{label}.txt') as _p_scan:
                         n = shared.blind_scan(label, pattern, diff_full_path, work, _p_scan)
                     diff_scan_matches += n
@@ -1629,14 +1664,17 @@ def run_analysis(  # noqa: C901
     print()
     print('--- Registry / provenance data ---')
     with Printer(work / 'provenance.txt') as _p_prov:
-        registry = hooks.fetch_all_registry_data(pkgname, new_ver, work, _p_prov, source_url)
+        registry = analyzer.fetch_all_registry_data(
+            pkgname, new_ver, work, _p_prov, source_url)
+        analyzer.check_provenance(registry, source_url, _p_prov)
+        analyzer.check_publisher_velocity(registry, _p_prov)
     print(f'  MFA required: {registry.get("mfa_status", "unknown")}')
 
     # 9b. Vulnerability lookup
     print()
     print('--- Known vulnerabilities (OSV) ---')
     with Printer(work / 'vulnerabilities.txt') as _p_vuln:
-        vuln_result = shared.lookup_vulnerabilities(pkgname, new_ver, hooks.OSV_ECOSYSTEM, _p_vuln)
+        vuln_result = shared.lookup_vulnerabilities(pkgname, new_ver, analyzer.OSV_ECOSYSTEM, _p_vuln)
     vuln_count = vuln_result['count']
     print(f'  Known vulnerabilities: {vuln_count}')
     for v in vuln_result['vulns'][:5]:
@@ -1649,8 +1687,8 @@ def run_analysis(  # noqa: C901
     # 9c. OSS Rebuild reproducibility lookup
     print()
     print('--- OSS Rebuild reproducibility ---')
-    _oss_rebuild_ecosystem = getattr(hooks, 'OSS_REBUILD_ECOSYSTEM', '') or \
-        shared._OSS_REBUILD_ECOSYSTEM_FALLBACK.get(hooks.OSV_ECOSYSTEM, '')
+    _oss_rebuild_ecosystem = getattr(analyzer, 'OSS_REBUILD_ECOSYSTEM', '') or \
+        shared._OSS_REBUILD_ECOSYSTEM_FALLBACK.get(analyzer.OSV_ECOSYSTEM, '')
     with Printer(work / 'oss-rebuild.txt') as _p_orb:
         oss_rebuild_result = shared.lookup_oss_rebuild(_oss_rebuild_ecosystem, pkgname, new_ver, work, _p_orb)
     _orb_signal = oss_rebuild_result.get('signal_level', 'NONE')
@@ -1727,7 +1765,7 @@ def run_analysis(  # noqa: C901
     print('--- License evaluation ---')
     license_candidates = shared.get_license_candidates(manifest, registry)
     old_license = (
-        hooks.get_old_license(pkgname, old_ver, old_result.get('unpacked_dir'))
+        analyzer.get_old_license(pkgname, old_ver, old_result.get('unpacked_dir'))
         if diff_mode and old_result.get('ok') else None
     )
     license_result = shared.evaluate_license(license_candidates, old_license)
@@ -1745,9 +1783,9 @@ def run_analysis(  # noqa: C901
     # 13. Dependencies
     print()
     print('--- Dependency analysis ---')
-    old_dep_lines = _get_old_dep_lines(hooks, pkgname, old_ver, old_result) if diff_mode else []
-    dep_result = hooks.check_lockfile(manifest.get('runtime_dep_lines', []), old_dep_lines, root)
-    dep_registry = {d: hooks.check_dep_registry(d) for d in dep_result.get('not_in_lockfile', [])}
+    old_dep_lines = _get_old_dep_lines(analyzer, pkgname, old_ver, old_result) if diff_mode else []
+    dep_result = analyzer.check_lockfile(manifest.runtime_dep_lines, old_dep_lines, root)
+    dep_registry = {d: analyzer.check_dep_registry(d) for d in dep_result.get('not_in_lockfile', [])}
     with Printer(work / 'new-deps.txt') as _p_deps, \
          Printer(work / 'dep-lockfile-check.txt') as _p_lock, \
          Printer(work / 'dep-registry.txt') as _p_reg:
@@ -1762,10 +1800,10 @@ def run_analysis(  # noqa: C901
     print()
     print('--- Transitive dependency footprint ---')
     run_transitive = not diff_mode or bool(not_in_lf)
-    lockfile_path = hooks.get_lockfile_path(root)
+    lockfile_path = analyzer.get_lockfile_path(root)
     if run_transitive:
         with Printer(work / 'transitive-deps.txt') as _p_trans:
-            transitive = hooks.get_transitive_deps(pkgname, new_ver, lockfile_path, work, _p_trans)
+            transitive = analyzer.get_transitive_deps(pkgname, new_ver, lockfile_path, work, _p_trans)
         print(f'  Total transitive deps: {transitive.get("total", 0)}')
         print(f'  New (not in lockfile): {len(transitive.get("not_in_lockfile", []))}')
     else:
@@ -1791,13 +1829,13 @@ def run_analysis(  # noqa: C901
                 '  Install one of those tools to enable this check.'
             )
         with Printer(work / 'reproducible-build.txt') as _p_repro:
-            repro_result, code_diffs, meta_diffs = hooks.reproducible_build(
+            repro_result, code_diffs, meta_diffs = analyzer.reproducible_build(
                 pkgname, new_ver, work, sandbox, _p_repro
             )
         print(f'  Reproducible build: {repro_result}')
         if code_diffs > 0:
             print(f'  [!] CODE FILES DIFFER: {code_diffs} files; human review needed')
-        cfg = hooks.get_deep_source_config()
+        cfg = analyzer.get_deep_source_config()
         with shared.Printer(work / 'source-deep-diff.txt') as _p_deep:
             shared.deep_source_comparison(pkgname, new_ver, work, _p_deep, **cfg)
         print('  Deep comparison saved to source-deep-diff.txt')
@@ -1852,31 +1890,43 @@ def run_analysis(  # noqa: C901
     print()
     print('--- Writing signals ---')
     with Printer(work / 'signals.txt') as _p_signals:
-        write_signals(
-            work, _p_signals, pkgname, old_ver, new_ver, diff_mode, deeper, sha256,
-            manifest, scan_details, total_matches, diff_scan_details, diff_scan_matches,
-            clone_ok, version_tag, commit_guessed, source_url, badge,
-            extra_files, binary_files,
-            diff_lines, changed_files,
-            registry, scorecard, health_concerns,
-            license_result, dep_result, dep_registry,
-            transitive, deeper_result, failures,
-            ecosystem=hooks.ECOSYSTEM,
-            deeper_mode=deeper_mode,
-            install_probe=install_probe,
-            install_probe_mode=install_probe_mode,
-            vuln_result=vuln_result,
-            has_security_policy=has_security_policy,
-            scorecard_checks=scorecard_checks,
-            recent_commits=recent_commits,
-            commit_activity=commit_activity,
-            source_likely_incompatible=source_likely_incompatible,
-            source_lines=source_lines,
-            ecosystems_data=ecosystems_data,
-            oss_rebuild_result=oss_rebuild_result,
-            diff_semantic_result=diff_semantic_result,
-            source_review_result=source_review_result,
+        _report = write_signals(
+            shared.SignalContext(
+                work=work, pkgname=pkgname, old_ver=old_ver, new_ver=new_ver,
+                diff_mode=diff_mode, ecosystem=analyzer.ECOSYSTEM,
+                sha256=sha256, manifest=manifest,
+                scan_details=scan_details, total_matches=total_matches,
+                diff_scan_details=diff_scan_details,
+                diff_scan_matches=diff_scan_matches, source_lines=source_lines,
+                clone_ok=clone_ok, version_tag=version_tag,
+                commit_guessed=commit_guessed, source_url=source_url,
+                source_likely_incompatible=source_likely_incompatible,
+                registry=registry, badge=badge, scorecard=scorecard,
+                health_concerns=health_concerns,
+                extra_files=extra_files, binary_files=binary_files,
+                diff_lines=diff_lines, changed_files=changed_files,
+                license_result=license_result, dep_result=dep_result,
+                dep_registry=dep_registry, transitive=transitive,
+                deeper_result=deeper_result, failures=failures,
+                deeper=deeper, deeper_mode=deeper_mode,
+                install_probe=install_probe,
+                install_probe_mode=install_probe_mode,
+                vuln_result=vuln_result,
+                has_security_policy=has_security_policy,
+                scorecard_checks=scorecard_checks,
+                recent_commits=recent_commits,
+                commit_activity=commit_activity,
+                ecosystems_data=ecosystems_data,
+                oss_rebuild_result=oss_rebuild_result,
+                diff_semantic_result=diff_semantic_result,
+                source_review_result=source_review_result,
+            ),
+            _p_signals,
         )
+    (work / 'signals.json').write_text(
+        json.dumps(dataclasses.asdict(_report), indent=2),
+        encoding='utf-8',
+    )
 
     # Final summary
     stored_sha = sha256 or 'UNKNOWN'
@@ -1919,9 +1969,9 @@ def run_analysis(  # noqa: C901
 
     # Write session-update.json for dep_session.py complete to consume
     if session_file is not None:
-        install_time = manifest.get('extensions') == 'YES'
+        install_time = manifest.extensions == 'YES'
         install_reason = 'native extension' if install_time else ''
-        if not install_time and manifest.get('post_install_msg') == 'YES':
+        if not install_time and manifest.post_install_msg == 'YES':
             install_time = True
             install_reason = 'post_install_msg'
         _write_session_update(
@@ -1940,14 +1990,14 @@ def run_analysis(  # noqa: C901
 # Entry point
 # ---------------------------------------------------------------------------
 
-# Maps registry name (--from value) to the language-level hooks module.
-# Registry names describe where to download from; hooks modules describe how
-# to handle the package format. Multiple registries can share one hooks module
-# (e.g. a private gem server would also use hooks_ruby).
+# Maps registry name (--from value) to the ecosystem analyzer module.
+# Registry names describe where to download from; analyzer modules describe
+# how to handle the package format. Multiple registries can share one module
+# (e.g. a private gem server would also use analyzer_ruby).
 REGISTRY_TO_HOOKS: dict[str, str] = {
-    'rubygems': 'hooks_ruby',
-    'pypi':     'hooks_python',
-    'npm':      'hooks_js',
+    'rubygems': 'analyzer_ruby',
+    'pypi':     'analyzer_python',
+    'npm':      'analyzer_js',
 }
 KNOWN_REGISTRIES: list[str] = list(REGISTRY_TO_HOOKS)
 
@@ -2021,7 +2071,7 @@ def _err(msg: str) -> None:
     print(f'ERROR: {msg}', file=sys.stderr)
 
 
-def _die(msg: str) -> None:
+def _die(msg: str) -> NoReturn:
     _err(msg)
     sys.exit(1)
 
@@ -2048,11 +2098,13 @@ def main() -> None:  # noqa: C901 (complexity acceptable for CLI validation)
         sys.exit(1)
 
     # --- Parse flags ---
-    registry = None
+    registry: str | None = None
     registry_url: str | None = None
     session_arg: str | None = None
-    old_ver = None
-    root_arg = None
+    old_ver: str | None = None
+    root_arg: str | None = None
+    pkgname = ''
+    new_ver = ''
     do_alternatives = False
     do_basic = False
     do_deeper = False
@@ -2174,7 +2226,7 @@ def main() -> None:  # noqa: C901 (complexity acceptable for CLI validation)
         errors.append(
             f'Unknown registry: {registry!r}\n'
             f'  Known registries: {", ".join(KNOWN_REGISTRIES)}\n'
-            '  To add a new registry, add it to REGISTRY_TO_HOOKS and provide a hooks_LANGUAGE.py file.'
+            '  To add a new registry, add it to REGISTRY_TO_HOOKS and provide an analyzer_LANGUAGE.py file.'
         )
 
     # --- Validate: --registry-url ---
@@ -2223,24 +2275,26 @@ def main() -> None:  # noqa: C901 (complexity acceptable for CLI validation)
         print(f'\nRun with --help for usage information.', file=sys.stderr)
         sys.exit(1)
 
+    assert registry is not None  # validated above; None adds error → sys.exit
+
     # --- Resolve root ---
     root = Path(root_arg).resolve() if root_arg else Path.cwd()
     if not root.is_dir():
         _die(f'--root directory does not exist: {root}')
 
-    # --- Load ecosystem hooks ---
+    # --- Load ecosystem analyzer ---
     hooks_module = REGISTRY_TO_HOOKS[registry]
     try:
-        hooks = importlib.import_module(hooks_module).Hooks(registry_url=registry_url)
+        analyzer = importlib.import_module(hooks_module).Analyzer(registry_url=registry_url)
     except ImportError as exc:
         _die(
-            f'No hooks file for registry {registry!r}: {exc}\n'
+            f'No analyzer module for registry {registry!r}: {exc}\n'
             f'  Expected: {hooks_module}.py in the same directory as dep_review.py'
         )
 
     # --- Warn: no lockfile found ---
-    lockfile_name = getattr(hooks, 'LOCKFILE_NAME', None)
-    lockfile_names = getattr(hooks, 'LOCKFILE_NAMES', None)
+    lockfile_name = getattr(analyzer, 'LOCKFILE_NAME', None)
+    lockfile_names = getattr(analyzer, 'LOCKFILE_NAMES', None)
     if lockfile_names:
         if not any((root / lf).exists() for lf in lockfile_names):
             print(
@@ -2282,7 +2336,7 @@ def main() -> None:  # noqa: C901 (complexity acceptable for CLI validation)
 
     # --- Execute requested modes in order ---
     if do_alternatives:
-        result = hooks.check_alternatives(pkgname, new_ver, work, root)
+        result = analyzer.check_alternatives(pkgname, new_ver, work, root)
         concerns = result.get('concerns', [])
         notes = result.get('notes', [])
         pkg_count = result.get('pkg_count', 0)
@@ -2291,8 +2345,8 @@ def main() -> None:  # noqa: C901 (complexity acceptable for CLI validation)
         # Enrich with ecosyste.ms adoption data. The raw count is always shown
         # so the AI can judge plausibility in context (e.g. 1000 dependent repos
         # sounds high until you realise the package claims to be 'rails').
-        if registry_key:
-            eco_alt = shared.lookup_ecosystems_package(registry_key, pkgname, work=work)
+        if registry:
+            eco_alt = shared.lookup_ecosystems_package(registry, pkgname, work=work)
             if eco_alt.get('rate_limited'):
                 notes.append(
                     'ECOSYSTEMS_RATE_LIMITED: dependent-repo count unavailable; '
@@ -2385,7 +2439,7 @@ def main() -> None:  # noqa: C901 (complexity acceptable for CLI validation)
 
     if do_basic or do_deeper or do_install_probe:
         aborted = run_analysis(
-            hooks, pkgname, old_ver or 'none', new_ver, root, work, diff_mode, do_deeper,
+            analyzer, pkgname, old_ver or 'none', new_ver, root, work, diff_mode, do_deeper,
             install_probe=do_install_probe,
             registry_url=registry_url, session_file=session_file,
             deeper_mode=do_deeper_mode,
