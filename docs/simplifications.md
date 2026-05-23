@@ -1,48 +1,65 @@
-# Proposed Code Simplifications for Dependency Analysis
+# Code Simplifications for Dependency Analysis
 
-This document reviews a set of proposed simplifications for the dependency
-analysis codebase, with assessments grounded in the actual code state.
+This document records proposed simplifications for the dependency analysis
+codebase, with assessments grounded in the actual code state. It is a
+living document: completed items are marked DONE and left for reference.
 The primary focus is reducing complexity in `dep_review.py` and eliminating
 structural redundancy across the ecosystem hooks
 (`hooks_js.py`, `hooks_python.py`, `hooks_ruby.py`).
 
-## 1. Summary of Current Issues
+See Section 6 for the current roadmap and status summary.
 
-Actual measurements (as of 2026-05-22):
+## 1. Summary of Issues
 
-*   `dep_review.py`: 2,400 lines total; `write_signals()` alone is ~970 lines
-    with 47 arguments.
-*   `hooks_js.py`: 1,869 lines; `hooks_python.py`: 1,689; `hooks_ruby.py`: 1,415
-*   `analysis_shared.py`: 4,003 lines
+Measurements at the start of this effort (2026-05-22):
 
-Real problems worth solving:
+*   `dep_review.py`: 2,400 lines; `write_signals()` alone ~970 lines,
+    47 arguments.
+*   `hooks_js.py`: 1,869 lines; `hooks_python.py`: 1,689;
+    `hooks_ruby.py`: 1,415; `analysis_shared.py`: 4,003 lines.
 
-*   **Wide interface**: `write_signals()` takes 47 arguments, making it fragile
-    to extend and hard to test in isolation.
-*   **Structural pattern duplication**: 20 of ~26 DANGEROUS_PATTERNS labels
-    appear in all three hook files. The regex bodies reference `shared.XYZ_RE`
-    constants, but each hook still re-declares the full entry. A new ecosystem
-    (Go, Rust) must copy-paste all 20 shared entries before adding its own.
-*   **JS-only advanced checks**: SLSA provenance and publisher velocity checks
-    (`_check_slsa_provenance`, `_check_publisher_velocity`) live in
-    `hooks_js.py` even though the concepts apply to all ecosystems.
+Current measurements (after Phases 1-2):
 
-Already solved (do not re-implement):
+*   `dep_review.py`: 2,407 lines; `write_signals()`: 48 arguments.
+*   `hooks_js.py`: 1,670 lines; `hooks_python.py`: 1,667;
+    `hooks_ruby.py`: 1,377; `analysis_shared.py`: 4,215 lines.
 
-*   **Health thresholds**: `compute_health_concerns()` in `analysis_shared.py`
-    already centralizes all health-concern logic (staleness, age, owner count,
-    Scorecard score, etc.). The doc's example of threshold repetition across
-    hooks does not reflect current code.
-*   **Shared regex constants**: Common patterns are defined as `shared.XYZ_RE`
-    and referenced from each hook; the regex bodies are not literally repeated.
-*   **`EcosystemHooks` ABC**: Already exists in `analysis_shared.py` with all
-    required abstract methods.
+(`analysis_shared.py` grew because the 12 shared patterns and the
+provenance/velocity methods moved there from the ecosystem files.)
+
+Problems remaining:
+
+*   **Wide interface**: `write_signals()` has 48 arguments, making it
+    fragile to extend and hard to test in isolation.
+*   **Misleading names**: `EcosystemHooks` and the subclass `Hooks` use
+    "hook" in the plugin-callback sense, but these classes own full
+    analysis implementations, not callback intercept points.
+
+Problems now solved (do not re-implement):
+
+*   **Structural pattern duplication** (DONE, Phase 1): The 12 universal
+    `DANGEROUS_PATTERNS` entries that appeared in all three hook files are
+    now `BASE_DANGEROUS_PATTERNS` on `EcosystemHooks`. Each ecosystem
+    file declares only its own additions and calls
+    `all_dangerous_patterns()` to get the combined list. Patterns are now
+    3-tuples `(label, regex, description)`.
+*   **JS-only advanced checks** (DONE, Phase 2): SLSA provenance and
+    publisher velocity checks are now `check_provenance()` and
+    `check_publisher_velocity()` on `EcosystemHooks`. The JS hook
+    populates `_provenance` and `_publisher_stats` dict keys;
+    `dep_review.py` calls the shared methods for all ecosystems.
+*   **Health thresholds**: `compute_health_concerns()` in
+    `analysis_shared.py` already centralizes all health-concern logic.
+*   **Shared regex constants**: Common patterns are defined as
+    `shared.XYZ_RE` and referenced from each hook.
+*   **`EcosystemHooks` ABC**: Already exists in `analysis_shared.py`
+    with all required abstract methods.
 
 ## 2. Proposed Architectural Changes
 
-### A. Narrow the `write_signals()` Interface (ACCEPTED, with adjustments)
+### A. Narrow the `write_signals()` Interface (ACCEPTED, PENDING)
 
-**Problem**: 47 arguments is genuinely hard to manage. Adding one new signal
+**Problem**: 48 arguments is genuinely hard to manage. Adding one new signal
 requires changing both the caller and the callee.
 
 **Recommendation**: Bundle all inputs into a `@dataclass`. This narrows the
@@ -60,7 +77,7 @@ class SignalContext:
     scan_details: list[tuple[str, int]]
     total_matches: int
     # ... remaining fields
-    hooks: EcosystemHooks
+    analyzer: EcosystemAnalyzer
 ```
 
 The function signature becomes:
@@ -96,41 +113,28 @@ the judgment itself.
 
 **Split into two sub-proposals with different verdicts:**
 
-#### B1. `BASE_DANGEROUS_PATTERNS` in `EcosystemHooks` (ACCEPTED)
+#### B1. `BASE_DANGEROUS_PATTERNS` in `EcosystemHooks` (DONE, Phase 1)
 
-Currently, 20 DANGEROUS_PATTERNS labels are structurally repeated across all
-three hook files. Each hook re-declares entries like `exfil-relay-domain`,
-`reverse-shell`, `cron-persistence`, etc., even though they reference the
-same `shared.XYZ_RE` constant.
+Previously, 12 DANGEROUS_PATTERNS labels were structurally repeated across
+all three hook files. They are now `BASE_DANGEROUS_PATTERNS` on the base
+class. Each ecosystem declares only its own additions, and
+`all_dangerous_patterns()` returns the combined list.
 
-Defining `BASE_DANGEROUS_PATTERNS` in the base class means each new ecosystem
-only declares its own additions:
+Patterns are 3-tuples `(label, regex, description)`. The description
+drives the "Scanned for:" report line via `dangerous_what()`, eliminating
+the parallel `DANGEROUS_WHAT` string that had to be kept in sync manually.
 
-```python
-class EcosystemHooks(ABC):
-    BASE_DANGEROUS_PATTERNS: list[tuple[str, str]] = [
-        ('exfil-relay-domain', shared.EXFIL_RELAY_DOMAINS_RE),
-        ('reverse-shell',      shared.REVERSE_SHELL_RE),
-        ('cron-persistence',   shared.CRON_PERSISTENCE_RE),
-        # ... all 20 shared entries ...
-    ]
-    DANGEROUS_PATTERNS: list[tuple[str, str]] = []  # ecosystem-specific only
+Adding Go or Rust now requires only the ecosystem-specific entries; the
+12 shared ones come from the base class automatically.
 
-    def all_dangerous_patterns(self) -> list[tuple[str, str]]:
-        return self.BASE_DANGEROUS_PATTERNS + self.DANGEROUS_PATTERNS
-```
-
-This is the most direct win: adding Go or Rust becomes ~5 ecosystem-specific
-entries instead of re-copying 25+.
-
-#### B2. `evaluate_health()` virtual method (MINOR, LOW PRIORITY)
+#### B2. `evaluate_health()` virtual method (MINOR, PENDING)
 
 The current `compute_health_concerns()` function in `analysis_shared.py`
 already centralizes health thresholds, so this is partially done. If an
-ecosystem needs to override a threshold (e.g., a different staleness window),
-making `evaluate_health()` a virtual method on `EcosystemHooks` with a
-`super()` call is cleaner than a separate function with an extra argument.
-This is a minor, low-urgency cleanup.
+ecosystem needs to override a threshold (e.g., a different staleness
+window), making `evaluate_health()` a virtual method on `EcosystemHooks`
+with a `super()` call is cleaner than a separate function with an extra
+argument. This is a minor, low-urgency cleanup.
 
 #### B3. Decorator-based `EcosystemRegistry` (REJECTED)
 
@@ -148,7 +152,7 @@ name. A decorator that duplicates what `import` already does is fad
 architecture: it looks organized but adds indirection and failure modes with
 no benefit.
 
-### C. Standardized Manifest Data Objects (ACCEPTED, HIGH VALUE)
+### C. Standardized Manifest Data Objects (ACCEPTED, PENDING)
 
 `read_manifest()` in each hook returns an untyped `dict` with 15+ keys.
 Key names can drift between ecosystems silently. A `@dataclass` fixes this:
@@ -176,75 +180,323 @@ driver callers need updating), but the long-term benefit is proportional.
 This is the highest-value cleanup that doesn't require restructuring control
 flow.
 
-### D. Generalize SLSA Provenance and Velocity Checks (ACCEPTED)
+### D. Generalize SLSA Provenance and Velocity Checks (DONE, Phase 2)
 
-`_check_slsa_provenance()` and `_check_publisher_velocity()` are currently
-in `hooks_js.py` only. PyPI has introduced provenance too, so Python could
-benefit immediately. The right approach:
+`check_provenance()` and `check_publisher_velocity()` are now concrete
+methods on `EcosystemHooks` in `analysis_shared.py`. They own all policy
+and report emission. Ecosystems that support these checks populate
+`registry_data['_provenance']` and `registry_data['_publisher_stats']`
+in their `fetch_all_registry_data()` implementation; ecosystems that do
+not support them simply leave those keys absent and the base methods
+return immediately.
 
-1.  Define abstract/optional hook methods in `EcosystemHooks`:
+The JS hook populates both keys from the npm provenance and search APIs.
+Python and Ruby leave them absent (pending future work for PyPI provenance).
+`dep_review.py` calls the shared methods unconditionally for all ecosystems.
 
-    ```python
-    def check_provenance(self, registry_data: dict, p: Printer) -> None:
-        pass  # default: no-op
+This differs from the original proposal (which suggested no-op overrides
+that each ecosystem would replace): instead the base class owns the logic
+and ecosystems supply data, cleanly separating fetching from policy.
 
-    def check_publisher_velocity(self, registry_data: dict, p: Printer) -> None:
-        pass  # default: no-op
-    ```
+## 3. Pattern Deduplication (DONE)
 
-2.  Move the npm-specific implementation to `hooks_js.py` as an override.
-3.  Add a PyPI provenance implementation to `hooks_python.py`.
-4.  The driver calls `hooks.check_provenance(registry, p)` for all ecosystems.
+The original duplication was in `DANGEROUS_PATTERNS`: 12 universal pattern
+labels appeared in all three hook files. Those 12 entries are now
+`BASE_DANGEROUS_PATTERNS` on the base class (Phase 1, done).
 
-This is straightforward because the check already lives in a helper function;
-it just needs to be called through the right hook dispatch instead of
-conditionally in `dep_review.py`.
-
-## 3. Pattern Deduplication: The Actual Opportunity
-
-The Section 3 example in the original proposal used `compute_health_concerns()`
-as an example of repeated logic, but that function already exists and
-centralizes the health policy. The real remaining duplication is in
-`DANGEROUS_PATTERNS`.
-
-Current state:
-- 20 pattern labels appear in all 3 hook files
-- 2 labels appear in Python + Ruby only (`self-publish`, `shell-exec`)
+Pattern breakdown after Phase 1:
+- 12 universal patterns: `BASE_DANGEROUS_PATTERNS` on `EcosystemHooks`
+- 2 labels appear in Python + Ruby only (`self-publish`, `shell-exec`),
+  still in each hook's `DANGEROUS_PATTERNS`
 - 7 labels are Python-only, 3 Ruby-only, 4 JS-only
 
-Moving the 20 shared entries to `BASE_DANGEROUS_PATTERNS` (proposal B1) is
-the actual deduplication win here.
+A new ecosystem (Go, Rust) inherits the 12 shared patterns automatically
+and only needs to declare its own additions.
 
-## 4. Expected Benefits
+## 4. Benefits: Achieved and Pending
 
-1.  **Interface stability**: `write_signals(ctx: SignalContext, p)` can absorb
-    new signals without changing the call site.
-2.  **Easier new ecosystems**: Go or Rust hooks need only their ~5 unique
-    patterns; the 20 shared ones come from the base class automatically.
-3.  **Universal provenance**: SLSA and velocity checks become available to all
-    ecosystems via hook dispatch.
-4.  **Type safety**: `PackageManifest` makes key-name drift a compile-time
-    error rather than a runtime KeyError.
+Achieved:
 
-## 5. Implementation Roadmap
+*   **Easier new ecosystems** (Phase 1): Go or Rust needs only its unique
+    patterns; the 12 shared ones come from the base class automatically.
+*   **Universal provenance dispatch** (Phase 2): SLSA and velocity checks
+    are available to all ecosystems via `check_provenance()` and
+    `check_publisher_velocity()` on the base class.
 
-Ordered by value-to-effort ratio:
+Pending:
 
-1.  **Phase 1**: Add `BASE_DANGEROUS_PATTERNS` to `EcosystemHooks` (proposal
-    B1). Each hook removes its 20 shared entries and calls
+*   **Interface stability** (Phase 5): `write_signals(ctx: SignalContext, p)`
+    can absorb new signals without changing the call site. Currently 48
+    arguments; each new signal type requires touching both caller and callee.
+*   **Type safety** (Phase 4): `PackageManifest` makes key-name drift a
+    type error rather than a silent `None` at `dict.get()` call sites.
+
+## 5. Renaming and Restructuring: EcosystemAnalyzer
+
+### The naming problem
+
+The current class is `EcosystemHooks` with subclasses all named `Hooks`.
+In software, "hook" typically means a callback invoked at a lifecycle
+event: Git pre-commit hooks, pytest hooks, plugin hooks. The current class
+is nothing like that. It owns full analysis implementations: downloading
+and unpacking packages, reading manifests, fetching registry data,
+checking lockfiles, detecting typosquats. "Hook" is the wrong word.
+
+"Analysis" is also ambiguous: it is both a process (verb) and a result
+(noun), and "Python analysis" does not clearly identify the class as an
+agent. The right grammatical form is an agent noun: the thing that does
+the analyzing.
+
+Chosen names: `EcosystemAnalyzer` as the base class, with subclasses
+`PythonAnalyzer`, `RubyAnalyzer`, `JavaScriptAnalyzer`. Each name
+unambiguously reads as "the thing that analyzes Python/Ruby/JS packages."
+
+The local variable in `dep_review.py` (currently `hooks`) becomes
+`analyzer`, which is similarly self-describing.
+
+The module files `hooks_python.py`, `hooks_ruby.py`, `hooks_js.py` have
+the same naming problem. Renaming them to `analyzer_python.py`,
+`analyzer_ruby.py`, `analyzer_js.py` is consistent with the class names
+(and distinct from `analysis_shared.py` which contains shared utilities).
+File renames are a separate step because they break `git blame` continuity
+and require updating test infrastructure (`test_doctests.py` imports
+`hooks_ruby` by name).
+
+### The module-level code problem
+
+A significant fraction of each hook file lives *outside* the class at
+module scope. Current measurement:
+
+- `hooks_js.py`: ~293 module-level lines out of 1,670 total
+- `hooks_python.py`: ~270 module-level lines out of 1,667 total
+- `hooks_ruby.py`: ~125 module-level lines out of 1,377 total
+
+That module-level code includes regex constants, helper functions, and
+size/line thresholds. All of them are only used inside the class; none
+are imported by other modules or tests (verified by grep). They live at
+module scope for historical reasons, not because they need to.
+
+There are three distinct cases with different recommendations:
+
+**Case 1: threshold constants** (e.g., `_SETUP_PY_WARN_BYTES = 40_000`,
+`_INSTALL_HOOK_WARN_BYTES = 10_000`): Move to class-level attributes on
+the subclass. This is the pattern already used on the base class
+(`VELOCITY_WINDOW_SECS`, `VELOCITY_THRESHOLD`, `NEW_PUBLISHER_DAYS`).
+Thresholds as class attributes are overridable: a stricter subclass or
+test can tighten them without patching call sites.
+
+**Case 2: cross-cutting helper functions** that implement the same concept
+in each ecosystem but with ecosystem-specific mechanics. The clearest
+examples:
+
+- `extract_source_url()`: present in Ruby (`_extract_source_url()`),
+  JS (`_extract_source_url()`), and inlined in Python
+- `extract_license()`: present in all three under different names
+- Package unpacking: `_unpack_pkg()` (Python), `_unpack_tgz()` (JS),
+  inline in Ruby
+
+These should become overridable instance methods on `EcosystemAnalyzer`.
+The base class provides a default (typically returning `''` or doing
+nothing), and each subclass overrides with its ecosystem-specific
+implementation. This is the **template method pattern**: the base class
+owns the algorithm skeleton (e.g., `read_manifest()` calling
+`self.extract_source_url()` and `self.extract_license()`), and subclasses
+fill in the steps.
+
+The benefit is real: the base class can call `self.extract_source_url()`
+from shared methods; a subclass can call `super().extract_source_url()`
+and add normalization on top; a new ecosystem (Go, Rust) overrides only
+what is different. This is meaningfully better than module-level functions,
+which the base class cannot call at all.
+
+Note that making these `@staticmethod` on the *subclass* would not achieve
+this: `@staticmethod` methods are not called polymorphically by the base
+class. The value comes specifically from them being instance methods on
+the *base class*.
+
+This also connects directly to `PackageManifest` (Phase 4): if
+`read_manifest()` calls `self.extract_source_url()` and
+`self.extract_license()`, those overridable seams make it natural to
+build a `PackageManifest` incrementally with ecosystem-specific steps.
+
+**Case 3: ecosystem-specific helpers** with no cross-ecosystem equivalent:
+`_find_dist_info()`, `_parse_metadata()`, `_load_package_json()`,
+`_parse_npm_date()`, `_get_pkg_file()`. These stay inside the subclass as
+regular instance methods (not `@staticmethod`). Moving from module-level
+function to instance method is a small improvement: it makes them callable
+as `self._find_dist_info()` without an import, and establishes them
+clearly as part of the class rather than loose module utilities.
+
+### Pros
+
+- **Name accuracy**: `PythonAnalyzer` is unambiguously the agent that
+  analyzes Python packages. A new contributor reading
+  `class PythonAnalyzer(EcosystemAnalyzer)` immediately understands the
+  design without needing to know what "hooks" means here.
+- **Template method pattern**: Cross-cutting helpers as base class methods
+  let shared code call `self.extract_source_url()`, let subclasses refine
+  with `super()`, and let new ecosystems override only what differs.
+- **Threshold overridability**: Class-level attributes like
+  `SETUP_PY_WARN_BYTES` can be tightened in a subclass or in tests
+  without patching call sites. Consistent with the base class pattern.
+- **Self-contained classes**: With all helpers inside the class hierarchy,
+  each `PythonAnalyzer`, `RubyAnalyzer`, `JavaScriptAnalyzer` is fully
+  self-contained. There is no parallel set of module-level functions to
+  discover and maintain.
+
+### Cons
+
+- **Churn with no behavior change for Step 1**: Every `import hooks_python`,
+  every `hooks.ECOSYSTEM`, every `shared.EcosystemHooks`, and every
+  `.Hooks(registry_url=...)` in `dep_review.py` needs updating. The
+  `REGISTRY_TO_HOOKS` map, SKILL.md, and documentation also change.
+- **Discovery mechanism requires a design decision**: The current pattern
+  `importlib.import_module(hooks_module).Hooks(registry_url=...)` relies
+  on all subclasses being named `Hooks`. With named subclasses, `dep_review`
+  can no longer assume the class name. The cleanest fix is a module-level
+  alias in each hook file:
+  ```python
+  Analyzer = PythonAnalyzer   # used by dep_review.py for instantiation
+  ```
+  Then `dep_review.py` does `.Analyzer(registry_url=...)` uniformly.
+  One line per module; no factory function needed.
+- **Step 2 is larger than Step 1**: Moving helpers and threshold constants
+  into the class touches more lines per file, though each change is
+  mechanical. Doing one file per commit keeps it reviewable.
+- **File renames break tests**: `test_doctests.py` imports `hooks_ruby`
+  by name. File renames require updating the test file and any direct
+  references in documentation or tooling.
+- **File renames break git blame**: `git blame analyzer_python.py` only
+  shows history from the rename commit forward; prior blame requires
+  `git log --follow`.
+
+### Plan (if we proceed)
+
+Split into four commit groups to keep each reviewable in isolation:
+
+**Step 1: rename the base class and all subclasses (one commit)**
+
+  - `EcosystemHooks` -> `EcosystemAnalyzer` in `analysis_shared.py`.
+  - `class Hooks(shared.EcosystemHooks)` -> `class PythonAnalyzer
+    (shared.EcosystemAnalyzer)` (and analogously for Ruby and JS).
+  - Add `Analyzer = PythonAnalyzer` (etc.) at module level in each file
+    so `dep_review.py` can instantiate via `.Analyzer(registry_url=...)`.
+  - Update `dep_review.py`: rename the local variable `hooks` to
+    `analyzer`; change `.Hooks(registry_url=...)` to
+    `.Analyzer(registry_url=...)`; update `shared.EcosystemHooks`
+    references.
+  - Update SKILL.md and any documentation that names the class.
+  - No file renames; no helper migration yet.
+  - Two find-and-replace passes and a few targeted edits; large diff
+    but entirely mechanical and easily verified.
+
+**Step 2: restructure module-level code (one commit per hook file)**
+
+  For each hook file (`hooks_python.py`, `hooks_ruby.py`, `hooks_js.py`):
+
+  a. Move threshold constants to class-level attributes, updating
+     call sites from `_CONSTANT` to `self.CONSTANT`.
+
+  b. Add cross-cutting helpers as overridable instance methods on
+     `EcosystemAnalyzer` with a default implementation (usually
+     returning `''` or equivalent). Override in each subclass.
+     Primary targets:
+     - `extract_source_url(self, raw_data) -> str`
+     - `extract_license(self, raw_data) -> str`
+     - `unpack_archive(self, ...)` (unifies `_unpack_pkg`,
+       `_unpack_tgz`, and Ruby's inline unpacking)
+
+  c. Move ecosystem-specific helpers to regular instance methods on
+     the subclass (e.g., `self._find_dist_info()`,
+     `self._parse_metadata()`).
+
+  d. Update `read_manifest()` to call `self.extract_source_url()` and
+     `self.extract_license()` instead of module-level functions.
+     This sets up the template method structure that `PackageManifest`
+     (Phase 4) will build on.
+
+**Step 3: rename the files** (separate commit, own PR if preferred)
+
+  - `git mv hooks_python.py analyzer_python.py` (and analogously for
+    ruby and js).
+  - Update `dep_review.py`'s `REGISTRY_TO_HOOKS` map values.
+  - Update `scripts/tests/test_doctests.py` (imports `hooks_ruby` by
+    name).
+  - Commit the renames alone so `git log --follow` works cleanly and
+    reviewers can confirm the commit contains only renames.
+
+### Is it worth it?
+
+**Step 1 (rename)**: Yes. The name is genuinely wrong and compounds with
+time. `PythonAnalyzer` is self-documenting; `Hooks` requires explanation.
+The churn is real but one-time and mechanical.
+
+**Step 2 (restructure)**: Yes, with the nuance that the value comes
+primarily from the cross-cutting base class methods (Case 2) and the
+threshold constants (Case 1). Moving ecosystem-specific helpers into the
+subclass as instance methods (Case 3) is a smaller but still positive
+change: it makes the class self-contained and removes the artificial
+module/class split. None of this changes behavior; all of it makes the
+class hierarchy easier to extend and understand.
+
+**Step 3 (file renames)**: Optional and low-urgency. The class names carry
+the meaning; the file names are secondary. Defer until there is another
+reason to touch the files heavily.
+
+### Interaction with PackageManifest (Phase 4)
+
+Do Step 2b (cross-cutting helpers as base class methods) before or
+alongside `PackageManifest`. The template method structure created in
+Step 2 provides the natural seams for `PackageManifest` to slot into:
+`read_manifest()` calls `self.extract_source_url()` and
+`self.extract_license()`, and those results populate `PackageManifest`
+fields. Doing Step 1 (rename) before Phase 4 also keeps the
+`PackageManifest` diff clean.
+
+## 6. Implementation Roadmap
+
+Phases 1 and 2 are already complete. The remaining phases are ordered by
+value-to-effort ratio. The rename (Section 5) is listed as Phase 3a/3b;
+it can be skipped if the naming is deemed acceptable as-is, but should
+precede `PackageManifest` if both are done.
+
+1.  **Phase 1** (done): Add `BASE_DANGEROUS_PATTERNS` to `EcosystemHooks`.
+    Each hook file removed its 20 shared entries and calls
     `all_dangerous_patterns()`. Immediate structural win, no behavior change.
 
-2.  **Phase 2**: Promote SLSA provenance and velocity checks to hook dispatch
-    (proposal D). Move `_check_slsa_provenance` and `_check_publisher_velocity`
-    out of the JS-only path in `dep_review.py` and add PyPI provenance.
+2.  **Phase 2** (done): Promote SLSA provenance and velocity checks to base
+    class. `check_provenance()` and `check_publisher_velocity()` now live on
+    `EcosystemHooks`; `hooks_js.py` populates `_provenance` and
+    `_publisher_stats` dict keys; `dep_review.py` calls the shared methods.
 
-3.  **Phase 3**: Introduce `PackageManifest` dataclass (proposal C). Migrate
-    one hook at a time; this is mechanical but requires touching many callers.
+3.  **Phase 3a** (recommended): Rename `EcosystemHooks` to
+    `EcosystemAnalyzer` and `class Hooks` to `PythonAnalyzer`,
+    `RubyAnalyzer`, `JavaScriptAnalyzer` (Section 5, Step 1). Adds a
+    module-level `Analyzer` alias in each hook file; renames local
+    variable `hooks` to `analyzer` in `dep_review.py`. Mechanical;
+    easily verified.
 
-4.  **Phase 4**: Bundle `write_signals()` inputs into `SignalContext` (proposal
-    A). Replace the 47-argument signature. This is the highest-impact cleanup
-    for `dep_review.py` but requires updating every call site in the driver.
+4.  **Phase 3b** (recommended, incremental): Move module-level code into
+    the class hierarchy (Section 5, Step 2). One hook file per commit.
+    Threshold constants become class-level attributes; cross-cutting
+    helpers (`extract_source_url`, `extract_license`, `unpack_archive`)
+    become overridable base class methods; ecosystem-specific helpers
+    become regular instance methods on the subclass.
 
-5.  **Phase 5**: Add `SignalReport` output struct if the output structure needs
-    to be programmatically consumed (e.g., for structured JSON output).
-    Skip if not needed: the current line-by-line printer is fine for AI input.
+5.  **Phase 3c** (optional, low-urgency): Rename the files from
+    `hooks_*.py` to `analyzer_*.py` (Section 5, Step 3). Kept separate
+    so `git log --follow` works and reviewers can verify rename-only.
+    Requires updating `test_doctests.py`.
+
+6.  **Phase 4**: Introduce `PackageManifest` dataclass (proposal C). Migrate
+    `read_manifest()` one hook at a time; callers in `dep_review.py` switch
+    from `manifest.get('key', '')` to typed attribute access. Do after 3a
+    if the rename is proceeding, so the diff stays clean.
+
+7.  **Phase 5**: Bundle `write_signals()` inputs into `SignalContext` (proposal
+    A). Replace the 47-argument signature. Highest-impact cleanup for
+    `dep_review.py` but requires updating every call site in the driver.
+
+8.  **Phase 6**: Add `SignalReport` output struct if the output structure
+    needs programmatic consumption (e.g., structured JSON output). Skip if
+    not needed: the current line-by-line printer is fine for AI input.
