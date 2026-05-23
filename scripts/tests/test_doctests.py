@@ -10,11 +10,11 @@ import analysis_shared
 import dep_review
 import dep_session
 import fetch_json
-import hooks_ruby
+import analyzer_ruby
 
 
 def load_tests(loader, tests, ignore):
     for mod in (analysis_shared, fetch_json, dep_review,
-                dep_session, hooks_ruby):
+                dep_session, analyzer_ruby):
         tests.addTests(doctest.DocTestSuite(mod))
     return tests

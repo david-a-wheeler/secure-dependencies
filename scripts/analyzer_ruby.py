@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# hooks_ruby.py: Ruby language operations for the dependency analysis driver.
+# analyzer_ruby.py: Ruby language operations for the dependency analysis driver.
 #
 # Handles the Ruby gem format (download, unpack, gemspec, Rakefile) and the
 # rubygems.org registry API. Used for --from rubygems; can be reused for other

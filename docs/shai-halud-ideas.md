@@ -29,8 +29,8 @@ The IoCs fall into five categories: file/code artifacts, persistence
 mechanisms, behavioral signals, network infrastructure, and repository markers.
 
 The worm has also bridged into PyPI, so detection ideas marked with
-[JS only] apply to `hooks_js.py` only; others should be added to
-`hooks_python.py` and `hooks_ruby.py` as well.
+[JS only] apply to `analyzer_js.py` only; others should be added to
+`analyzer_python.py` and `analyzer_ruby.py` as well.
 
 ---
 
@@ -39,7 +39,7 @@ The worm has also bridged into PyPI, so detection ideas marked with
 ### Done
 
 **Group A (Ideas 1-6):** All install-script command scanning implemented in
-`hooks_js.py` via `_INSTALL_CMD_CHECKS`. Several ideas were extended beyond
+`analyzer_js.py` via `_INSTALL_CMD_CHECKS`. Several ideas were extended beyond
 the original spec during implementation:
 
 - Idea 1: Split into `INSTALL_BOOTSTRAP_RUNTIME` (bun/deno/pkgx/bunx, high
@@ -111,13 +111,13 @@ implemented in all three ecosystems. Commit: `1a6a8b6`.
 **Group E (Ideas 14-16):** Registry and provenance API additions.
 
 - Idea 14 (`PUBLISHER_VELOCITY_ANOMALOUS`): `_check_publisher_velocity()` in
-  `hooks_js.py`. Queries `registry.npmjs.org/-/v1/search?text=maintainer:<user>&size=250`,
+  `analyzer_js.py`. Queries `registry.npmjs.org/-/v1/search?text=maintainer:<user>&size=250`,
   counts packages with `date` within the last 72 hours. Threshold: 10.
   HIGH severity when publisher is also a new account (<90 days); MEDIUM otherwise.
   Captures `npm_user_name` from the already-fetched version-specific endpoint.
   Guarded by `_RE_NPM_USER` allowlist to prevent injection.
 
-- Idea 15 (`SIGSTORE_REPO_MISMATCH`): `_check_slsa_provenance()` in `hooks_js.py`.
+- Idea 15 (`SIGSTORE_REPO_MISMATCH`): `_check_slsa_provenance()` in `analyzer_js.py`.
   Fetches `registry.npmjs.org/-/package/<name>/provenance`, extracts
   `sourceRepositoryURI` from the SLSA attestation's `externalParameters.workflow`,
   and compares against the declared source URL. URL normalisation strips `.git`,
@@ -145,7 +145,7 @@ Key implementation decisions:
 
 ## Gap Analysis: What the Current Skill Already Covers
 
-The current `hooks_js.py` already detects many relevant signals:
+The current `analyzer_js.py` already detects many relevant signals:
 
 - `HAS_PREINSTALL`, `HAS_POSTINSTALL`, `HAS_INSTALL_SCRIPT` with script text
 - `credential-env-vars` pattern: `process.env.AWS_*`, `GITHUB_*`, `GH_*`, etc.
@@ -199,7 +199,7 @@ The existing code already extracts those script strings and writes them to
 command strings themselves (not the JS files they invoke) against red-flag
 patterns, emitting named signals for each match.
 
-A single helper function in `hooks_js.py`:
+A single helper function in `analyzer_js.py`:
 
 ```python
 _INSTALL_CMD_CHECKS: list[tuple[str, re.Pattern]] = [
@@ -368,7 +368,7 @@ pattern catches the base64-encoded variant.
 
 **Cross-ecosystem note:** The Python analog of this (install scripts in `setup.py`
 or `pyproject.toml` calling `subprocess.run(['shred', ...])`) should be added to
-`hooks_python.py` as a separate Python-syntax pattern check.
+`analyzer_python.py` as a separate Python-syntax pattern check.
 
 ---
 
@@ -394,7 +394,7 @@ runtime rather than install time.
 
 ## Idea Group B: DANGEROUS_PATTERNS Additions
 
-*These entries go into `hooks_js.py`'s `DANGEROUS_PATTERNS` list and are
+*These entries go into `analyzer_js.py`'s `DANGEROUS_PATTERNS` list and are
 applied to all package source files via `blind_scan` (grep PCRE). They share
 the existing scan infrastructure with no additional code.*
 
@@ -444,7 +444,7 @@ package source, not just in install scripts. A module importing and calling
 published open-source packages.
 
 **Cross-ecosystem:** Add the same patterns in string-literal form to
-`hooks_python.py` and `hooks_ruby.py`.
+`analyzer_python.py` and `analyzer_ruby.py`.
 
 ---
 
@@ -791,7 +791,7 @@ re-fetching unchanged repo metadata.
 Grouped by the code they touch, so each group is one focused PR:
 
 ### Group A: Install-Script Command Scanning -- DONE
-Implemented Ideas 1-6 (with improvements) in `hooks_js.py` via
+Implemented Ideas 1-6 (with improvements) in `analyzer_js.py` via
 `_INSTALL_CMD_CHECKS`. Self-publish, ide-config-write, and cloud-secret-api
 also extended to Python and Ruby `DANGEROUS_PATTERNS`.
 

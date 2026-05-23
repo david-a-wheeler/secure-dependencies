@@ -193,18 +193,18 @@ Detect the project's ecosystem(s) by looking for these indicator files:
 | Python | `pyproject.toml`, `requirements.txt`, `Pipfile.lock`, `poetry.lock`, `uv.lock` |
 | JavaScript | `package.json`, `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml` |
 
-**Check whether analysis hooks exist for each detected ecosystem.** Currently
-`hooks_ruby.py` provides Ruby-specific dangerous-pattern detection. If you
-detect an ecosystem with no corresponding hooks file in the scripts directory,
-tell the user:
+**Check whether an analyzer exists for each detected ecosystem.** Currently
+`analyzer_ruby.py` provides Ruby-specific dangerous-pattern detection. If you
+detect an ecosystem with no corresponding analyzer file in the scripts
+directory, tell the user:
 
-> "I don't have analysis hooks for [ecosystem] yet. The hooks enable
+> "I don't have an analyzer for [ecosystem] yet. The analyzer enables
 > dangerous-pattern detection specific to that language. Would you like me to
-> create one using `hooks_ruby.py`, and perhaps other hooks,
+> create one using `analyzer_ruby.py`, and perhaps other analyzers,
 > as a starting point?"
 
-If yes, draft the hooks file before proceeding. If no, proceed with reduced
-dangerous-pattern coverage and note this in the session report.
+If yes, draft the analyzer file before proceeding. If no, proceed with
+reduced dangerous-pattern coverage and note this in the session report.
 
 ---
 

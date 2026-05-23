@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# hooks_python.py: Python language operations for the dependency analysis driver.
+# analyzer_python.py: Python language operations for the dependency analysis driver.
 #
 # Handles Python package formats (wheel .whl, source distribution .tar.gz)
 # and the PyPI registry API. Used for --from pypi; can be reused for other

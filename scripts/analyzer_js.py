@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# hooks_js.py: JavaScript/Node.js language operations for the
+# analyzer_js.py: JavaScript/Node.js language operations for the
 # dependency analysis driver.
 #
 # Handles the npm package format (download with npm pack, unpack tarball) and

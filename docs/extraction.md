@@ -96,7 +96,7 @@ platforms and easy to audit.
 symlinks.  Replaced because it still allows decompression bombs and
 requires a Python version branch.
 
-### GEM (`.gem` - Ruby, `hooks_ruby.py`)
+### GEM (`.gem` - Ruby, `analyzer_ruby.py`)
 
 Ruby gem archives are TAR files containing two inner tarballs
 (`metadata.gz` and `data.tar.gz`).  The `gem unpack` command is a system

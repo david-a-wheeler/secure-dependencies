@@ -15,7 +15,7 @@
 #
 # Known registries: rubygems, pypi, npm
 #
-# Loads language hooks via REGISTRY_TO_HOOKS map (e.g. rubygems → hooks_ruby).
+# Loads ecosystem analyzers via REGISTRY_TO_HOOKS map (e.g. rubygems → analyzer_ruby).
 # Output directory: ROOT/temp/dep-review/PKGNAME-NEW_VERSION/  (ROOT defaults to cwd)
 #
 # AI agents: read signals.txt for the complete self-describing report.
@@ -1950,11 +1950,11 @@ def run_analysis(  # noqa: C901
 # Maps registry name (--from value) to the ecosystem analyzer module.
 # Registry names describe where to download from; analyzer modules describe
 # how to handle the package format. Multiple registries can share one module
-# (e.g. a private gem server would also use hooks_ruby).
+# (e.g. a private gem server would also use analyzer_ruby).
 REGISTRY_TO_HOOKS: dict[str, str] = {
-    'rubygems': 'hooks_ruby',
-    'pypi':     'hooks_python',
-    'npm':      'hooks_js',
+    'rubygems': 'analyzer_ruby',
+    'pypi':     'analyzer_python',
+    'npm':      'analyzer_js',
 }
 KNOWN_REGISTRIES: list[str] = list(REGISTRY_TO_HOOKS)
 
@@ -2181,7 +2181,7 @@ def main() -> None:  # noqa: C901 (complexity acceptable for CLI validation)
         errors.append(
             f'Unknown registry: {registry!r}\n'
             f'  Known registries: {", ".join(KNOWN_REGISTRIES)}\n'
-            '  To add a new registry, add it to REGISTRY_TO_HOOKS and provide a hooks_LANGUAGE.py file.'
+            '  To add a new registry, add it to REGISTRY_TO_HOOKS and provide an analyzer_LANGUAGE.py file.'
         )
 
     # --- Validate: --registry-url ---

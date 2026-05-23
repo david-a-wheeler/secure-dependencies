@@ -2735,7 +2735,7 @@ def run_sandboxed(
     used and containers have their own container_shell_cmd.
     IMPORTANT: must never be constructed from attacker-controlled data such as
     filenames discovered via rglob. Use cmd= for that; see the cmd description
-    and hooks_ruby.py reproducible_build for the canonical pattern.
+    and analyzer_ruby.py reproducible_build for the canonical pattern.
 
     Example using cmd (no shell, safe for attacker-controlled paths):
         run_sandboxed(
@@ -2823,7 +2823,7 @@ def run_sandboxed(
         # data (e.g. filenames from rglob). Callers that need a discovered path
         # for bwrap/firejail must use cmd= (exec list, no shell) and supply a
         # static container_shell_cmd (e.g. a glob like '*.gemspec'). See
-        # hooks_ruby.py reproducible_build for the canonical pattern.
+        # analyzer_ruby.py reproducible_build for the canonical pattern.
         raw = container_shell_cmd if container_shell_cmd is not None else shell_cmd
         script = raw.format(src='/src', out='/out')
         args = [sandbox, 'run', '--rm']

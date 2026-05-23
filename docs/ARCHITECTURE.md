@@ -440,8 +440,9 @@ Scripts live in `scripts/`:
 | `dep_review.py` | Per-package analysis: download, inspect, diff, health |
 | `analysis_shared.py` | Shared utilities including tier 3 AI sandbox |
 | `fetch_json.py` | Registry JSON fetcher with caching |
-| `hooks_ruby.py` | Ruby-specific ecosystem hooks (RubyGems) |
-| `hooks_python.py` | Python-specific ecosystem hooks (PyPI) |
+| `analyzer_ruby.py` | Ruby-specific ecosystem analyzer (RubyGems) |
+| `analyzer_python.py` | Python-specific ecosystem analyzer (PyPI) |
+| `analyzer_js.py` | JavaScript-specific ecosystem analyzer (npm) |
 
 Run the test suite with:
 
