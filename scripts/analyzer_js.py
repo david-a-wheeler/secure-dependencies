@@ -390,6 +390,17 @@ class JavaScriptAnalyzer(shared.EcosystemAnalyzer):
 
     def _parse_npm_date(self, date_str: str) -> 'datetime | None':
         """Parse an ISO-8601 date string (with or without trailing Z/offset).
+
+        Handles the formats returned by the npm registry time object.
+        Returns None for unparseable strings rather than raising.
+
+        >>> a = JavaScriptAnalyzer(None)
+        >>> a._parse_npm_date('2023-04-15T10:30:00.000Z') is not None
+        True
+        >>> a._parse_npm_date('2023-04-15T10:30:00+05:30') is not None
+        True
+        >>> a._parse_npm_date('not-a-date') is None
+        True
         """
         try:
             clean = date_str.rstrip('Z').split('+')[0].split('.')[0]

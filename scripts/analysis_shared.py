@@ -344,6 +344,13 @@ _TERMINAL_ESCAPE_RE = re.compile(
 
 
 def _sanitize_char(m: re.Match) -> str:
+    """Replacement callback for sanitize(): allow safe Unicode, map the rest to '?'.
+
+    Called for every character not already consumed by _TERMINAL_ESCAPE_RE.
+    Keeps letters, numbers, punctuation, symbols, combining marks, and space
+    separators (Unicode categories L, N, P, S, M, Zs). Everything else --
+    including unrecognized control characters -- becomes '?'.
+    """
     ch = m.group(0)
     if ch == '\x1b':  # naked or malformed ESC not consumed by _TERMINAL_ESCAPE_RE
         return '?'
@@ -442,6 +449,11 @@ class Printer:
             self._owned = False
 
     def __call__(self, *args: object, sep: str = ' ', end: str = '\n') -> None:
+        """Write sanitized text; mirrors the print() signature.
+
+        All arguments are joined by sep, sanitized to strip terminal escapes
+        and disallowed Unicode, then written with end appended.
+        """
         self._f.write(sanitize(sep.join(str(a) for a in args)) + end)  # type: ignore[attr-defined]
 
     def getvalue(self) -> str:
@@ -963,6 +975,19 @@ def remove_symlinks(directory: Path) -> int:
 
 
 def safe_dir_component(name: str, version: str) -> str:
+    """Return a filesystem-safe 'name-version' directory component.
+
+    Replaces path separators so a malicious package name like '../evil'
+    cannot escape the work directory. Also collapses any remaining '..'
+    sequences that could be assembled from the name and version together.
+
+    >>> safe_dir_component('requests', '2.31.0')
+    'requests-2.31.0'
+    >>> safe_dir_component('../evil', '1.0')
+    '___evil-1.0'
+    >>> safe_dir_component('a', None)
+    'a-unknown'
+    """
     safe_name = name.replace('/', '_').replace('\\', '_')
     safe_ver = version.replace('/', '_').replace('\\', '_') if version else 'unknown'
     component = f'{safe_name}-{safe_ver}'
@@ -4137,6 +4162,12 @@ class EcosystemAnalyzer(ABC):
     def get_old_license(
         self, pkgname: str, old_ver: str, old_unpacked_dir: Path,
     ) -> str | None:
+        """Return the SPDX license string from the old version, or None.
+
+        Returns None if old_unpacked_dir is absent or the manifest cannot
+        be parsed (missing file is not an error; old version may not have
+        been downloaded).
+        """
         if not old_unpacked_dir or not Path(old_unpacked_dir).is_dir():
             return None
         manifest = self._read_old_manifest(Path(old_unpacked_dir), pkgname)
@@ -4147,6 +4178,12 @@ class EcosystemAnalyzer(ABC):
     def get_old_dep_lines(
         self, pkgname: str, old_ver: str, old_result: dict,
     ) -> list[str]:
+        """Return dependency strings from the old version manifest.
+
+        Returns an empty list if the old download failed or the unpacked
+        directory is absent; callers treat an empty list as "no comparison
+        available" rather than "no dependencies".
+        """
         if not old_result.get('ok'):
             return []
         old_unpacked = old_result.get('unpacked_dir')

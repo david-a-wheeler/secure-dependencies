@@ -106,6 +106,12 @@ def _pkg_key(name: str, version: str | None) -> str:
 
 
 def load_session(path: Path) -> dict:
+    """Load and validate a session file; exit with a message on any error.
+
+    Exits if the file is missing, not valid JSON, or carries a different
+    SESSION_VERSION than this tool expects (prevents silent mis-parses when
+    the schema changes between releases).
+    """
     try:
         data = json.loads(path.read_text(encoding='utf-8'))
     except FileNotFoundError:
@@ -121,6 +127,7 @@ def load_session(path: Path) -> dict:
 
 
 def save_session(path: Path, session: dict) -> None:
+    """Write session dict to path as indented JSON (overwrites any existing file)."""
     path.write_text(json.dumps(session, indent=2) + '\n', encoding='utf-8')
 
 
