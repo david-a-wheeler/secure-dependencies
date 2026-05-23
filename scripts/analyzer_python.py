@@ -558,6 +558,7 @@ class PythonAnalyzer(shared.EcosystemAnalyzer):
         # setup.py with code beyond bare metadata; pyproject.toml build hooks;
         # RECORD present (wheel has one) is normal but setup.py is a risk signal.
         install_script_files: list[tuple[str, Path]] = []
+        install_cmd_warnings: list[str] = []
         has_setup_py = False
         if unpacked_dir.is_dir():
             setup_py = unpacked_dir / 'setup.py'
@@ -604,7 +605,6 @@ class PythonAnalyzer(shared.EcosystemAnalyzer):
             p('  (none declared)')
 
         # VCS dependency check: URL-based deps in Requires-Dist bypass PyPI.
-        install_cmd_warnings: list[str] = []
         _vcs_hash_deps: list[str] = []
         _vcs_named_deps: list[str] = []
         for rdl in runtime_dep_lines:

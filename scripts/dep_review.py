@@ -34,6 +34,7 @@ import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import NoReturn
 
 sys.path.insert(0, str(Path(__file__).parent))
 import analysis_shared as shared
@@ -628,9 +629,9 @@ def write_signals(ctx: SignalContext, p: Printer) -> SignalReport:  # noqa: C901
     if health_concerns:
         for hc in health_concerns:
             p(f'[!] {hc}')
-            for key, ctx in health_context.items():
+            for key, ctx_text in health_context.items():
                 if key.lower() in hc.lower():
-                    p(f'    Context: {ctx}')
+                    p(f'    Context: {ctx_text}')
                     break
     else:
         p('No health concerns.')
@@ -2070,7 +2071,7 @@ def _err(msg: str) -> None:
     print(f'ERROR: {msg}', file=sys.stderr)
 
 
-def _die(msg: str) -> None:
+def _die(msg: str) -> NoReturn:
     _err(msg)
     sys.exit(1)
 
@@ -2097,11 +2098,13 @@ def main() -> None:  # noqa: C901 (complexity acceptable for CLI validation)
         sys.exit(1)
 
     # --- Parse flags ---
-    registry = None
+    registry: str | None = None
     registry_url: str | None = None
     session_arg: str | None = None
-    old_ver = None
-    root_arg = None
+    old_ver: str | None = None
+    root_arg: str | None = None
+    pkgname = ''
+    new_ver = ''
     do_alternatives = False
     do_basic = False
     do_deeper = False
@@ -2272,6 +2275,8 @@ def main() -> None:  # noqa: C901 (complexity acceptable for CLI validation)
         print(f'\nRun with --help for usage information.', file=sys.stderr)
         sys.exit(1)
 
+    assert registry is not None  # validated above; None adds error → sys.exit
+
     # --- Resolve root ---
     root = Path(root_arg).resolve() if root_arg else Path.cwd()
     if not root.is_dir():
@@ -2340,8 +2345,8 @@ def main() -> None:  # noqa: C901 (complexity acceptable for CLI validation)
         # Enrich with ecosyste.ms adoption data. The raw count is always shown
         # so the AI can judge plausibility in context (e.g. 1000 dependent repos
         # sounds high until you realise the package claims to be 'rails').
-        if registry_key:
-            eco_alt = shared.lookup_ecosystems_package(registry_key, pkgname, work=work)
+        if registry:
+            eco_alt = shared.lookup_ecosystems_package(registry, pkgname, work=work)
             if eco_alt.get('rate_limited'):
                 notes.append(
                     'ECOSYSTEMS_RATE_LIMITED: dependent-repo count unavailable; '

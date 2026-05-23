@@ -50,7 +50,7 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
     """EcosystemAnalyzer implementation for Ruby packages (RubyGems/gems)."""
 
     ECOSYSTEM = 'ruby'
-    LOCKFILE_NAME = 'Gemfile.lock'
+    LOCKFILE_NAME: str = 'Gemfile.lock'  # type: ignore[override]
     OSV_ECOSYSTEM = 'RubyGems'
     OSS_REBUILD_ECOSYSTEM = 'rubygems'
     NATIVE_BINARY_SUFFIXES: frozenset[str] = frozenset({'.so', '.bundle'})

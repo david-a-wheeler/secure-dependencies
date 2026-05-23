@@ -43,6 +43,7 @@ from dataclasses import dataclass, field
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import IO
 
 
 # ---------------------------------------------------------------------------
@@ -441,9 +442,9 @@ class Printer:
     'hello ? world\\n'
     """
 
-    def __init__(self, dest: 'Path | io.IOBase' = sys.stdout) -> None:
+    def __init__(self, dest: 'Path | IO[str]' = sys.stdout) -> None:
         if isinstance(dest, Path):
-            self._f: io.IOBase = dest.open('w', encoding='utf-8')
+            self._f: IO[str] = dest.open('w', encoding='utf-8')
             self._owned = True
         else:
             self._f = dest
@@ -3053,7 +3054,7 @@ def write_transitive_deps(
     note: str = '',
 ) -> dict:
     """Write transitive-deps.txt (via p) and return the standard result dict."""
-    (work / 'raw-transitive-deps.txt')  # raw file written by caller; not touched here
+    # raw-transitive-deps.txt is written by the caller; not touched here
     p(f'=== Transitive dependency footprint: {pkgname} {version} ===')
     if note:
         p(f'NOTE: {note}')

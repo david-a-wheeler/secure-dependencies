@@ -11,12 +11,16 @@ import dep_session
 FIXTURES = Path(__file__).parent / 'fixtures'
 
 
-def _signals():
-    """Return parsed fields from the shared signals fixture (JSON path, cached)."""
-    if not hasattr(_signals, '_cache'):
+_signals_cache: dict | None = None
+
+
+def _signals() -> dict:
+    """Return parsed fields from the shared signals fixture (cached)."""
+    global _signals_cache
+    if _signals_cache is None:
         # signals.json is present alongside signals.txt, so JSON path is used.
-        _signals._cache = dep_session._parse_signals(FIXTURES / 'signals.txt')
-    return _signals._cache
+        _signals_cache = dep_session._parse_signals(FIXTURES / 'signals.txt')
+    return _signals_cache
 
 
 class TestParseAutoFindings(unittest.TestCase):
