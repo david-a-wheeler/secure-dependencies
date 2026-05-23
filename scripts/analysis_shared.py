@@ -3882,6 +3882,22 @@ class EcosystemAnalyzer(ABC):
         else:
             p('PUBLISHER_VELOCITY_ANOMALOUS: NO')
 
+    def extract_source_url(self, raw_data: object) -> str:
+        """Extract source/repository URL from raw manifest/registry data.
+
+        Override in each ecosystem subclass with the ecosystem-specific
+        extraction logic. The base implementation returns ''.
+        """
+        return ''
+
+    def extract_license(self, raw_data: object) -> str:
+        """Extract raw license string from raw manifest/registry data.
+
+        Override in each ecosystem subclass with the ecosystem-specific
+        extraction logic. The base implementation returns ''.
+        """
+        return ''
+
     def __init__(self, registry_url: str | None = None) -> None:
         self.registry_url = registry_url
 

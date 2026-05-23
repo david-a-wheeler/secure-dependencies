@@ -43,83 +43,6 @@ _RE_GEMLOCK_SPECS = re.compile(r'^\s{4}(\S+)\s+\(', re.MULTILINE)
 
 
 # ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-def _extract_source_url(gemspec_text: str) -> str:
-    """Extract source/homepage URL from gemspec text.
-
-    Tries in priority order for source_code_uri, then homepage_uri:
-      1. Hash-rocket metadata hash  ("source_code_uri" => "URL")
-      2. Subscript assignment       (metadata['source_code_uri'] = 'URL')
-      3. Top-level assignment       (s.source_code_uri = "URL")
-    Then falls back to s.homepage = "URL".
-
-    >>> _extract_source_url("s.metadata['source_code_uri'] = 'https://github.com/foo/bar'")
-    'https://github.com/foo/bar'
-    >>> _extract_source_url('"source_code_uri" => "https://github.com/foo/bar"')
-    'https://github.com/foo/bar'
-    >>> _extract_source_url('s.source_code_uri = "https://github.com/foo/bar"')
-    'https://github.com/foo/bar'
-    >>> _extract_source_url('s.homepage = "https://example.com"')
-    'https://example.com'
-    >>> _extract_source_url('no url here')
-    ''
-    """
-    for key in ('source_code_uri', 'homepage_uri'):
-        ek = re.escape(key)
-        # Format 1: hash rocket  ("source_code_uri" => "URL")
-        m = re.search(
-            rf'["\']' + ek + r'["\']\s*=>\s*["\']([^"\']+)',
-            gemspec_text)
-        if m:
-            return m.group(1).strip().rstrip('/')
-        # Format 2: subscript assignment (metadata['source_code_uri'] = 'URL')
-        m = re.search(
-            r"metadata\[(['\"])" + ek + r"\1\]\s*=\s*['\"]([^'\"]+)",
-            gemspec_text)
-        if m:
-            return m.group(2).strip().rstrip('/')
-    # Format 3: top-level assignment
-    # (s.source_code_uri = "URL" or s.homepage_uri = "URL")
-    m = re.search(
-        r'(?:source_code_uri|homepage_uri)\s*=\s*["\']([^"\']+)',
-        gemspec_text)
-    if m:
-        return m.group(1).strip()
-    # Last resort: s.homepage = "URL"
-    m = re.search(r'homepage\s*=\s*["\']([^"\']+)', gemspec_text)
-    return m.group(1).strip() if m else ''
-
-
-def _extract_gemspec_license(gemspec_text: str) -> str:
-    """Extract raw license string from gemspec text, or empty string.
-
-    >>> _extract_gemspec_license('s.license = "MIT"')
-    'MIT'
-    >>> _extract_gemspec_license("s.licenses = ['Apache-2.0']")
-    'Apache-2.0'
-    >>> _extract_gemspec_license('no license here')
-    ''
-    """
-    lic_match = re.search(
-        r'\.licenses?\s*=\s*\[?["\']([^"\']+)["\']', gemspec_text)
-    return lic_match.group(1).strip() if lic_match else ''
-
-
-# Size thresholds for Ruby install scripts, keyed by filename.
-# extconf.rb: nokogiri is ~500 lines; > 1000 lines is extremely unusual.
-# Rakefile: complex gems rarely exceed 300 install-related lines;
-#   the whole Rakefile is checked, so 500 lines is the threshold.
-# 'default' covers any other install-time file (Makefile.in, etc.).
-_INSTALL_SCRIPT_WARN: dict[str, tuple[int, int]] = {
-    'extconf.rb': (40_000, 1_000),
-    'Rakefile':   (20_000,   500),
-    'default':    (20_000,   500),
-}
-
-
-# ---------------------------------------------------------------------------
 # Public API: called by dep_review.py
 # ---------------------------------------------------------------------------
 
@@ -222,6 +145,70 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
         ('diff-eval',
          r'^\+[^\n]{0,500}(?:eval|instance_eval|class_eval|module_eval)\s*[\(\{]'),
     ]
+
+    # Size thresholds for install scripts, keyed by filename.
+    # extconf.rb: nokogiri is ~500 lines; > 1000 lines is extremely unusual.
+    # Rakefile: complex gems rarely exceed 300 install-related lines;
+    #   the whole Rakefile is checked, so 500 lines is the threshold.
+    # 'default' covers any other install-time file (Makefile.in, etc.).
+    INSTALL_SCRIPT_WARN: dict[str, tuple[int, int]] = {
+        'extconf.rb': (40_000, 1_000),
+        'Rakefile':   (20_000,   500),
+        'default':    (20_000,   500),
+    }
+
+    def extract_source_url(self, raw_data: object) -> str:
+        """Extract source URL from gemspec text.
+
+        Tries source_code_uri then homepage_uri (hash-rocket, subscript,
+        top-level assignment), then falls back to s.homepage.
+
+        >>> RubyAnalyzer(None).extract_source_url("s.metadata['source_code_uri'] = 'https://github.com/foo/bar'")
+        'https://github.com/foo/bar'
+        >>> RubyAnalyzer(None).extract_source_url('"source_code_uri" => "https://github.com/foo/bar"')
+        'https://github.com/foo/bar'
+        >>> RubyAnalyzer(None).extract_source_url('s.source_code_uri = "https://github.com/foo/bar"')
+        'https://github.com/foo/bar'
+        >>> RubyAnalyzer(None).extract_source_url('s.homepage = "https://example.com"')
+        'https://example.com'
+        >>> RubyAnalyzer(None).extract_source_url('no url here')
+        ''
+        """
+        gemspec_text = str(raw_data)
+        for key in ('source_code_uri', 'homepage_uri'):
+            ek = re.escape(key)
+            m = re.search(
+                rf'["\']' + ek + r'["\']\s*=>\s*["\']([^"\']+)',
+                gemspec_text)
+            if m:
+                return m.group(1).strip().rstrip('/')
+            m = re.search(
+                r"metadata\[(['\"])" + ek + r"\1\]\s*=\s*['\"]([^'\"]+)",
+                gemspec_text)
+            if m:
+                return m.group(2).strip().rstrip('/')
+        m = re.search(
+            r'(?:source_code_uri|homepage_uri)\s*=\s*["\']([^"\']+)',
+            gemspec_text)
+        if m:
+            return m.group(1).strip()
+        m = re.search(r'homepage\s*=\s*["\']([^"\']+)', gemspec_text)
+        return m.group(1).strip() if m else ''
+
+    def extract_license(self, raw_data: object) -> str:
+        """Extract raw license string from gemspec text, or empty string.
+
+        >>> RubyAnalyzer(None).extract_license('s.license = "MIT"')
+        'MIT'
+        >>> RubyAnalyzer(None).extract_license("s.licenses = ['Apache-2.0']")
+        'Apache-2.0'
+        >>> RubyAnalyzer(None).extract_license('no license here')
+        ''
+        """
+        gemspec_text = str(raw_data)
+        lic_match = re.search(
+            r'\.licenses?\s*=\s*\[?["\']([^"\']+)["\']', gemspec_text)
+        return lic_match.group(1).strip() if lic_match else ''
 
     def get_lockfile_path(self, project_root: Path) -> Path:
         """Return the path to the Ruby lockfile (Gemfile.lock)."""
@@ -429,7 +416,7 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
                 if auth_match else '(not found)')
             p(f'AUTHORS: {authors_val}')
 
-            gemspec_license_raw = _extract_gemspec_license(gemspec_text)
+            gemspec_license_raw = self.extract_license(gemspec_text)
             p('')
             lic_decl = (
                 shared.sanitize_line(gemspec_license_raw)
@@ -450,7 +437,7 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
             else:
                 p('RAKEFILE_PRESENT: NO')
 
-            source_url = _extract_source_url(gemspec_text)
+            source_url = self.extract_source_url(gemspec_text)
 
             # Collect install-time scripts for AI review when any
             # install-time code is present. These files run (or direct
@@ -476,8 +463,8 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
                 ]
                 for fname, fpath in install_script_files:
                     raw = fpath.read_text(encoding='utf-8', errors='replace')
-                    warn_b, warn_l = _INSTALL_SCRIPT_WARN.get(
-                        fname, _INSTALL_SCRIPT_WARN['default'])
+                    warn_b, warn_l = self.INSTALL_SCRIPT_WARN.get(
+                        fname, self.INSTALL_SCRIPT_WARN['default'])
                     _sz_warn = shared.report_install_script_size(
                         raw, fname, p, warn_b, warn_l)
                     if _sz_warn:
@@ -647,7 +634,7 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
             return None
         old_gs_text = old_gs_path.read_text(
             encoding='utf-8', errors='replace')
-        return _extract_gemspec_license(old_gs_text) or None
+        return self.extract_license(old_gs_text) or None
 
     def get_old_dep_lines(
         self,
