@@ -3854,6 +3854,7 @@ class EcosystemAnalyzer(ABC):
     OSV_ECOSYSTEM: str
     OSS_REBUILD_ECOSYSTEM: str
     NATIVE_BINARY_SUFFIXES: frozenset[str]
+    REPRO_BUILT_DIR_SUFFIX: str   # e.g. 'raw-built-whl', 'raw-built-gem'
 
     # Language-agnostic patterns applied to every ecosystem.
     # Subclasses must NOT repeat these; call all_dangerous_patterns() instead
@@ -4181,9 +4182,72 @@ class EcosystemAnalyzer(ABC):
     def get_deep_source_config(self) -> dict: ...
 
     @abstractmethod
+    def _repro_setup(
+        self, clone_dir: Path, work: Path, p: 'Printer',
+    ) -> 'Path | str':
+        """Locate build manifest, print runtime version, return build root.
+
+        Returns the build root Path on success, or a SKIPPED/INCONCLUSIVE
+        result string on failure (passed directly to finish_reproducible_build).
+        """
+
+    @abstractmethod
+    def _repro_run_build(
+        self, build_root: Path, built_dir: Path, sandbox: str,
+    ) -> 'tuple[int, str] | None':
+        """Run the ecosystem build in a sandbox.
+
+        Returns (rc, combined_output) from run_sandboxed, or None if no
+        sandbox is available.
+        """
+
+    @abstractmethod
+    def _repro_compare(
+        self,
+        pkgname: str,
+        version: str,
+        built_dir: Path,
+        work: Path,
+        p: 'Printer',
+    ) -> tuple[str, int, int]:
+        """Find built artifact, compare with dist, return result tuple.
+
+        Returns (repro_result, code_diffs, meta_diffs).
+        """
+
     def reproducible_build(
         self, pkgname: str, version: str, work: Path, sandbox: str, p: 'Printer',
-    ) -> tuple[str, int, int]: ...
+    ) -> tuple[str, int, int]:
+        """Template method: orchestrate the reproducible-build check.
+
+        Common skeleton for all ecosystems; ecosystem-specific steps are
+        in _repro_setup, _repro_run_build, and _repro_compare.
+        """
+        clone_dir = work / 'source'
+        built_dir = work / self.REPRO_BUILT_DIR_SUFFIX
+        built_dir.mkdir(exist_ok=True)
+        p(f'=== Reproducible build: {pkgname} {version} ===')
+        p(f'Sandbox: {sandbox}')
+        p('')
+        if not clone_dir.is_dir():
+            return finish_reproducible_build(p, work, 'SKIPPED (no source clone)')
+        build_root = self._repro_setup(clone_dir, work, p)
+        if isinstance(build_root, str):
+            return finish_reproducible_build(p, work, build_root)
+        build_result = self._repro_run_build(build_root, built_dir, sandbox)
+        if build_result is None:
+            return finish_reproducible_build(
+                p, work,
+                'SKIPPED (no sandbox available:'
+                ' install bwrap, firejail, docker, or podman)',
+            )
+        rc_b, combined = build_result
+        (work / 'raw-build-output.txt').write_text(
+            combined, encoding='utf-8', errors='replace')
+        p(f'BUILD_STATUS: {"yes" if rc_b == 0 else "no"}')
+        if rc_b != 0:
+            return finish_reproducible_build(p, work, 'INCONCLUSIVE (build failed)')
+        return self._repro_compare(pkgname, version, built_dir, work, p)
 
 
 # ---------------------------------------------------------------------------

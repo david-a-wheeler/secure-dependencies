@@ -1144,58 +1144,34 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
         """Returns deep source comparison config for Ruby."""
         return {'primary_label': 'Ruby', 'primary_pattern': r'\.(rb)$'}
 
-    def reproducible_build(
-        self,
-        pkgname: str,
-        version: str,
-        work: Path,
-        sandbox: str,
-        p: 'shared.Printer',
-    ) -> tuple[str, int, int]:
-        """Attempt to build gem from source and compare with distributed gem.
+    REPRO_BUILT_DIR_SUFFIX = 'raw-built-gem'
 
-        Returns (repro_result, code_diffs, metadata_diffs).
-        repro_result is one of:
-          SKIPPED
-          INCONCLUSIVE
-          EXACTLY REPRODUCIBLE (sha256 match)
-          EXACTLY REPRODUCIBLE (content match)
-          FUNCTIONALLY EQUIVALENT (metadata-only diffs)
-          UNEXPECTED DIFFERENCES
-        """
-        clone_dir = work / 'source'
-        built_gem_dir = work / 'raw-built-gem'
-        built_gem_dir.mkdir(exist_ok=True)
-
-        p(f'=== Reproducible build: {pkgname} {version} ===')
-        p(f'Sandbox: {sandbox}')
-        p('')
-
-        if not clone_dir.is_dir():
-            return shared.finish_reproducible_build(
-                p, work, 'SKIPPED (no source clone)')
-
+    def _repro_setup(
+        self, clone_dir: Path, work: Path, p: 'shared.Printer',
+    ) -> 'Path | str':
         rc_rv, rv_out, _ = shared.run_cmd(['ruby', '--version'], timeout=10)
         ruby_ver = (
-            shared.sanitize_line(rv_out.strip())
-            if rc_rv == 0 else 'unknown')
+            shared.sanitize_line(rv_out.strip()) if rc_rv == 0 else 'unknown')
         p(f'RUBY_VERSION: {ruby_ver}')
-
         gemspec_candidates = list(clone_dir.rglob('*.gemspec'))
         if not gemspec_candidates:
-            return shared.finish_reproducible_build(
-                p, work, 'SKIPPED (no gemspec in source)')
+            return 'SKIPPED (no gemspec in source)'
         source_gemspec = gemspec_candidates[0].relative_to(clone_dir)
         p(f'SOURCE_GEMSPEC: {shared.sanitize_line(str(source_gemspec))}')
+        return clone_dir
 
-        build_log_path = work / 'raw-build-output.txt'
-
+    def _repro_run_build(
+        self, build_root: Path, built_dir: Path, sandbox: str,
+    ) -> 'tuple[int, str] | None':
         rc_rv2, rv2_out, _ = shared.run_cmd(
             ['ruby', '-e', 'puts RUBY_VERSION'], timeout=5)
         ruby_img_tag = rv2_out.strip() if rc_rv2 == 0 else '3'
         parts = ruby_img_tag.split('.')
         ruby_img_tag = '.'.join(parts[:2]) if len(parts) >= 2 else parts[0]
-
+        # Re-locate the gemspec so the cmd= list can reference it.
+        # _repro_setup already verified at least one exists.
+        source_gemspec = list(build_root.rglob('*.gemspec'))[0].relative_to(
+            build_root)
         # Shell injection defense: two separate paths, neither uses
         # source_gemspec in a shell string.
         #   bwrap/firejail: cmd= list is exec'd directly (no shell), so a
@@ -1204,8 +1180,8 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
         #   docker/podman: container_shell_cmd is a hardcoded string that
         #     uses "*.gemspec" (a shell glob), independent of the discovered
         #     filename entirely.
-        build_result = shared.run_sandboxed(
-            sandbox, clone_dir, built_gem_dir,
+        return shared.run_sandboxed(
+            sandbox, build_root, built_dir,
             '',  # shell_cmd unused for bwrap/firejail; cmd= used instead
             f'ruby:{ruby_img_tag}',
             cmd=['gem', 'build', '{src}/' + str(source_gemspec),
@@ -1217,35 +1193,23 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
                 'gem build *.gemspec && cp *.gem {out}/'
             ),
         )
-        if build_result is None:
-            return shared.finish_reproducible_build(
-                p, work,
-                'SKIPPED (no sandbox available:'
-                ' install bwrap, firejail, docker, or podman)',
-            )
-        rc_b, combined = build_result
-        build_log_path.write_text(
-            combined, encoding='utf-8', errors='replace')
-        build_ok = (rc_b == 0)
 
-        p(f'BUILD_STATUS: {"yes" if build_ok else "no"}')
-
-        if not build_ok:
-            return shared.finish_reproducible_build(
-                p, work, 'INCONCLUSIVE (build failed)')
-
-        built_gems = list(built_gem_dir.glob('*.gem'))
+    def _repro_compare(
+        self,
+        pkgname: str,
+        version: str,
+        built_dir: Path,
+        work: Path,
+        p: 'shared.Printer',
+    ) -> tuple[str, int, int]:
+        built_gems = list(built_dir.glob('*.gem'))
         if not built_gems:
             return shared.finish_reproducible_build(
                 p, work, 'INCONCLUSIVE (no .gem produced)')
         built_gem = built_gems[0]
-
         built_sha = shared.sha256_file(built_gem)
-        repro = shared.compare_repro_sha256(built_sha, work, p)
-        if repro is not None:
+        if (repro := shared.compare_repro_sha256(built_sha, work, p)) is not None:
             return repro
-
-        # Hashes differ; unpack and compare contents
         built_unpacked_parent = work / 'raw-built-unpacked'
         built_unpacked_parent.mkdir(exist_ok=True)
         shared.run_cmd(
@@ -1253,17 +1217,14 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
              '--target', str(built_unpacked_parent)],
             timeout=60,
         )
-
         built_unpacked = built_unpacked_parent / f'{pkgname}-{version}'
         if not built_unpacked.is_dir():
             built_unpacked = built_unpacked_parent
-
         dist_unpacked = work / 'unpacked' / f'{pkgname}-{version}'
         if not dist_unpacked.is_dir():
             return shared.finish_reproducible_build(
                 p, work,
                 'INCONCLUSIVE (hashes differ, no dist unpacked dir)')
-
         rc_diff, diff_out, _ = shared.run_cmd(
             ['diff', '-r', str(built_unpacked), str(dist_unpacked),
              '--exclude=*.gem'],
@@ -1271,14 +1232,11 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
         )
         (work / 'raw-repro-diff.txt').write_text(
             diff_out, encoding='utf-8', errors='replace')
-
         diff_line_count = len(diff_out.splitlines())
         p(f'CONTENT_DIFF_LINES: {diff_line_count}')
-
         if diff_line_count == 0:
             return shared.finish_reproducible_build(
                 p, work, 'EXACTLY REPRODUCIBLE (content match)')
-
         return shared.classify_repro_diffs(
             diff_out, p, work, _RE_REPRO_CODE, _RE_REPRO_META)
 

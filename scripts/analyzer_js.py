@@ -1478,51 +1478,16 @@ class JavaScriptAnalyzer(shared.EcosystemAnalyzer):
             'primary_pattern': r'\.(js|mjs|cjs|ts|jsx|tsx)$',
         }
 
-    def reproducible_build(
-        self,
-        pkgname: str,
-        version: str,
-        work: Path,
-        sandbox: str,
-        p: 'shared.Printer',
-    ) -> tuple[str, int, int]:
-        """Attempt to reproduce the npm pack output from the source clone.
+    REPRO_BUILT_DIR_SUFFIX = 'raw-built-tgz'
 
-        Runs 'npm pack' in the cloned source and compares the resulting
-        tarball contents against the distributed package. Note: npm tarballs
-        are not bitwise-reproducible across machines due to embedded
-        timestamps; this check therefore compares unpacked file contents
-        rather than SHA256 hashes.
-
-        Returns (repro_result, code_diffs, metadata_diffs).
-        repro_result is one of:
-          SKIPPED
-          INCONCLUSIVE
-          EXACTLY REPRODUCIBLE (sha256 match)
-          EXACTLY REPRODUCIBLE (content match)
-          FUNCTIONALLY EQUIVALENT (metadata-only diffs)
-          UNEXPECTED DIFFERENCES
-        """
-        clone_dir = work / 'source'
-        built_tgz_dir = work / 'raw-built-tgz'
-        built_tgz_dir.mkdir(exist_ok=True)
-
-        p(f'=== Reproducible build: {pkgname} {version} ===')
-        p(f'Sandbox: {sandbox}')
-        p('')
-
-        if not clone_dir.is_dir():
-            return shared.finish_reproducible_build(
-                p, work, 'SKIPPED (no source clone)')
-
+    def _repro_setup(
+        self, clone_dir: Path, work: Path, p: 'shared.Printer',
+    ) -> 'Path | str':
         rc_nv, nv_out, _ = shared.run_cmd(['npm', '--version'], timeout=10)
         npm_ver = (
-            shared.sanitize_line(nv_out.strip()) if rc_nv == 0
-            else 'unknown')
+            shared.sanitize_line(nv_out.strip()) if rc_nv == 0 else 'unknown')
         p(f'NPM_VERSION: {npm_ver}')
-
-        # Find package.json in the source clone; check one level deep
-        # for monorepos
+        # Find package.json; check one level deep for monorepos.
         pkg_json_path = clone_dir / 'package.json'
         if not pkg_json_path.is_file():
             for child in clone_dir.iterdir():
@@ -1531,78 +1496,70 @@ class JavaScriptAnalyzer(shared.EcosystemAnalyzer):
                     pkg_json_path = clone_dir / 'package.json'
                     break
         if not pkg_json_path.is_file():
-            return shared.finish_reproducible_build(
-                p, work, 'SKIPPED (no package.json in source)')
-
+            return 'SKIPPED (no package.json in source)'
         p(f'BUILD_ROOT: {shared.sanitize_line(str(clone_dir))}')
-        build_log_path = work / 'raw-build-output.txt'
+        return clone_dir
 
+    def _repro_run_build(
+        self, build_root: Path, built_dir: Path, sandbox: str,
+    ) -> 'tuple[int, str] | None':
         rc_nv2, nv2_out, _ = shared.run_cmd(['node', '--version'], timeout=5)
         node_tag = 'lts'
         if rc_nv2 == 0:
             m = re.match(r'v(\d+)', nv2_out.strip())
             if m:
                 node_tag = m.group(1)
-
-        build_result = shared.run_sandboxed(
-            sandbox, clone_dir, built_tgz_dir,
+        return shared.run_sandboxed(
+            sandbox, build_root, built_dir,
             'cd {src} && npm pack --pack-destination {out}',
             f'node:{node_tag}',
             container_shell_cmd=(
                 'cp -r {src} /tmp/src && cd /tmp/src'
                 ' && npm pack --pack-destination {out}'
             ),
-            firejail_cwd=clone_dir,
+            firejail_cwd=build_root,
         )
-        if build_result is None:
-            return shared.finish_reproducible_build(
-                p, work,
-                'SKIPPED (no sandbox available: install bwrap, '
-                'firejail, docker, or podman)',
-            )
-        rc_b, combined = build_result
-        build_log_path.write_text(
-            combined, encoding='utf-8', errors='replace')
-        build_ok = (rc_b == 0)
 
-        p(f'BUILD_STATUS: {"yes" if build_ok else "no"}')
-
-        if not build_ok:
-            return shared.finish_reproducible_build(
-                p, work, 'INCONCLUSIVE (build failed)')
-
-        built_tgzs = list(built_tgz_dir.glob('*.tgz'))
+    def _repro_compare(
+        self,
+        pkgname: str,
+        version: str,
+        built_dir: Path,
+        work: Path,
+        p: 'shared.Printer',
+    ) -> tuple[str, int, int]:
+        built_tgzs = list(built_dir.glob('*.tgz'))
         if not built_tgzs:
             return shared.finish_reproducible_build(
                 p, work, 'INCONCLUSIVE (no .tgz produced)')
+        # Select newest: npm pack timestamps vary across runs.
         built_tgz = max(built_tgzs, key=lambda tgz: tgz.stat().st_mtime)
-
         built_sha = shared.sha256_file(built_tgz)
         if (repro := shared.compare_repro_sha256(built_sha, work, p)) is not None:
             return repro
-
-        # Hashes will nearly always differ (timestamps); compare unpacked contents
+        # Hashes nearly always differ (timestamps); compare unpacked contents.
         built_unpacked = work / 'raw-built-unpacked'
         built_unpacked.mkdir(exist_ok=True)
         self._unpack_tgz(built_tgz, built_unpacked, [], 'repro-unpack')
-
         dist_unpacked = work / 'unpacked'
         if not dist_unpacked.is_dir():
-            return shared.finish_reproducible_build(p, work, 'INCONCLUSIVE (hashes differ, no dist unpacked dir)')
-
+            return shared.finish_reproducible_build(
+                p, work,
+                'INCONCLUSIVE (hashes differ, no dist unpacked dir)')
         rc_diff, diff_out, _ = shared.run_cmd(
-            ['diff', '-r', str(built_unpacked), str(dist_unpacked), '--exclude=*.map'],
+            ['diff', '-r', str(built_unpacked), str(dist_unpacked),
+             '--exclude=*.map'],
             timeout=60,
         )
-        (work / 'raw-repro-diff.txt').write_text(diff_out, encoding='utf-8', errors='replace')
-
+        (work / 'raw-repro-diff.txt').write_text(
+            diff_out, encoding='utf-8', errors='replace')
         diff_line_count = len(diff_out.splitlines())
         p(f'CONTENT_DIFF_LINES: {diff_line_count}')
-
         if diff_line_count == 0:
-            return shared.finish_reproducible_build(p, work, 'EXACTLY REPRODUCIBLE (content match)')
-
-        return shared.classify_repro_diffs(diff_out, p, work, _RE_REPRO_CODE, _RE_REPRO_META)
+            return shared.finish_reproducible_build(
+                p, work, 'EXACTLY REPRODUCIBLE (content match)')
+        return shared.classify_repro_diffs(
+            diff_out, p, work, _RE_REPRO_CODE, _RE_REPRO_META)
 
 
 Analyzer = JavaScriptAnalyzer   # used by dep_review.py for instantiation

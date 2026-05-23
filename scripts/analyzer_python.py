@@ -1447,129 +1447,97 @@ class PythonAnalyzer(shared.EcosystemAnalyzer):
         """Return deep source comparison config for Python."""
         return {'primary_label': 'Python', 'primary_pattern': r'\.(py|pyx|pxd)$'}
 
-    def reproducible_build(
-        self,
-        pkgname: str,
-        version: str,
-        work: Path,
-        sandbox: str,
-        p: 'shared.Printer',
-    ) -> tuple[str, int, int]:
-        """Attempt to build a wheel from source and compare with the distributed wheel.
+    REPRO_BUILT_DIR_SUFFIX = 'raw-built-whl'
 
-        Uses 'python -m build --wheel --no-isolation' to build from the cloned source.
-        Returns (repro_result, code_diffs, metadata_diffs).
-
-        repro_result is one of:
-          SKIPPED
-          INCONCLUSIVE
-          EXACTLY REPRODUCIBLE (sha256 match)
-          EXACTLY REPRODUCIBLE (content match)
-          FUNCTIONALLY EQUIVALENT (metadata-only diffs)
-          UNEXPECTED DIFFERENCES
-        """
-        clone_dir = work / 'source'
-        built_whl_dir = work / 'raw-built-whl'
-        built_whl_dir.mkdir(exist_ok=True)
-
-        p(f'=== Reproducible build: {pkgname} {version} ===')
-        p(f'Sandbox: {sandbox}')
-        p('')
-
-        if not clone_dir.is_dir():
-            return shared.finish_reproducible_build(p, work, 'SKIPPED (no source clone)')
-
+    def _repro_setup(
+        self, clone_dir: Path, work: Path, p: 'shared.Printer',
+    ) -> 'Path | str':
         rc_pv, pv_out, _ = shared.run_cmd(['python3', '--version'], timeout=10)
-        python_ver = shared.sanitize_line(pv_out.strip()) if rc_pv == 0 else 'unknown'
+        python_ver = (
+            shared.sanitize_line(pv_out.strip()) if rc_pv == 0 else 'unknown')
         p(f'PYTHON_VERSION: {python_ver}')
-
-        # Locate pyproject.toml or setup.py in the clone
         build_root = clone_dir
         for candidate in (clone_dir / 'pyproject.toml', clone_dir / 'setup.py'):
             if candidate.is_file():
-                build_root = clone_dir
                 break
         else:
-            # Try one level down
             for child in clone_dir.iterdir():
-                if child.is_dir() and ((child / 'pyproject.toml').is_file()
-                                       or (child / 'setup.py').is_file()):
+                if child.is_dir() and (
+                    (child / 'pyproject.toml').is_file()
+                    or (child / 'setup.py').is_file()
+                ):
                     build_root = child
                     break
-
-        if not (build_root / 'pyproject.toml').is_file() and not (build_root / 'setup.py').is_file():
-            return shared.finish_reproducible_build(p, work, 'SKIPPED (no pyproject.toml or setup.py in source)')
-
+        if (not (build_root / 'pyproject.toml').is_file()
+                and not (build_root / 'setup.py').is_file()):
+            return 'SKIPPED (no pyproject.toml or setup.py in source)'
         p(f'BUILD_ROOT: {shared.sanitize_line(str(build_root))}')
-        build_log_path = work / 'raw-build-output.txt'
+        return build_root
 
+    def _repro_run_build(
+        self, build_root: Path, built_dir: Path, sandbox: str,
+    ) -> 'tuple[int, str] | None':
         rc_pv2, pv2_out, _ = shared.run_cmd(
-            ['python3', '-c', 'import sys; print(sys.version_info[:2])'], timeout=5
+            ['python3', '-c', 'import sys; print(sys.version_info[:2])'],
+            timeout=5,
         )
         py_img_tag = '3'
         if rc_pv2 == 0:
             m = re.search(r'\((\d+),\s*(\d+)\)', pv2_out)
             if m:
                 py_img_tag = f'{m.group(1)}.{m.group(2)}'
-
-        build_result = shared.run_sandboxed(
-            sandbox, build_root, built_whl_dir,
+        # python:X images don't pre-install 'build'; install it first.
+        # container_allow_network=True is required for that pip install step.
+        return shared.run_sandboxed(
+            sandbox, build_root, built_dir,
             'python3 -m build --wheel --no-isolation --outdir {out} {src}',
             f'python:{py_img_tag}',
-            # python:X images don't pre-install 'build', so install it first.
-            # container_allow_network=True is required for that pip install step.
             container_shell_cmd=(
-                'python3 -m pip install build --quiet --disable-pip-version-check && '
+                'python3 -m pip install build --quiet'
+                ' --disable-pip-version-check && '
                 'python -m build --wheel --no-isolation --outdir {out} {src}'
             ),
             container_allow_network=True,
         )
-        if build_result is None:
-            return shared.finish_reproducible_build(
-                p, work,
-                'SKIPPED (no sandbox available: install bwrap, firejail, docker, or podman)',
-            )
-        rc_b, combined = build_result
-        build_log_path.write_text(combined, encoding='utf-8', errors='replace')
-        build_ok = rc_b == 0
 
-        p(f'BUILD_STATUS: {"yes" if build_ok else "no"}')
-
-        if not build_ok:
-            return shared.finish_reproducible_build(p, work, 'INCONCLUSIVE (build failed)')
-
-        built_whls = list(built_whl_dir.glob('*.whl'))
+    def _repro_compare(
+        self,
+        pkgname: str,
+        version: str,
+        built_dir: Path,
+        work: Path,
+        p: 'shared.Printer',
+    ) -> tuple[str, int, int]:
+        built_whls = list(built_dir.glob('*.whl'))
         if not built_whls:
-            return shared.finish_reproducible_build(p, work, 'INCONCLUSIVE (no .whl produced)')
+            return shared.finish_reproducible_build(
+                p, work, 'INCONCLUSIVE (no .whl produced)')
         built_whl = built_whls[0]
-
         built_sha = shared.sha256_file(built_whl)
         if (repro := shared.compare_repro_sha256(built_sha, work, p)) is not None:
             return repro
-
-        # Hashes differ: unpack both and compare contents
         built_unpacked = work / 'raw-built-unpacked'
         built_unpacked.mkdir(exist_ok=True)
         self._unpack_pkg(built_whl, built_unpacked, [], 'repro-unpack')
-
         dist_unpacked = work / 'unpacked'
         if not dist_unpacked.is_dir():
-            return shared.finish_reproducible_build(p, work, 'INCONCLUSIVE (hashes differ, no dist unpacked dir)')
-
+            return shared.finish_reproducible_build(
+                p, work,
+                'INCONCLUSIVE (hashes differ, no dist unpacked dir)')
         rc_diff, diff_out, _ = shared.run_cmd(
             ['diff', '-r', str(built_unpacked), str(dist_unpacked),
              '--exclude=*.pyc', '--exclude=__pycache__', '--exclude=RECORD'],
             timeout=60,
         )
-        (work / 'raw-repro-diff.txt').write_text(diff_out, encoding='utf-8', errors='replace')
-
+        (work / 'raw-repro-diff.txt').write_text(
+            diff_out, encoding='utf-8', errors='replace')
         diff_line_count = len(diff_out.splitlines())
         p(f'CONTENT_DIFF_LINES: {diff_line_count}')
-
         if diff_line_count == 0:
-            return shared.finish_reproducible_build(p, work, 'EXACTLY REPRODUCIBLE (content match)')
-
-        return shared.classify_repro_diffs(diff_out, p, work, _RE_REPRO_CODE, _RE_REPRO_META)
+            return shared.finish_reproducible_build(
+                p, work, 'EXACTLY REPRODUCIBLE (content match)')
+        return shared.classify_repro_diffs(
+            diff_out, p, work, _RE_REPRO_CODE, _RE_REPRO_META)
 
 
 Analyzer = PythonAnalyzer   # used by dep_review.py for instantiation
