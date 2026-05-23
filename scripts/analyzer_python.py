@@ -1078,17 +1078,12 @@ class PythonAnalyzer(shared.EcosystemAnalyzer):
             '_dep_lines_old': dep_lines_old,
         }
 
-    def _detect_lockfile_format(self, filename: str) -> str:
-        """Return the lockfile format name for a given filename."""
-        if filename == 'requirements.txt':
-            return 'pip-requirements'
-        if filename == 'poetry.lock':
-            return 'poetry'
-        if filename == 'uv.lock':
-            return 'uv'
-        if filename == 'Pipfile.lock':
-            return 'pipenv'
-        return 'unknown'
+    LOCKFILE_FORMAT_MAP: dict[str, str] = {
+        'requirements.txt': 'pip-requirements',
+        'poetry.lock': 'poetry',
+        'uv.lock': 'uv',
+        'Pipfile.lock': 'pipenv',
+    }
 
     def _dep_in_lockfile(self, dep_name: str, norm_dep: str, lf_text: str, fmt: str) -> bool:
         """Return True if dep_name appears in the lockfile text for the given format.

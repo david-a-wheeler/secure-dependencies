@@ -3855,6 +3855,9 @@ class EcosystemAnalyzer(ABC):
     OSS_REBUILD_ECOSYSTEM: str
     NATIVE_BINARY_SUFFIXES: frozenset[str]
     REPRO_BUILT_DIR_SUFFIX: str   # e.g. 'raw-built-whl', 'raw-built-gem'
+    # Maps each lockfile filename to a format token used by _dep_in_lockfile.
+    # Override in subclasses that support multiple lockfile formats.
+    LOCKFILE_FORMAT_MAP: dict[str, str] = {}
 
     # Language-agnostic patterns applied to every ecosystem.
     # Subclasses must NOT repeat these; call all_dangerous_patterns() instead
@@ -4088,6 +4091,13 @@ class EcosystemAnalyzer(ABC):
                         f' existing package "{base}"'
                         f' (stripped suffix "{suffix}").'
                         ' Verify this wrapper is intentional.')
+
+    def _detect_lockfile_format(self, filename: str) -> str:
+        """Return the lockfile format token for a filename.
+
+        Uses LOCKFILE_FORMAT_MAP; returns 'unknown' for unrecognized names.
+        """
+        return self.LOCKFILE_FORMAT_MAP.get(filename, 'unknown')
 
     @abstractmethod
     def get_lockfile_path(self, project_root: Path) -> Path: ...

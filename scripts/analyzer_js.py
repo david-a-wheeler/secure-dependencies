@@ -1132,17 +1132,12 @@ class JavaScriptAnalyzer(shared.EcosystemAnalyzer):
             '_dep_lines_old': dep_lines_old,
         }
 
-    def _detect_lockfile_format(self, filename: str) -> str:
-        """Return the lockfile format name for a given filename."""
-        if filename == 'package-lock.json':
-            return 'npm'
-        if filename == 'yarn.lock':
-            return 'yarn'
-        if filename == 'pnpm-lock.yaml':
-            return 'pnpm'
-        if filename == 'bun.lockb':
-            return 'bun'
-        return 'unknown'
+    LOCKFILE_FORMAT_MAP: dict[str, str] = {
+        'package-lock.json': 'npm',
+        'yarn.lock': 'yarn',
+        'pnpm-lock.yaml': 'pnpm',
+        'bun.lockb': 'bun',
+    }
 
     def _dep_in_lockfile(
         self, dep_name: str, lf_text: str, fmt: str,
