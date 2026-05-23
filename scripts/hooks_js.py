@@ -160,131 +160,9 @@ _INSTALL_CMD_CHECKS: list[tuple[str, re.Pattern[str]]] = [
     )),
 ]
 
-# Size thresholds for install hook command strings (combined preinstall +
-# install + postinstall). Inline hook commands in package.json are almost
-# always a short shell invocation; 10 KB or 50 lines is extremely unusual
-# even for the most complex legitimate packages.
-_INSTALL_HOOK_WARN_BYTES = 10_000
-_INSTALL_HOOK_WARN_LINES = 50
-
-
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-def _extract_license(pkg_json: dict) -> str:
-    """Extract raw license string from a parsed package.json dict.
-
-    Handles both string form ("MIT") and SPDX object form ({"type": "MIT"}).
-
-    >>> _extract_license({"license": "MIT"})
-    'MIT'
-    >>> _extract_license({"license": {"type": "Apache-2.0"}})
-    'Apache-2.0'
-    >>> _extract_license({})
-    ''
-    """
-    lic = pkg_json.get('license', '') or ''
-    if isinstance(lic, dict):
-        lic = lic.get('type', '') or ''
-    return str(lic).strip()
-
-
-def _extract_source_url(pkg_json: dict) -> str:
-    """Extract source/repository URL from package.json.
-
-    >>> _extract_source_url({"repository": {"url": "https://github.com/foo/bar"}})
-    'https://github.com/foo/bar'
-    >>> _extract_source_url({"repository": "https://github.com/foo/bar"})
-    'https://github.com/foo/bar'
-    >>> _extract_source_url({})
-    ''
-    """
-    repo = pkg_json.get('repository', '') or ''
-    if isinstance(repo, dict):
-        url = repo.get('url', '') or ''
-    elif isinstance(repo, str):
-        url = repo
-    else:
-        url = ''
-    url = re.sub(r'^git\+', '', str(url).strip())
-    url = re.sub(r'^git://', 'https://', url)
-    url = re.sub(r'\.git$', '', url).rstrip('/')
-    return url
-
-
-def _load_package_json(unpacked_dir: Path) -> dict:
-    """Load and parse package.json from the unpacked directory.
-
-    Returns {} on failure.
-    """
-    pkg_json_path = unpacked_dir / 'package.json'
-    if not pkg_json_path.is_file():
-        return {}
-    try:
-        return json.loads(
-            pkg_json_path.read_text(encoding='utf-8', errors='replace'))
-    except (ValueError, OSError):
-        return {}
-
-
-def _unpack_tgz(
-    tgz_file: Path, target_dir: Path,
-    failures: list[str], key: str,
-) -> bool:
-    """Unpack a .tgz, stripping the top-level 'package/' directory.
-
-    npm tarballs always place files under a 'package/' top-level directory.
-    Returns True on success.
-    """
-    try:
-        with tarfile.open(str(tgz_file), 'r:gz') as tf:
-            members = []
-            for m in tf.getmembers():
-                parts = Path(m.name).parts
-                if len(parts) >= 2 and parts[0] == 'package':
-                    m.name = '/'.join(parts[1:])
-                elif len(parts) >= 2:
-                    # Strip whatever the first-level directory is
-                    m.name = '/'.join(parts[1:])
-                else:
-                    continue
-                if not m.name or '..' in Path(m.name).parts:
-                    continue
-                members.append(m)
-            shared.tarfile_extractall_safe(tf, target_dir, members)
-        # Belt-and-suspenders: tarfile_extractall_safe already filters
-        # symlinks at the member level; this catches any edge cases.
-        shared.remove_symlinks(target_dir)
-        return True
-    except shared.ArchiveSecurityError as exc:
-        # An ArchiveSecurityError is a strong indicator of a malicious package:
-        # legitimate npm packages do not contain tar bombs or traversal payloads.
-        failures.append(f'SECURITY_VIOLATION:{key}: {exc}')
-        return False
-    except Exception as exc:
-        failures.append(f'{key}: {exc}')
-        return False
-
-
-# ---------------------------------------------------------------------------
-# Idea 14-16 helpers: registry and provenance API checks
-# ---------------------------------------------------------------------------
-
-
-
 # npm username allowlist: letters, digits, hyphens, underscores, dots.
 # Used before constructing search API URLs (command-injection prevention).
 _RE_NPM_USER = re.compile(r'^[A-Za-z0-9._-]{1,80}$')
-
-
-def _parse_npm_date(date_str: str) -> 'datetime | None':
-    """Parse an ISO-8601 date string (with or without trailing Z/offset)."""
-    try:
-        clean = date_str.rstrip('Z').split('+')[0].split('.')[0]
-        return datetime.fromisoformat(clean).replace(tzinfo=timezone.utc)
-    except (ValueError, OverflowError):
-        return None
 
 
 # ---------------------------------------------------------------------------
@@ -408,6 +286,117 @@ class JavaScriptAnalyzer(shared.EcosystemAnalyzer):
          r'^\+[^\n]{0,500}__proto__\s*[=:]\s*\{|^\+[^\n]{0,500}Object\.prototype\s*\['),
     ]
 
+    # Size thresholds for install hook command strings (preinstall + install
+    # + postinstall combined). 10 KB or 50 lines is extremely unusual even
+    # for the most complex legitimate packages.
+    INSTALL_HOOK_WARN_BYTES: int = 10_000
+    INSTALL_HOOK_WARN_LINES: int = 50
+
+    def extract_license(self, raw_data: object) -> str:
+        """Extract raw license string from a parsed package.json dict.
+
+        Handles both string form ("MIT") and SPDX object form
+        ({"type": "MIT"}).
+
+        >>> JavaScriptAnalyzer(None).extract_license({"license": "MIT"})
+        'MIT'
+        >>> JavaScriptAnalyzer(None).extract_license({"license": {"type": "Apache-2.0"}})
+        'Apache-2.0'
+        >>> JavaScriptAnalyzer(None).extract_license({})
+        ''
+        """
+        pkg_json = raw_data if isinstance(raw_data, dict) else {}
+        lic = pkg_json.get('license', '') or ''
+        if isinstance(lic, dict):
+            lic = lic.get('type', '') or ''
+        return str(lic).strip()
+
+    def extract_source_url(self, raw_data: object) -> str:
+        """Extract source/repository URL from package.json.
+
+        >>> JavaScriptAnalyzer(None).extract_source_url({"repository": {"url": "https://github.com/foo/bar"}})
+        'https://github.com/foo/bar'
+        >>> JavaScriptAnalyzer(None).extract_source_url({"repository": "https://github.com/foo/bar"})
+        'https://github.com/foo/bar'
+        >>> JavaScriptAnalyzer(None).extract_source_url({})
+        ''
+        """
+        pkg_json = raw_data if isinstance(raw_data, dict) else {}
+        repo = pkg_json.get('repository', '') or ''
+        if isinstance(repo, dict):
+            url = repo.get('url', '') or ''
+        elif isinstance(repo, str):
+            url = repo
+        else:
+            url = ''
+        url = re.sub(r'^git\+', '', str(url).strip())
+        url = re.sub(r'^git://', 'https://', url)
+        url = re.sub(r'\.git$', '', url).rstrip('/')
+        return url
+
+    def _load_package_json(self, unpacked_dir: Path) -> dict:
+        """Load and parse package.json from the unpacked directory.
+
+        Returns {} on failure.
+        """
+        pkg_json_path = unpacked_dir / 'package.json'
+        if not pkg_json_path.is_file():
+            return {}
+        try:
+            return json.loads(
+                pkg_json_path.read_text(encoding='utf-8', errors='replace'))
+        except (ValueError, OSError):
+            return {}
+
+    def _unpack_tgz(
+        self,
+        tgz_file: Path,
+        target_dir: Path,
+        failures: list[str],
+        key: str,
+    ) -> bool:
+        """Unpack a .tgz, stripping the top-level 'package/' directory.
+
+        npm tarballs always place files under a 'package/' top-level
+        directory. Returns True on success.
+        """
+        try:
+            with tarfile.open(str(tgz_file), 'r:gz') as tf:
+                members = []
+                for m in tf.getmembers():
+                    parts = Path(m.name).parts
+                    if len(parts) >= 2 and parts[0] == 'package':
+                        m.name = '/'.join(parts[1:])
+                    elif len(parts) >= 2:
+                        m.name = '/'.join(parts[1:])
+                    else:
+                        continue
+                    if not m.name or '..' in Path(m.name).parts:
+                        continue
+                    members.append(m)
+                shared.tarfile_extractall_safe(tf, target_dir, members)
+            # Belt-and-suspenders: tarfile_extractall_safe already filters
+            # symlinks at the member level; this catches any edge cases.
+            shared.remove_symlinks(target_dir)
+            return True
+        except shared.ArchiveSecurityError as exc:
+            # An ArchiveSecurityError is a strong indicator of a malicious
+            # package: legitimate npm packages do not contain tar bombs.
+            failures.append(f'SECURITY_VIOLATION:{key}: {exc}')
+            return False
+        except Exception as exc:
+            failures.append(f'{key}: {exc}')
+            return False
+
+    def _parse_npm_date(self, date_str: str) -> 'datetime | None':
+        """Parse an ISO-8601 date string (with or without trailing Z/offset).
+        """
+        try:
+            clean = date_str.rstrip('Z').split('+')[0].split('.')[0]
+            return datetime.fromisoformat(clean).replace(tzinfo=timezone.utc)
+        except (ValueError, OverflowError):
+            return None
+
     def get_lockfile_path(self, project_root: Path) -> Path:
         """Return the path to the first existing JavaScript lockfile.
 
@@ -457,7 +446,7 @@ class JavaScriptAnalyzer(shared.EcosystemAnalyzer):
                 (work / 'package-hash.txt').write_text(
                     f'{sha256}  {tgz_file.name}\n', encoding='utf-8'
                 )
-                if not _unpack_tgz(
+                if not self._unpack_tgz(
                         tgz_file, unpacked_dir, failures, 'unpack-new'):
                     failures.append('unpack-new-failed')
             else:
@@ -512,7 +501,7 @@ class JavaScriptAnalyzer(shared.EcosystemAnalyzer):
         pkg_json: dict = {}
 
         if unpacked_dir.is_dir():
-            pkg_json = _load_package_json(unpacked_dir)
+            pkg_json = self._load_package_json(unpacked_dir)
 
         if pkg_json:
             manifest_text = json.dumps(pkg_json, indent=2, ensure_ascii=False)
@@ -608,7 +597,7 @@ class JavaScriptAnalyzer(shared.EcosystemAnalyzer):
             if _hook_combined:
                 _size_warn = shared.report_install_script_size(
                     _hook_combined, 'install hooks (combined)',
-                    p, _INSTALL_HOOK_WARN_BYTES, _INSTALL_HOOK_WARN_LINES,
+                    p, self.INSTALL_HOOK_WARN_BYTES, self.INSTALL_HOOK_WARN_LINES,
                 )
                 if _size_warn:
                     install_cmd_warnings.append(_size_warn)
@@ -661,7 +650,7 @@ class JavaScriptAnalyzer(shared.EcosystemAnalyzer):
                 install_cmd_warnings.append(
                     'VCS_DEPENDENCY:package.json (named ref)')
 
-            source_url = _extract_source_url(pkg_json)
+            source_url = self.extract_source_url(pkg_json)
             hp_display = (
                 shared.sanitize_line(source_url) if source_url
                 else '(not found)')
@@ -673,7 +662,7 @@ class JavaScriptAnalyzer(shared.EcosystemAnalyzer):
                 author = author.get('name', '') or ''
             p(f'AUTHOR: {shared.sanitize_line(str(author)[:200])}')
 
-            manifest_license_raw = _extract_license(pkg_json)
+            manifest_license_raw = self.extract_license(pkg_json)
             p('')
             lic_str = (
                 shared.sanitize_line(manifest_license_raw)
@@ -790,7 +779,7 @@ class JavaScriptAnalyzer(shared.EcosystemAnalyzer):
             if tgz_candidates:
                 tgz_file = max(
                     tgz_candidates, key=lambda p: p.stat().st_mtime)
-                if _unpack_tgz(tgz_file, old_dir, failures, 'unpack-old'):
+                if self._unpack_tgz(tgz_file, old_dir, failures, 'unpack-old'):
                     ok = True
                     source = 'fetched'
                 else:
@@ -815,8 +804,8 @@ class JavaScriptAnalyzer(shared.EcosystemAnalyzer):
         """Extract raw license from the old version's package.json."""
         if not old_unpacked_dir or not Path(old_unpacked_dir).is_dir():
             return None
-        pkg_json = _load_package_json(Path(old_unpacked_dir))
-        return _extract_license(pkg_json) or None
+        pkg_json = self._load_package_json(Path(old_unpacked_dir))
+        return self.extract_license(pkg_json) or None
 
     def get_old_dep_lines(
         self,
@@ -831,7 +820,7 @@ class JavaScriptAnalyzer(shared.EcosystemAnalyzer):
         old_unpacked = old_result.get('unpacked_dir')
         if not old_unpacked or not Path(old_unpacked).is_dir():
             return []
-        pkg_json = _load_package_json(Path(old_unpacked))
+        pkg_json = self._load_package_json(Path(old_unpacked))
         deps = pkg_json.get('dependencies', {}) or {}
         opt_deps = pkg_json.get('optionalDependencies', {}) or {}
         all_runtime = dict(deps)
@@ -1054,7 +1043,7 @@ class JavaScriptAnalyzer(shared.EcosystemAnalyzer):
                         date_str = str(pkg.get('date', '') or '')
                         if not date_str:
                             continue
-                        pub_dt = _parse_npm_date(date_str)
+                        pub_dt = self._parse_npm_date(date_str)
                         if pub_dt is None:
                             continue
                         age_secs = (now - pub_dt).total_seconds()
@@ -1649,7 +1638,7 @@ class JavaScriptAnalyzer(shared.EcosystemAnalyzer):
         # Hashes will nearly always differ (timestamps); compare unpacked contents
         built_unpacked = work / 'raw-built-unpacked'
         built_unpacked.mkdir(exist_ok=True)
-        _unpack_tgz(built_tgz, built_unpacked, [], 'repro-unpack')
+        self._unpack_tgz(built_tgz, built_unpacked, [], 'repro-unpack')
 
         dist_unpacked = work / 'unpacked'
         if not dist_unpacked.is_dir():
