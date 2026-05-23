@@ -2192,6 +2192,14 @@ def main() -> None:  # noqa: C901 (complexity acceptable for CLI validation)
         # Sanity-check package name
         if not pkgname:
             errors.append('PKGNAME must not be empty.')
+        elif pkgname.startswith('-'):
+            # The gem CLI uses '--' as a build-args separator, not end-of-options,
+            # so we cannot use '--' before the gem name. This guard ensures names
+            # starting with '-' are rejected before reaching any ecosystem CLI.
+            errors.append(
+                f'PKGNAME starts with a dash: {pkgname!r}\n'
+                '  Package names must not start with \'-\'.'
+            )
         elif len(pkgname) > 200:
             errors.append(f'PKGNAME is suspiciously long ({len(pkgname)} chars): {pkgname[:40]!r}...')
         elif ' ' in pkgname:
