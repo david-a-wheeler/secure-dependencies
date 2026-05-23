@@ -268,7 +268,7 @@ _SETUP_PY_WARN_LINES = 1_000
 # Public API: called by dep_review.py
 # ---------------------------------------------------------------------------
 
-class Hooks(shared.EcosystemHooks):
+class PythonAnalyzer(shared.EcosystemAnalyzer):
     ECOSYSTEM = 'python'
     OSV_ECOSYSTEM = 'PyPI'
     OSS_REBUILD_ECOSYSTEM = 'pypi'
@@ -1665,3 +1665,6 @@ class Hooks(shared.EcosystemHooks):
             return shared.finish_reproducible_build(p, work, 'EXACTLY REPRODUCIBLE (content match)')
 
         return shared.classify_repro_diffs(diff_out, p, work, _RE_REPRO_CODE, _RE_REPRO_META)
+
+
+Analyzer = PythonAnalyzer   # used by dep_review.py for instantiation

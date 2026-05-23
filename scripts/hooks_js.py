@@ -291,7 +291,7 @@ def _parse_npm_date(date_str: str) -> 'datetime | None':
 # Public API: called by dep_review.py
 # ---------------------------------------------------------------------------
 
-class Hooks(shared.EcosystemHooks):
+class JavaScriptAnalyzer(shared.EcosystemAnalyzer):
     ECOSYSTEM = 'javascript'
     OSV_ECOSYSTEM = 'npm'
     OSS_REBUILD_ECOSYSTEM = 'npm'
@@ -1668,3 +1668,6 @@ class Hooks(shared.EcosystemHooks):
             return shared.finish_reproducible_build(p, work, 'EXACTLY REPRODUCIBLE (content match)')
 
         return shared.classify_repro_diffs(diff_out, p, work, _RE_REPRO_CODE, _RE_REPRO_META)
+
+
+Analyzer = JavaScriptAnalyzer   # used by dep_review.py for instantiation

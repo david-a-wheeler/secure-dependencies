@@ -58,7 +58,7 @@ def sec(title: str) -> str:
 # Scan orchestration
 # ---------------------------------------------------------------------------
 
-def run_scans(hooks, unpacked_dir: Path, work: Path) -> tuple[int, list[tuple[str, int]], int]:
+def run_scans(analyzer, unpacked_dir: Path, work: Path) -> tuple[int, list[tuple[str, int]], int]:
     """Run adversarial + todo + dangerous-pattern scans on the full package.
 
     Returns (total_matches, [(label, count), ...], source_lines).
@@ -75,7 +75,7 @@ def run_scans(hooks, unpacked_dir: Path, work: Path) -> tuple[int, list[tuple[st
     todo_labels = {label for label, _ in shared.TODO_PATTERNS}
     scan_patterns = (
         [(lbl, pat) for lbl, pat in shared.ADVERSARIAL_PATTERNS + shared.TODO_PATTERNS]
-        + [(lbl, pat) for lbl, pat, _ in hooks.all_dangerous_patterns()]
+        + [(lbl, pat) for lbl, pat, _ in analyzer.all_dangerous_patterns()]
     )
     for label, pattern in scan_patterns:
         globs = shared.CODE_FILE_GLOBS if label in shared.ADVERSARIAL_CODE_ONLY_LABELS else None
@@ -88,7 +88,7 @@ def run_scans(hooks, unpacked_dir: Path, work: Path) -> tuple[int, list[tuple[st
     return total, details, source_lines
 
 
-def run_diff_scans(hooks, work: Path, diff_lines: int) -> int:
+def run_diff_scans(analyzer, work: Path, diff_lines: int) -> int:
     """Run diff security scans on raw-diff-full.txt.
 
     Returns total diff scan matches.
@@ -97,7 +97,7 @@ def run_diff_scans(hooks, work: Path, diff_lines: int) -> int:
     if not diff_full_path.is_file() or diff_lines == 0:
         return 0
     total = 0
-    for label, pattern in hooks.DIFF_PATTERNS:
+    for label, pattern in analyzer.DIFF_PATTERNS:
         with shared.Printer(work / f'summary-scan-{label}.txt') as _p_scan:
             n = shared.blind_scan(label, pattern, diff_full_path, work, _p_scan)
         total += n
@@ -152,9 +152,9 @@ def _write_source_review(p: 'Printer', result: dict) -> None:
 # Old dep lines extraction
 # ---------------------------------------------------------------------------
 
-def _get_old_dep_lines(hooks, pkgname: str, old_ver: str, old_result: dict) -> list[str]:
-    """Extract runtime dep lines from old package manifest, via ecosystem hooks."""
-    return hooks.get_old_dep_lines(pkgname, old_ver, old_result)
+def _get_old_dep_lines(analyzer, pkgname: str, old_ver: str, old_result: dict) -> list[str]:
+    """Extract runtime dep lines from old package manifest."""
+    return analyzer.get_old_dep_lines(pkgname, old_ver, old_result)
 
 
 # ---------------------------------------------------------------------------
@@ -703,7 +703,7 @@ def write_signals(  # noqa: C901
 
     # ---- DANGEROUS CODE PATTERNS ----
     p(sec('DANGEROUS CODE PATTERNS'))
-    # Use ecosystem-specific description if the hooks module provides one,
+    # Use ecosystem-specific description if the analyzer module provides one,
     # otherwise fall back to a generic summary.
     dangerous_what = manifest.get(
         '_dangerous_what',
@@ -1308,7 +1308,7 @@ def _write_session_update(
 
 
 def run_analysis(  # noqa: C901
-    hooks,
+    analyzer,
     pkgname: str,
     old_ver: str,
     new_ver: str,
@@ -1356,7 +1356,7 @@ def run_analysis(  # noqa: C901
         probe_backend = 'n/a'
 
     print('============================================================')
-    print(f' dep_review.py [{hooks.ECOSYSTEM}]')
+    print(f' dep_review.py [{analyzer.ECOSYSTEM}]')
     print(f' Package : {pkgname}')
     print(f' Mode    : {mode_label}')
     if diff_mode:
@@ -1372,7 +1372,7 @@ def run_analysis(  # noqa: C901
 
     # 1. Download new version
     print(f'--- Download: {pkgname} {new_ver} ---')
-    dl = hooks.download_new(pkgname, new_ver, work, failures)
+    dl = analyzer.download_new(pkgname, new_ver, work, failures)
     sha256 = dl.get('sha256', '')
     unpacked_dir = dl.get('unpacked_dir')
     if sha256:
@@ -1384,13 +1384,13 @@ def run_analysis(  # noqa: C901
     print()
     print('--- Manifest analysis ---')
     with Printer(work / 'manifest-analysis.txt') as _p_manifest:
-        manifest = hooks.read_manifest(pkgname, new_ver, unpacked_dir, work, failures, _p_manifest)
+        manifest = analyzer.read_manifest(pkgname, new_ver, unpacked_dir, work, failures, _p_manifest)
     # Inject ecosystem-level metadata into manifest for write_signals
     if '_dangerous_what' not in manifest:
-        manifest['_dangerous_what'] = hooks.dangerous_what()
+        manifest['_dangerous_what'] = analyzer.dangerous_what()
     source_url = manifest.get('source_url', '')
     if not source_url:
-        _get_src = getattr(hooks, 'get_source_url_from_registry', None)
+        _get_src = getattr(analyzer, 'get_source_url_from_registry', None)
         if _get_src:
             source_url = _get_src(pkgname) or ''
             if source_url:
@@ -1406,7 +1406,7 @@ def run_analysis(  # noqa: C901
     print()
     print('--- Adversarial and dangerous-code scans ---')
     if unpacked_dir and unpacked_dir.is_dir():
-        total_matches, scan_details, source_lines = run_scans(hooks, unpacked_dir, work)
+        total_matches, scan_details, source_lines = run_scans(analyzer, unpacked_dir, work)
         for label, count in scan_details:
             if count > 0:
                 print(f'  {label}: {count} matches  [see summary-scan-{label}.txt]')
@@ -1512,9 +1512,9 @@ def run_analysis(  # noqa: C901
     print('--- Package vs source comparison ---')
     source_dir = work / 'source'
     if clone_ok and unpacked_dir:
-        # Allow ecosystem hooks to redirect to a package subdirectory (e.g. in monorepos)
-        source_dir = hooks.find_source_root(source_dir)
-        pkg_ex, src_ex = hooks.get_pkg_src_excludes()
+        # Allow the ecosystem analyzer to redirect to a package subdirectory (e.g. in monorepos)
+        source_dir = analyzer.find_source_root(source_dir)
+        pkg_ex, src_ex = analyzer.get_pkg_src_excludes()
         with Printer(work / 'extra-in-package.txt') as _p_extra:
             extra_files = shared.compare_pkg_vs_source(unpacked_dir, source_dir, work, pkg_ex, src_ex, _p_extra)
         print(f'  Extra files (package vs source): {extra_files}')
@@ -1532,7 +1532,7 @@ def run_analysis(  # noqa: C901
         with Printer(work / 'binary-files.txt') as _p_bin:
             binary_files = shared.detect_binary_files(
                 unpacked_dir, work, _p_bin,
-                hooks.NATIVE_BINARY_SUFFIXES,
+                analyzer.NATIVE_BINARY_SUFFIXES,
             )
     else:
         binary_files = 0
@@ -1548,7 +1548,7 @@ def run_analysis(  # noqa: C901
     if diff_mode:
         print()
         print('--- Old version download ---')
-        old_result = hooks.download_old(pkgname, old_ver, work, failures)
+        old_result = analyzer.download_old(pkgname, old_ver, work, failures)
         print(f'  Old version: {old_result.get("ok")} ({old_result.get("source") or "unavailable"})')
 
         print()
@@ -1556,7 +1556,7 @@ def run_analysis(  # noqa: C901
         old_unpacked = old_result.get('unpacked_dir')
         if old_result.get('ok') and old_unpacked and old_unpacked.is_dir() and unpacked_dir and unpacked_dir.is_dir():
             diff_lines, changed_files = shared.compute_diff(
-                old_unpacked, unpacked_dir, work, excludes=hooks.get_diff_excludes()
+                old_unpacked, unpacked_dir, work, excludes=analyzer.get_diff_excludes()
             )
             print(f'  Diff size: {diff_lines} lines changed')
             for line in changed_files.splitlines()[:10]:
@@ -1591,7 +1591,7 @@ def run_analysis(  # noqa: C901
         if diff_lines > 0:
             diff_full_path = work / 'raw-diff-full.txt'
             if diff_full_path.is_file():
-                for label, pattern in hooks.DIFF_PATTERNS:
+                for label, pattern in analyzer.DIFF_PATTERNS:
                     with shared.Printer(work / f'summary-scan-{label}.txt') as _p_scan:
                         n = shared.blind_scan(label, pattern, diff_full_path, work, _p_scan)
                     diff_scan_matches += n
@@ -1633,17 +1633,17 @@ def run_analysis(  # noqa: C901
     print()
     print('--- Registry / provenance data ---')
     with Printer(work / 'provenance.txt') as _p_prov:
-        registry = hooks.fetch_all_registry_data(
+        registry = analyzer.fetch_all_registry_data(
             pkgname, new_ver, work, _p_prov, source_url)
-        hooks.check_provenance(registry, source_url, _p_prov)
-        hooks.check_publisher_velocity(registry, _p_prov)
+        analyzer.check_provenance(registry, source_url, _p_prov)
+        analyzer.check_publisher_velocity(registry, _p_prov)
     print(f'  MFA required: {registry.get("mfa_status", "unknown")}')
 
     # 9b. Vulnerability lookup
     print()
     print('--- Known vulnerabilities (OSV) ---')
     with Printer(work / 'vulnerabilities.txt') as _p_vuln:
-        vuln_result = shared.lookup_vulnerabilities(pkgname, new_ver, hooks.OSV_ECOSYSTEM, _p_vuln)
+        vuln_result = shared.lookup_vulnerabilities(pkgname, new_ver, analyzer.OSV_ECOSYSTEM, _p_vuln)
     vuln_count = vuln_result['count']
     print(f'  Known vulnerabilities: {vuln_count}')
     for v in vuln_result['vulns'][:5]:
@@ -1656,8 +1656,8 @@ def run_analysis(  # noqa: C901
     # 9c. OSS Rebuild reproducibility lookup
     print()
     print('--- OSS Rebuild reproducibility ---')
-    _oss_rebuild_ecosystem = getattr(hooks, 'OSS_REBUILD_ECOSYSTEM', '') or \
-        shared._OSS_REBUILD_ECOSYSTEM_FALLBACK.get(hooks.OSV_ECOSYSTEM, '')
+    _oss_rebuild_ecosystem = getattr(analyzer, 'OSS_REBUILD_ECOSYSTEM', '') or \
+        shared._OSS_REBUILD_ECOSYSTEM_FALLBACK.get(analyzer.OSV_ECOSYSTEM, '')
     with Printer(work / 'oss-rebuild.txt') as _p_orb:
         oss_rebuild_result = shared.lookup_oss_rebuild(_oss_rebuild_ecosystem, pkgname, new_ver, work, _p_orb)
     _orb_signal = oss_rebuild_result.get('signal_level', 'NONE')
@@ -1734,7 +1734,7 @@ def run_analysis(  # noqa: C901
     print('--- License evaluation ---')
     license_candidates = shared.get_license_candidates(manifest, registry)
     old_license = (
-        hooks.get_old_license(pkgname, old_ver, old_result.get('unpacked_dir'))
+        analyzer.get_old_license(pkgname, old_ver, old_result.get('unpacked_dir'))
         if diff_mode and old_result.get('ok') else None
     )
     license_result = shared.evaluate_license(license_candidates, old_license)
@@ -1752,9 +1752,9 @@ def run_analysis(  # noqa: C901
     # 13. Dependencies
     print()
     print('--- Dependency analysis ---')
-    old_dep_lines = _get_old_dep_lines(hooks, pkgname, old_ver, old_result) if diff_mode else []
-    dep_result = hooks.check_lockfile(manifest.get('runtime_dep_lines', []), old_dep_lines, root)
-    dep_registry = {d: hooks.check_dep_registry(d) for d in dep_result.get('not_in_lockfile', [])}
+    old_dep_lines = _get_old_dep_lines(analyzer, pkgname, old_ver, old_result) if diff_mode else []
+    dep_result = analyzer.check_lockfile(manifest.get('runtime_dep_lines', []), old_dep_lines, root)
+    dep_registry = {d: analyzer.check_dep_registry(d) for d in dep_result.get('not_in_lockfile', [])}
     with Printer(work / 'new-deps.txt') as _p_deps, \
          Printer(work / 'dep-lockfile-check.txt') as _p_lock, \
          Printer(work / 'dep-registry.txt') as _p_reg:
@@ -1769,10 +1769,10 @@ def run_analysis(  # noqa: C901
     print()
     print('--- Transitive dependency footprint ---')
     run_transitive = not diff_mode or bool(not_in_lf)
-    lockfile_path = hooks.get_lockfile_path(root)
+    lockfile_path = analyzer.get_lockfile_path(root)
     if run_transitive:
         with Printer(work / 'transitive-deps.txt') as _p_trans:
-            transitive = hooks.get_transitive_deps(pkgname, new_ver, lockfile_path, work, _p_trans)
+            transitive = analyzer.get_transitive_deps(pkgname, new_ver, lockfile_path, work, _p_trans)
         print(f'  Total transitive deps: {transitive.get("total", 0)}')
         print(f'  New (not in lockfile): {len(transitive.get("not_in_lockfile", []))}')
     else:
@@ -1798,13 +1798,13 @@ def run_analysis(  # noqa: C901
                 '  Install one of those tools to enable this check.'
             )
         with Printer(work / 'reproducible-build.txt') as _p_repro:
-            repro_result, code_diffs, meta_diffs = hooks.reproducible_build(
+            repro_result, code_diffs, meta_diffs = analyzer.reproducible_build(
                 pkgname, new_ver, work, sandbox, _p_repro
             )
         print(f'  Reproducible build: {repro_result}')
         if code_diffs > 0:
             print(f'  [!] CODE FILES DIFFER: {code_diffs} files; human review needed')
-        cfg = hooks.get_deep_source_config()
+        cfg = analyzer.get_deep_source_config()
         with shared.Printer(work / 'source-deep-diff.txt') as _p_deep:
             shared.deep_source_comparison(pkgname, new_ver, work, _p_deep, **cfg)
         print('  Deep comparison saved to source-deep-diff.txt')
@@ -1868,7 +1868,7 @@ def run_analysis(  # noqa: C901
             registry, scorecard, health_concerns,
             license_result, dep_result, dep_registry,
             transitive, deeper_result, failures,
-            ecosystem=hooks.ECOSYSTEM,
+            ecosystem=analyzer.ECOSYSTEM,
             deeper_mode=deeper_mode,
             install_probe=install_probe,
             install_probe_mode=install_probe_mode,
@@ -1947,9 +1947,9 @@ def run_analysis(  # noqa: C901
 # Entry point
 # ---------------------------------------------------------------------------
 
-# Maps registry name (--from value) to the language-level hooks module.
-# Registry names describe where to download from; hooks modules describe how
-# to handle the package format. Multiple registries can share one hooks module
+# Maps registry name (--from value) to the ecosystem analyzer module.
+# Registry names describe where to download from; analyzer modules describe
+# how to handle the package format. Multiple registries can share one module
 # (e.g. a private gem server would also use hooks_ruby).
 REGISTRY_TO_HOOKS: dict[str, str] = {
     'rubygems': 'hooks_ruby',
@@ -2235,19 +2235,19 @@ def main() -> None:  # noqa: C901 (complexity acceptable for CLI validation)
     if not root.is_dir():
         _die(f'--root directory does not exist: {root}')
 
-    # --- Load ecosystem hooks ---
+    # --- Load ecosystem analyzer ---
     hooks_module = REGISTRY_TO_HOOKS[registry]
     try:
-        hooks = importlib.import_module(hooks_module).Hooks(registry_url=registry_url)
+        analyzer = importlib.import_module(hooks_module).Analyzer(registry_url=registry_url)
     except ImportError as exc:
         _die(
-            f'No hooks file for registry {registry!r}: {exc}\n'
+            f'No analyzer module for registry {registry!r}: {exc}\n'
             f'  Expected: {hooks_module}.py in the same directory as dep_review.py'
         )
 
     # --- Warn: no lockfile found ---
-    lockfile_name = getattr(hooks, 'LOCKFILE_NAME', None)
-    lockfile_names = getattr(hooks, 'LOCKFILE_NAMES', None)
+    lockfile_name = getattr(analyzer, 'LOCKFILE_NAME', None)
+    lockfile_names = getattr(analyzer, 'LOCKFILE_NAMES', None)
     if lockfile_names:
         if not any((root / lf).exists() for lf in lockfile_names):
             print(
@@ -2289,7 +2289,7 @@ def main() -> None:  # noqa: C901 (complexity acceptable for CLI validation)
 
     # --- Execute requested modes in order ---
     if do_alternatives:
-        result = hooks.check_alternatives(pkgname, new_ver, work, root)
+        result = analyzer.check_alternatives(pkgname, new_ver, work, root)
         concerns = result.get('concerns', [])
         notes = result.get('notes', [])
         pkg_count = result.get('pkg_count', 0)
@@ -2392,7 +2392,7 @@ def main() -> None:  # noqa: C901 (complexity acceptable for CLI validation)
 
     if do_basic or do_deeper or do_install_probe:
         aborted = run_analysis(
-            hooks, pkgname, old_ver or 'none', new_ver, root, work, diff_mode, do_deeper,
+            analyzer, pkgname, old_ver or 'none', new_ver, root, work, diff_mode, do_deeper,
             install_probe=do_install_probe,
             registry_url=registry_url, session_file=session_file,
             deeper_mode=do_deeper_mode,

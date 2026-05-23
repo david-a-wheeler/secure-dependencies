@@ -123,7 +123,7 @@ _INSTALL_SCRIPT_WARN: dict[str, tuple[int, int]] = {
 # Public API: called by dep_review.py
 # ---------------------------------------------------------------------------
 
-class Hooks(shared.EcosystemHooks):
+class RubyAnalyzer(shared.EcosystemAnalyzer):
     ECOSYSTEM = 'ruby'
     LOCKFILE_NAME = 'Gemfile.lock'
     OSV_ECOSYSTEM = 'RubyGems'
@@ -1375,3 +1375,6 @@ class Hooks(shared.EcosystemHooks):
 
         return shared.classify_repro_diffs(
             diff_out, p, work, _RE_REPRO_CODE, _RE_REPRO_META)
+
+
+Analyzer = RubyAnalyzer   # used by dep_review.py for instantiation

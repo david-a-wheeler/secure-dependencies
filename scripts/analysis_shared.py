@@ -1404,7 +1404,7 @@ def cmd_available(name: str) -> bool:
 
 # ---------------------------------------------------------------------------
 # Adversarial scan patterns: language-agnostic; apply to every ecosystem.
-# BASE_DANGEROUS_PATTERNS (language-agnostic) live in EcosystemHooks and
+# BASE_DANGEROUS_PATTERNS (language-agnostic) live in EcosystemAnalyzer and
 # apply to every ecosystem.  DANGEROUS_PATTERNS (eval/exec/etc.) live in
 # each ecosystem script because the idioms differ across languages.
 # ---------------------------------------------------------------------------
@@ -3702,7 +3702,7 @@ def norm_repo_url(url: str) -> str:
 # Ecosystem hooks contract
 # ---------------------------------------------------------------------------
 
-class EcosystemHooks(ABC):
+class EcosystemAnalyzer(ABC):
     """Abstract base class for ecosystem-specific analysis hooks.
 
     Subclass this in each hooks_<ecosystem>.py module. Instantiate with the
