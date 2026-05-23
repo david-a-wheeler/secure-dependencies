@@ -13,8 +13,12 @@ syntax_valid:
 
 typecheck:
 	@echo "Type-checking Python scripts with pyright:"
-	pyright scripts/
-	@echo 'OK, no type errors found'
+	@if command -v pyright > /dev/null 2>&1; then \
+	    pyright scripts/; \
+	    echo 'OK, no type errors found'; \
+	else \
+	    echo 'WARNING: pyright not found; skipping (install: pip install pyright)'; \
+	fi
 
 emdash:
 	@echo "Finding lines in textual format files with em or en dashes:"
