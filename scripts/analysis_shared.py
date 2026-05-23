@@ -3656,17 +3656,16 @@ class EcosystemHooks(ABC):
         LOCKFILE_NAME        Single lockfile filename, or None if the ecosystem
                              uses multiple formats (see LOCKFILE_NAMES).
         MANIFEST_FILE        Canonical manifest filename written to the work dir.
-        DANGEROUS_WHAT       Human-readable description of all dangerous patterns.
-        DANGEROUS_PATTERNS   Ecosystem-specific (label, regex) pairs; appended
-                             to BASE_DANGEROUS_PATTERNS by all_dangerous_patterns().
+        DANGEROUS_PATTERNS   Ecosystem-specific (label, regex, description) triples;
+                             combined with BASE_DANGEROUS_PATTERNS by
+                             all_dangerous_patterns().
         DIFF_PATTERNS        list[tuple[str, str]] of (label, regex) pairs.
     """
 
     ECOSYSTEM: str
     LOCKFILE_NAME: str | None
     MANIFEST_FILE: str
-    DANGEROUS_WHAT: str
-    DANGEROUS_PATTERNS: list[tuple[str, str]]
+    DANGEROUS_PATTERNS: list[tuple[str, str, str]]
     DIFF_PATTERNS: list[tuple[str, str]]
     OSV_ECOSYSTEM: str
     OSS_REBUILD_ECOSYSTEM: str
@@ -3675,45 +3674,47 @@ class EcosystemHooks(ABC):
     # Language-agnostic patterns applied to every ecosystem.
     # Subclasses must NOT repeat these; call all_dangerous_patterns() instead
     # of DANGEROUS_PATTERNS to get the combined list.
-    BASE_DANGEROUS_PATTERNS: list[tuple[str, str]] = [
-        # Persistence: writing to IDE or AI-tool config directories.
-        ('ide-config-write', IDE_CONFIG_PATHS_RE),
-        # Mini Shai-Hulud campaign: backdoor install path, LaunchAgent name,
-        # and dead-man's-switch script. No legitimate use in package code.
-        ('mini-shai-hulud-paths', MINI_SHAI_HULUD_PATHS_RE),
-        # Exfiltration relay services and known campaign C2 domains.
-        ('exfil-relay-domain', EXFIL_RELAY_DOMAINS_RE),
-        # Orphan-commit fetch: source file fetches from GitHub by a direct
-        # 40-hex commit SHA alongside a fetch verb on the same line.
+    BASE_DANGEROUS_PATTERNS: list[tuple[str, str, str]] = [
+        ('ide-config-write', IDE_CONFIG_PATHS_RE,
+         'IDE/AI-tool config writes (.vscode, .cursor, .claude, etc.)'),
+        ('mini-shai-hulud-paths', MINI_SHAI_HULUD_PATHS_RE,
+         'Mini Shai-Hulud campaign artifacts (known backdoor install paths)'),
+        ('exfil-relay-domain', EXFIL_RELAY_DOMAINS_RE,
+         'exfiltration relay services and known C2 domains'),
+        # Orphan-commit fetch: fetch verb on the same line as a bare 40-hex SHA.
         # Legitimate pinning uses lockfiles, not bare commit SHAs.
-        ('github-fetch-by-sha', GITHUB_SHA_FETCH_RE),
-        # GitHub commit-search API used as a C2 dead-drop channel.
+        ('github-fetch-by-sha', GITHUB_SHA_FETCH_RE,
+         'GitHub fetch by bare commit SHA (orphan-commit injection)'),
         # The specific ?q=firedalazer form is in ADVERSARIAL_PATTERNS (abort);
         # this catches the general endpoint for novel campaign variants.
-        ('github-commit-search-c2', GITHUB_COMMIT_SEARCH_RE),
-        # Discord bot token embedded in source: likely a harvested credential
-        # or token-extraction regex.  24.6.27 base64 format; exact quantifiers.
-        ('discord-token-format', DISCORD_TOKEN_RE),
-        # String-split obfuscation: 5+ single chars joined by + to assemble
-        # a keyword character by character, evading simple string-match scans.
-        ('string-split-obfuscation', STRING_SPLIT_RE),
-        # Unusually long lines: may embed base64/hex payloads or
-        # single-line obfuscated code.
-        ('long-line-obfuscation', LONG_LINE_RE),
-        # Reverse-shell: bash /dev/tcp redirect, nc -e, socat EXEC.
-        ('reverse-shell', REVERSE_SHELL_RE),
-        # Cron persistence: writing to cron directories or piping to
-        # crontab; establishes a payload that survives reboots.
-        ('cron-persistence', CRON_PERSISTENCE_RE),
-        # System-level persistence: systemd service or macOS LaunchAgent.
-        ('system-persistence', SYSTEM_PERSISTENCE_RE),
-        # Cryptominer: named miner binaries or Stratum pool protocol.
-        ('cryptominer', CRYPTOMINER_RE),
+        ('github-commit-search-c2', GITHUB_COMMIT_SEARCH_RE,
+         'GitHub commit-search API as C2 dead-drop channel'),
+        # 24.6.27 base64 format; exact quantifiers keep this ReDoS-safe.
+        ('discord-token-format', DISCORD_TOKEN_RE,
+         'Discord bot token format (harvested credential)'),
+        # 5+ single chars joined by + to assemble a keyword char-by-char.
+        ('string-split-obfuscation', STRING_SPLIT_RE,
+         'string-split obfuscation (char-by-char keyword assembly)'),
+        ('long-line-obfuscation', LONG_LINE_RE,
+         'unusually long lines (embedded payload or obfuscated code)'),
+        ('reverse-shell', REVERSE_SHELL_RE,
+         'reverse-shell indicators (bash /dev/tcp, nc -e, socat EXEC)'),
+        # Establishes a payload that survives reboots.
+        ('cron-persistence', CRON_PERSISTENCE_RE,
+         'cron persistence (crontab writes)'),
+        ('system-persistence', SYSTEM_PERSISTENCE_RE,
+         'systemd/LaunchAgent persistence'),
+        ('cryptominer', CRYPTOMINER_RE,
+         'cryptominer tools and Stratum mining protocol'),
     ]
 
-    def all_dangerous_patterns(self) -> list[tuple[str, str]]:
+    def all_dangerous_patterns(self) -> list[tuple[str, str, str]]:
         """Return ecosystem-specific patterns followed by base patterns."""
         return self.DANGEROUS_PATTERNS + self.BASE_DANGEROUS_PATTERNS
+
+    def dangerous_what(self) -> str:
+        """Return a comma-separated summary of all patterns for the report."""
+        return ', '.join(desc for _, _, desc in self.all_dangerous_patterns())
 
     def __init__(self, registry_url: str | None = None) -> None:
         self.registry_url = registry_url

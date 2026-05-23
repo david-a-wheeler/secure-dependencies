@@ -73,7 +73,11 @@ def run_scans(hooks, unpacked_dir: Path, work: Path) -> tuple[int, list[tuple[st
     if not unpacked_dir.is_dir():
         return 0, [], 0
     todo_labels = {label for label, _ in shared.TODO_PATTERNS}
-    for label, pattern in shared.ADVERSARIAL_PATTERNS + shared.TODO_PATTERNS + hooks.all_dangerous_patterns():
+    scan_patterns = (
+        [(lbl, pat) for lbl, pat in shared.ADVERSARIAL_PATTERNS + shared.TODO_PATTERNS]
+        + [(lbl, pat) for lbl, pat, _ in hooks.all_dangerous_patterns()]
+    )
+    for label, pattern in scan_patterns:
         globs = shared.CODE_FILE_GLOBS if label in shared.ADVERSARIAL_CODE_ONLY_LABELS else None
         with shared.Printer(work / f'summary-scan-{label}.txt') as _p_scan:
             n = shared.blind_scan(label, pattern, unpacked_dir, work, _p_scan, include_globs=globs)
@@ -1382,8 +1386,8 @@ def run_analysis(  # noqa: C901
     with Printer(work / 'manifest-analysis.txt') as _p_manifest:
         manifest = hooks.read_manifest(pkgname, new_ver, unpacked_dir, work, failures, _p_manifest)
     # Inject ecosystem-level metadata into manifest for write_signals
-    if hasattr(hooks, 'DANGEROUS_WHAT') and '_dangerous_what' not in manifest:
-        manifest['_dangerous_what'] = hooks.DANGEROUS_WHAT
+    if '_dangerous_what' not in manifest:
+        manifest['_dangerous_what'] = hooks.dangerous_what()
     source_url = manifest.get('source_url', '')
     if not source_url:
         _get_src = getattr(hooks, 'get_source_url_from_registry', None)

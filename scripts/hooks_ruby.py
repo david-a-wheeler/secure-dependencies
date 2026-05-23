@@ -134,80 +134,73 @@ class Hooks(shared.EcosystemHooks):
     MANIFEST_FILE = 'gemspec.txt'
 
     # Human-readable summary of what DANGEROUS_PATTERNS scans for.
-    DANGEROUS_WHAT = (
-        'eval/exec variants, shell execution, obfuscated execution, '
-        'Marshal.load, '
-        'network at load scope, credential env-var access, home-dir writes, '
-        'dynamic dispatch on external input, at_exit hooks, '
-        'self-publish (worm propagation), IDE config writes, cloud secret-manager API calls, '
-        'shadow runtimes (bun/deno/pkgx spawned from source), '
-        'cross-language spawn (curl/wget/nc as second-stage loaders), '
-        'GitHub raw-content fetch by direct commit SHA (orphan-commit injection), '
-        'GitHub commit-search API used as a C2 dead-drop channel, '
-        'Discord token format (harvested credential), '
-        'string-split obfuscation (char-by-char keyword assembly), '
-        'unusually long lines (embedded payload or single-line obfuscation), '
-        'reverse-shell indicators (bash /dev/tcp, nc -e, socat EXEC), '
-        'cron/systemd/LaunchAgent persistence, '
-        'cryptominer tools and Stratum mining protocol'
-    )
-
     # ReDoS prevention (CWE-400): all patterns use bounded quantifiers so that
     # worst-case PCRE backtracking is O(bound^2) rather than O(n^2) or worse.
     # Unbounded character-class repetitions ([^x]+, [^x]*) are capped with
     # {1,N} or {0,N}.  See AGENTS.md for the full policy.
-    DANGEROUS_PATTERNS: list[tuple[str, str]] = [
+    DANGEROUS_PATTERNS: list[tuple[str, str, str]] = [
         ('eval-variants',
-         r'\b(?:eval|instance_eval|class_eval|module_eval|binding\.eval)\s*[\(\{]'),
+         r'\b(?:eval|instance_eval|class_eval|module_eval|binding\.eval)\s*[\(\{]',
+         'eval/exec variants (eval, instance_eval, class_eval, binding.eval)'),
         ('shell-exec',
-         r'\b(?:system|exec|spawn)\s*[\(\x60]|IO\.popen|Open3\.(?:popen|capture|pipeline)|%x\{|\x60'),
+         r'\b(?:system|exec|spawn)\s*[\(\x60]|IO\.popen|Open3\.(?:popen|capture|pipeline)|%x\{|\x60',
+         'shell execution (system, exec, spawn, IO.popen, Open3, backtick)'),
         ('obfuscated-exec',
          r'(?:Base64\.decode64|\.unpack\s*\(\s*["\x27]H\*|Zlib::Inflate|\.decode)\b'
-         r'(?:[^\n]{0,120})(?:eval|instance_eval|class_eval|exec|system)\b'),
-        ('marshal-load',       r'\bMarshal\.(?:load|restore)\b'),
+         r'(?:[^\n]{0,120})(?:eval|instance_eval|class_eval|exec|system)\b',
+         'obfuscated execution (Base64/Zlib decode into eval/exec)'),
+        ('marshal-load',
+         r'\bMarshal\.(?:load|restore)\b',
+         'unsafe deserialization via Marshal.load'),
         ('network-at-load-scope',
          r'^\s*(?:Net::HTTP|require\s+["\x27]open-uri["\x27]|URI\.open|Faraday\.new'
-         r'|RestClient\.|HTTParty\.(?:get|post)|TCPSocket\.new|UDPSocket\.new)\b'),
+         r'|RestClient\.|HTTParty\.(?:get|post)|TCPSocket\.new|UDPSocket\.new)\b',
+         'network calls at load scope (Net::HTTP, URI.open, Faraday, etc.)'),
         ('credential-env-vars',
          r'ENV\s*\[\s*["\x27][A-Z_]*(?:'
-         + shared.CRED_KEYWORDS_RE + r'|BUNDLE_)[A-Z_]*["\x27]\s*\]'),
+         + shared.CRED_KEYWORDS_RE + r'|BUNDLE_)[A-Z_]*["\x27]\s*\]',
+         'credential environment variable access (AWS/cloud/BUNDLE keys)'),
         # [^,]{1,200} rather than [^,]+ to cap backtracking when no quote
         # follows many non-comma characters (ReDoS: O(200^2) not O(n^2)).
         ('home-or-shell-write',
          r'(?:File\.(?:write|open|binwrite)|IO\.write)\s*[^,]{1,200}["\x27](?:'
-         + shared.HOME_PATHS_RE + r')'),
+         + shared.HOME_PATHS_RE + r')',
+         'home-dir or shell-config writes (File.write, IO.write)'),
         ('dynamic-dispatch',
-         r'\b(?:__send__|public_send|send)\s*\(\s*(?:params|request|user_input|ENV|ARGV|gets)\b'),
-        ('at-exit-hooks',      r'^\s*at_exit\b'),
+         r'\b(?:__send__|public_send|send)\s*\(\s*(?:params|request|user_input|ENV|ARGV|gets)\b',
+         'dynamic dispatch on external input (__send__/public_send with user data)'),
+        ('at-exit-hooks',
+         r'^\s*at_exit\b',
+         'at_exit hook registration'),
         # Worm propagation: publishing to RubyGems from inside an install hook.
         ('self-publish',
-         r'\bgem\s+push\b'),
-        # Credential harvesting via cloud secret-manager SDKs or direct API calls.
+         r'\bgem\s+push\b',
+         'self-publish worm propagation (gem push from install hook)'),
         # Aws::SecretsManager is not caught by network-at-load-scope (which checks
         # Net::HTTP and similar, not the AWS SDK).
         # Shared provider hostnames come from shared.CLOUD_SECRET_HOSTS_RE.
         ('cloud-secret-api',
          r'\bAws::SecretsManager::Client\b'
          r'|\bAws::SSM::Client\b'
-         r'|' + shared.CLOUD_SECRET_HOSTS_RE),
-        # Bulk env-var serialization: harvest pattern that converts the entire
-        # ENV hash to JSON or an Array of pairs.  ENV.to_h is excluded (very
-        # common for subprocess env copies); ENV.to_a and JSON serialization
-        # are the unambiguous bulk-collect forms.
+         r'|' + shared.CLOUD_SECRET_HOSTS_RE,
+         'cloud secret-manager API calls (Aws::SecretsManager, GCP, Azure)'),
+        # ENV.to_h is excluded (very common for subprocess env copies);
+        # ENV.to_a and JSON serialization are the unambiguous bulk-collect forms.
         ('env-enumeration',
          r'JSON\.(?:dump|generate)\s*\(\s*ENV\b'
-         r'|ENV\.to_a\b'),
-        # Shadow runtimes: system/exec/spawn invoking bun/deno/pkgx etc.
-        # Extremely unusual in Ruby source; no legitimate published-gem use case.
+         r'|ENV\.to_a\b',
+         'bulk environment variable serialization (credential harvest)'),
+        # [^)]{0,300} bounds backtracking to O(300) per anchor (safe).
         ('shadow-runtime',
          r'(?:system|exec|spawn|IO\.popen)\s*\([^)]{0,300}'
-         r'\b' + shared.SHADOW_RUNTIME_NAMES_RE + r'\b'),
-        # Cross-language spawn: Ruby invoking curl/wget/nc.
+         r'\b' + shared.SHADOW_RUNTIME_NAMES_RE + r'\b',
+         'shadow runtime invocation (bun/deno/pkgx spawned from source)'),
         # Ruby has Net::HTTP/Faraday; spawning curl/wget/nc is a strong
         # signal of a second-stage payload downloader.
         ('cross-lang-spawn',
          r'(?:system|exec|spawn|IO\.popen)\s*\([^)]{0,300}'
-         r'\b' + shared.CROSS_LANG_TOOLS_RE + r'\b'),
+         r'\b' + shared.CROSS_LANG_TOOLS_RE + r'\b',
+         'cross-language spawn (curl/wget/nc as second-stage downloader)'),
     ]
 
     # ReDoS prevention: diff lines start with ^\+ so they are anchored, but

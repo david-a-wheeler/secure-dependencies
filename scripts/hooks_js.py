@@ -508,65 +508,51 @@ class Hooks(shared.EcosystemHooks):
 
     MANIFEST_FILE = 'package-json.txt'
 
-    DANGEROUS_WHAT = (
-        'eval/new Function/vm execution, child_process execution, '
-        'obfuscated execution (Buffer.from base64+eval, hex decode+eval), '
-        'network calls at module load scope, credential env-var access '
-        '(AWS/GitHub/cloud keys at load time), '
-        'dynamic require on external input, '
-        'prototype pollution '
-        '(Object.prototype assignment, __proto__ assignment), '
-        'home-dir writes, IDE config writes, cloud secret-manager API calls, '
-        'shadow runtimes (bun/deno/pkgx spawned from source), '
-        'cross-language spawn (python/curl/wget/nc as second-stage loaders), '
-        'GitHub raw-content fetch by direct commit SHA (orphan-commit injection), '
-        'GitHub commit-search API used as a C2 dead-drop channel, '
-        'Discord token format (harvested credential), '
-        'string-split obfuscation (char-by-char keyword assembly), '
-        'unusually long lines (embedded payload or single-line obfuscation), '
-        'reverse-shell indicators (bash /dev/tcp, nc -e, socat EXEC), '
-        'cron/systemd/LaunchAgent persistence, '
-        'cryptominer tools and Stratum mining protocol'
-    )
-
     # ReDoS prevention (CWE-400): all patterns use bounded quantifiers so that
     # worst-case PCRE backtracking is O(bound^2) rather than O(n^2) or worse.
     # Unbounded character-class repetitions ([^x]+, [^x]*) are capped with
     # {1,N} or {0,N}.  See AGENTS.md for the full policy.
-    DANGEROUS_PATTERNS: list[tuple[str, str]] = [
+    DANGEROUS_PATTERNS: list[tuple[str, str, str]] = [
         ('eval-variants',
-         r'\beval\s*\(|new\s+Function\s*\(|vm\.runIn(?:This|New)Context\s*\('),
+         r'\beval\s*\(|new\s+Function\s*\(|vm\.runIn(?:This|New)Context\s*\(',
+         'eval/new Function/vm execution'),
         ('child-process-exec',
          r'\brequire\s*\(\s*["\x27]child_process["\x27]\s*\)'
-         r'|child_process\.(?:exec|execSync|execFile|execFileSync|spawn|spawnSync)\s*\('),
+         r'|child_process\.(?:exec|execSync|execFile|execFileSync|spawn|spawnSync)\s*\(',
+         'child_process execution (exec, spawn, execFile, etc.)'),
         ('obfuscated-exec',
          r'Buffer\.from\s*\([^)]{0,200}["\x27]base64["\x27][^)]{0,200}\)'
          r'(?:[^\n]{0,200})(?:eval|Function)\b'
-         r'|(?:toString\s*\(\s*(?:16|8)\s*\)|fromCharCode)[^\n]{0,120}(?:eval|Function)\b'),
+         r'|(?:toString\s*\(\s*(?:16|8)\s*\)|fromCharCode)[^\n]{0,120}(?:eval|Function)\b',
+         'obfuscated execution (Buffer.from base64+eval, hex/charCode+eval)'),
         ('network-at-load-scope',
          r'^\s*require\s*\(\s*["\x27](?:http|https|net|dgram|tls)["\x27]\s*\)'
          r'\.(?:get|request|connect|createServer|createConnection)\s*\('
-         r'|^\s*fetch\s*\('),
+         r'|^\s*fetch\s*\(',
+         'network calls at module load scope (require(http).get, fetch)'),
         # NPM_TOKEN is covered by NPM_ + [A-Z_]* from CRED_KEYWORDS_RE.
         ('credential-env-vars',
          r'process\.env\s*(?:\.\s*|\[\s*["\x27])(?:'
-         + shared.CRED_KEYWORDS_RE + r'|HEROKU_|VERCEL_|NETLIFY_)[A-Z_]*'),
+         + shared.CRED_KEYWORDS_RE + r'|HEROKU_|VERCEL_|NETLIFY_)[A-Z_]*',
+         'credential environment variable access (AWS/GitHub/Heroku/cloud keys at load time)'),
         ('dynamic-require',
          r'\brequire\s*\(\s*(?:process\.env\.|[^"\'`\)]{0,80}'
-         r'(?:user|input|argv|env|request))'),
+         r'(?:user|input|argv|env|request))',
+         'dynamic require on external input'),
         # [^\]]{1,200} rather than [^\]]+ to cap backtracking when no closing
         # quote is found (ReDoS: O(200^2) worst case, not O(n^2)).
         ('prototype-pollution',
          r'Object\.prototype\s*\[["\x27][^\]]{1,200}["\x27]\s*='
-         r'|__proto__\s*[=:]\s*\{'),
+         r'|__proto__\s*[=:]\s*\{',
+         'prototype pollution (Object.prototype assignment, __proto__ assignment)'),
         ('module-load-socket',
-         r'^\s*new\s+(?:net\.Socket|tls\.TLSSocket|dgram\.Socket)\s*\('),
-        # Persistence: writing to home-dir or shell-config paths.
+         r'^\s*new\s+(?:net\.Socket|tls\.TLSSocket|dgram\.Socket)\s*\(',
+         'raw socket creation at module load scope'),
         # fs.open() is included because callers often follow with a write.
         ('home-or-shell-write',
          r'fs\.(?:writeFile(?:Sync)?|appendFile(?:Sync)?|open(?:Sync)?)\s*\([^,)]{0,100}["\x27](?:'
-         + shared.HOME_PATHS_RE + r')'),
-        # Credential harvesting via cloud secret-manager SDKs or direct API calls.
+         + shared.HOME_PATHS_RE + r')',
+         'home-dir or shell-config writes (fs.writeFile, fs.appendFile)'),
         # AWS SDK v3 require() calls are not caught by network-at-load-scope.
         # Shared provider hostnames come from shared.CLOUD_SECRET_HOSTS_RE.
         ('cloud-secret-api',
@@ -576,28 +562,29 @@ class Hooks(shared.EcosystemHooks):
          r'|new\s+SSMClient\s*\('
          r'|require\s*\(\s*["\x27]@google-cloud/secret-manager["\x27]'
          r'|require\s*\(\s*["\x27]@azure/keyvault-secrets["\x27]'
-         r'|' + shared.CLOUD_SECRET_HOSTS_RE),
-        # Bulk env-var collection: harvest pattern that serializes or iterates
-        # all of process.env at once.  The existing credential-env-vars pattern
-        # catches named prefixes; this catches the bulk-collect variant worms
-        # use to avoid known-prefix detection.  \w{1,40} bounds the loop var.
+         r'|' + shared.CLOUD_SECRET_HOSTS_RE,
+         'cloud secret-manager API calls (AWS SDK v3, GCP, Azure)'),
+        # credential-env-vars catches named prefixes; this catches the
+        # bulk-collect variant worms use to avoid known-prefix detection.
+        # \w{1,40} bounds the loop variable (ReDoS-safe).
         ('env-enumeration',
          r'(?:JSON\.stringify|Object\.(?:keys|values|entries|assign|fromEntries))'
          r'\s*\(\s*process\.env\s*\)'
-         r'|for\s*\(\s*(?:const|let|var)\s+\w{1,40}\s+(?:in|of)\s+process\.env\s*\)'),
-        # Shadow runtimes: exec/spawn invoking bun/deno/pkgx/tsx/ts-node.
-        # These are covered in install hooks by _INSTALL_CMD_CHECKS; this
-        # pattern catches the same runtimes in broader source-file scans.
+         r'|for\s*\(\s*(?:const|let|var)\s+\w{1,40}\s+(?:in|of)\s+process\.env\s*\)',
+         'bulk process.env enumeration (credential harvest)'),
+        # Also covered in install hooks by _INSTALL_CMD_CHECKS; this
+        # catches the same runtimes in broader source-file scans.
         # [^)]{0,300} bounds backtracking to O(300) per anchor (safe).
         ('shadow-runtime',
          r'(?:exec(?:Sync|File(?:Sync)?)?|spawn(?:Sync)?)\s*\([^)]{0,300}'
-         r'\b' + shared.SHADOW_RUNTIME_NAMES_RE + r'\b'),
-        # Cross-language spawn: JS invoking python/curl/wget/nc.
+         r'\b' + shared.SHADOW_RUNTIME_NAMES_RE + r'\b',
+         'shadow runtime invocation (bun/deno/pkgx/tsx/ts-node from JS source)'),
         # A JS package that spawns these tools is almost certainly a second-stage
         # payload downloader or data exfiltration step.
         ('cross-lang-spawn',
          r'(?:exec(?:Sync|File(?:Sync)?)?|spawn(?:Sync)?)\s*\([^)]{0,300}'
-         r'\b' + shared.CROSS_LANG_TOOLS_RE + r'\b'),
+         r'\b' + shared.CROSS_LANG_TOOLS_RE + r'\b',
+         'cross-language spawn (python/curl/wget/nc as second-stage downloader)'),
     ]
 
     # ReDoS prevention: diff lines start with ^\+ so they are anchored, but

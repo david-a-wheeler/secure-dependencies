@@ -284,55 +284,56 @@ class Hooks(shared.EcosystemHooks):
     MANIFEST_FILE = 'pyproject-metadata.txt'
 
     # Human-readable summary of what DANGEROUS_PATTERNS scans for.
-    DANGEROUS_WHAT = (
-        'eval/exec variants, shell execution (os.system, subprocess with shell=True), '
-        'obfuscated execution, unsafe deserialization (pickle, yaml.load, marshal), '
-        'network calls at import scope, credential env-var access, home-dir writes, '
-        'dynamic imports on external input, atexit/registration hooks, '
-        'self-publish (worm propagation), IDE config writes, cloud secret-manager API calls, '
-        'shadow runtimes (bun/deno/pkgx spawned from source), '
-        'cross-language spawn (curl/wget/nc as second-stage loaders), '
-        'GitHub raw-content fetch by direct commit SHA (orphan-commit injection), '
-        'GitHub commit-search API used as a C2 dead-drop channel, '
-        'Discord token format (harvested credential), '
-        'string-split obfuscation (char-by-char keyword assembly), '
-        'unusually long lines (embedded payload or single-line obfuscation), '
-        'reverse-shell indicators (bash /dev/tcp, nc -e, socat EXEC), '
-        'cron/systemd/LaunchAgent persistence, '
-        'cryptominer tools and Stratum mining protocol'
-    )
-
-    DANGEROUS_PATTERNS: list[tuple[str, str]] = [
+    # ReDoS prevention (CWE-400): all patterns use bounded quantifiers so that
+    # worst-case PCRE backtracking is O(bound^2) rather than O(n^2) or worse.
+    # Unbounded character-class repetitions ([^x]+, [^x]*) are capped with
+    # {1,N} or {0,N}.  See AGENTS.md for the full policy.
+    DANGEROUS_PATTERNS: list[tuple[str, str, str]] = [
         ('eval-exec',
-         r'\b(?:eval|exec)\s*\('),
+         r'\b(?:eval|exec)\s*\(',
+         'eval/exec variants'),
         ('shell-exec',
-         r'\b(?:os\.system|os\.popen|commands\.getoutput)\s*\('),
+         r'\b(?:os\.system|os\.popen|commands\.getoutput)\s*\(',
+         'shell execution (os.system, os.popen, commands.getoutput)'),
         ('subprocess-shell',
-         r'\bsubprocess\.(?:call|run|Popen|check_output|check_call)\b[^;#\n]*shell\s*=\s*True'),
+         r'\bsubprocess\.(?:call|run|Popen|check_output|check_call)\b[^;#\n]*shell\s*=\s*True',
+         'subprocess with shell=True'),
         ('obfuscated-exec',
          r'(?:base64\.b64decode|codecs\.decode|zlib\.decompress)\b'
-         r'(?:[^\n]{0,120})(?:eval|exec)\b'),
+         r'(?:[^\n]{0,120})(?:eval|exec)\b',
+         'obfuscated execution (base64/zlib decode into eval/exec)'),
         ('pickle-load',
-         r'\bpickle\.(?:load|loads|Unpickler)\b'),
+         r'\bpickle\.(?:load|loads|Unpickler)\b',
+         'unsafe deserialization via pickle'),
+        # yaml.load without a safe Loader argument.
+        # Variable-width lookbehinds are unsupported; use a lookahead instead.
+        # [^)]{0,200} bounds backtracking in the lookahead (ReDoS: O(200^2) max).
         ('unsafe-yaml',
-         # Match yaml.load(...) calls that do NOT pass a safe Loader argument.
-         # Variable-width lookbehinds are unsupported; use a lookahead to exclude safe forms.
-         r'\byaml\.load\s*\((?![^)]*\bLoader\s*=\s*yaml\.(?:SafeLoader|FullLoader|BaseLoader))'),
+         r'\byaml\.load\s*\((?![^)]{0,200}\bLoader\s*=\s*yaml\.(?:SafeLoader|FullLoader|BaseLoader))',
+         'unsafe YAML deserialization (yaml.load without SafeLoader)'),
         ('marshal-loads',
-         r'\bmarshal\.(?:load|loads)\b'),
+         r'\bmarshal\.(?:load|loads)\b',
+         'unsafe deserialization via marshal'),
         ('network-at-load-scope',
-         r'^\s*(?:urllib\.request\.|requests\.|http\.client\.|httpx\.|aiohttp\.|socket\.|ftplib\.|smtplib\.)'),
+         r'^\s*(?:urllib\.request\.|requests\.|http\.client\.|httpx\.|aiohttp\.|socket\.|ftplib\.|smtplib\.)',
+         'network calls at import scope'),
         ('credential-env-vars',
          r'os\.environ\s*(?:\[|\s*\.get\s*\()\s*["\'][A-Z_]*(?:'
-         + shared.CRED_KEYWORDS_RE + r')[A-Z_]*["\']'),
+         + shared.CRED_KEYWORDS_RE + r')[A-Z_]*["\']',
+         'credential environment variable access (AWS/cloud keys)'),
+        # [^)]{0,200} rather than [^)]* to cap backtracking (ReDoS: O(200^2) max).
         ('home-or-shell-write',
-         r'(?:open|io\.open|pathlib\.Path)\s*\([^)]*["\'](?:'
-         + shared.HOME_PATHS_RE + r')'),
+         r'(?:open|io\.open|pathlib\.Path)\s*\([^)]{0,200}["\'](?:'
+         + shared.HOME_PATHS_RE + r')',
+         'home-dir or shell-config writes'),
+        # [^)]{0,200} caps backtracking before the keyword alternatives.
         ('dynamic-import',
-         r'\b(?:importlib\.import_module|__import__)\s*\([^)]*'
-         r'(?:request|user|input|argv|environ|getenv)\b'),
+         r'\b(?:importlib\.import_module|__import__)\s*\([^)]{0,200}'
+         r'(?:request|user|input|argv|environ|getenv)\b',
+         'dynamic imports on external input (importlib/__import__ with user data)'),
         ('atexit-hooks',
-         r'^\s*(?:import\s+atexit\b|atexit\.register\s*\()'),
+         r'^\s*(?:import\s+atexit\b|atexit\.register\s*\()',
+         'atexit/cleanup hook registration'),
         # Worm propagation: publishing to PyPI from inside an install hook.
         # Two twine forms: shell string "twine upload" and list ["twine","upload"].
         ('self-publish',
@@ -341,8 +342,8 @@ class Hooks(shared.EcosystemHooks):
          r'|\bpoetry\s+publish\b'
          r'|\bflit\s+publish\b'
          r'|\bhatch\s+publish\b'
-         r'|\bpython[^\n]{0,60}setup\.py[^\n]{0,40}\bupload\b'),
-        # Credential harvesting via cloud secret-manager SDKs or direct API calls.
+         r'|\bpython[^\n]{0,60}setup\.py[^\n]{0,40}\bupload\b',
+         'self-publish worm propagation (twine/poetry/flit/hatch upload from install hook)'),
         # boto3 calls are not caught by network-at-load-scope (which checks urllib etc.).
         # Shared provider hostnames come from shared.CLOUD_SECRET_HOSTS_RE.
         ('cloud-secret-api',
@@ -351,39 +352,48 @@ class Hooks(shared.EcosystemHooks):
          r'|google\.cloud\.secretmanager'
          r'|from\s+google\.cloud\s+import\s+secretmanager\b'
          r'|azure\.keyvault\.secrets\b'
-         r'|' + shared.CLOUD_SECRET_HOSTS_RE),
-        # Bulk env-var serialization: harvest pattern that dumps the entire
-        # environment to a string or structured object.  (?:dict\s*\(\s*)?
-        # is a short optional prefix (no backtracking cascade) that matches
-        # json.dumps(dict(os.environ)) as well as json.dumps(os.environ).
+         r'|' + shared.CLOUD_SECRET_HOSTS_RE,
+         'cloud secret-manager API calls (boto3, GCP Secret Manager, Azure Key Vault)'),
+        # (?:dict\s*\(\s*)? is a short optional prefix (no backtracking cascade)
+        # that matches json.dumps(dict(os.environ)) as well as json.dumps(os.environ).
         ('env-enumeration',
-         r'(?:json\.dumps|pprint\.pformat)\s*\(\s*(?:dict\s*\(\s*)?os\.environ\b'),
-        # Shadow runtimes: subprocess/os.system invoking bun/deno/pkgx etc.
-        # Highly suspicious in a Python package; no legitimate use case.
+         r'(?:json\.dumps|pprint\.pformat)\s*\(\s*(?:dict\s*\(\s*)?os\.environ\b',
+         'bulk environment variable serialization (credential harvest)'),
+        # [^)]{0,300} bounds backtracking to O(300) per anchor (safe).
         ('shadow-runtime',
          r'(?:subprocess\.(?:call|run|Popen|check_output|check_call)'
          r'|os\.(?:system|popen))\s*\([^)]{0,300}'
-         r'\b' + shared.SHADOW_RUNTIME_NAMES_RE + r'\b'),
-        # Cross-language spawn: Python invoking curl/wget/nc.
+         r'\b' + shared.SHADOW_RUNTIME_NAMES_RE + r'\b',
+         'shadow runtime invocation (bun/deno/pkgx spawned from source)'),
         # Python has requests/urllib; spawning curl/wget/nc is a strong
         # signal of a second-stage payload downloader.
         ('cross-lang-spawn',
          r'(?:subprocess\.(?:call|run|Popen|check_output|check_call)'
          r'|os\.(?:system|popen))\s*\([^)]{0,300}'
-         r'\b' + shared.CROSS_LANG_TOOLS_RE + r'\b'),
+         r'\b' + shared.CROSS_LANG_TOOLS_RE + r'\b',
+         'cross-language spawn (curl/wget/nc as second-stage downloader)'),
     ]
 
+    # ReDoS prevention: diff lines start with ^\+ so they are anchored, but
+    # .* before a keyword still causes O(n^2) backtracking on long lines.
+    # [^\n]{0,500} caps worst-case to O(500^2).  Two .* on the same pattern
+    # (keyword.*suffix) compounds to O(n^2) even for moderate line lengths;
+    # bounding both fixes it.
     DIFF_PATTERNS: list[tuple[str, str]] = [
+        # Two [^\n]{0,500} replace two .* to prevent the compounded O(n^2)
+        # backtracking of keyword.*suffix when neither keyword nor suffix appears.
         ('diff-sql-injection',
-         r'^\+.*\b(?:SELECT|INSERT|UPDATE|DELETE|WHERE|FROM|JOIN)\b.*["\x27]\s*\+'),
+         r'^\+[^\n]{0,500}\b(?:SELECT|INSERT|UPDATE|DELETE|WHERE|FROM|JOIN)\b[^\n]{0,500}["\x27]\s*\+'),
         ('diff-cmd-injection',
-         r'^\+.*(?:os\.system|subprocess\.(?:call|run|Popen)|shell\s*=\s*True)\s*[\(]'),
+         r'^\+[^\n]{0,500}(?:os\.system|subprocess\.(?:call|run|Popen)|shell\s*=\s*True)\s*[\(]'),
+        # [^"\x27]{6,200}: lower bound ensures a non-trivial value; upper bound
+        # prevents O(n^2) backtracking when no closing quote follows.
         ('diff-hardcoded-secrets',
-         r'^\+.*(?:password|passwd|secret|api_key|token)\s*=\s*["\x27][^"\x27]{6,}["\x27]'),
+         r'^\+[^\n]{0,500}(?:password|passwd|secret|api_key|token)\s*=\s*["\x27][^"\x27]{6,200}["\x27]'),
         ('diff-eval',
-         r'^\+.*(?:eval|exec)\s*\('),
+         r'^\+[^\n]{0,500}(?:eval|exec)\s*\('),
         ('diff-pickle',
-         r'^\+.*pickle\.(?:load|loads|Unpickler)\b'),
+         r'^\+[^\n]{0,500}pickle\.(?:load|loads|Unpickler)\b'),
     ]
 
     def get_lockfile_path(self, project_root: Path) -> Path:
