@@ -346,7 +346,8 @@ _TERMINAL_ESCAPE_RE = re.compile(
 def _sanitize_char(m: re.Match) -> str:
     """Replacement callback for sanitize(): allow safe Unicode, map the rest to '?'.
 
-    Called for every character not already consumed by _TERMINAL_ESCAPE_RE.
+    Called for each character matched by _SANITIZE_RE (control characters,
+    non-ASCII, or stray ESC) in the text after escape-sequence removal.
     Keeps letters, numbers, punctuation, symbols, combining marks, and space
     separators (Unicode categories L, N, P, S, M, Zs). Everything else --
     including unrecognized control characters -- becomes '?'.
@@ -974,7 +975,7 @@ def remove_symlinks(directory: Path) -> int:
     return removed
 
 
-def safe_dir_component(name: str, version: str) -> str:
+def safe_dir_component(name: str, version: str | None) -> str:
     """Return a filesystem-safe 'name-version' directory component.
 
     Replaces path separators so a malicious package name like '../evil'
