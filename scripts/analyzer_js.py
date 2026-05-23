@@ -789,32 +789,14 @@ class JavaScriptAnalyzer(shared.EcosystemAnalyzer):
         )
         return {'ok': ok, 'source': source, 'unpacked_dir': old_dir}
 
-    def get_old_license(
-        self,
-        pkgname: str,
-        old_ver: str,
-        old_unpacked_dir: Path,
-    ) -> str | None:
-        """Extract raw license from the old version's package.json."""
-        if not old_unpacked_dir or not Path(old_unpacked_dir).is_dir():
-            return None
-        pkg_json = self._load_package_json(Path(old_unpacked_dir))
-        return self.extract_license(pkg_json) or None
+    def _read_old_manifest(self, old_unpacked_dir: Path, pkgname: str) -> dict | None:
+        pkg_json = self._load_package_json(old_unpacked_dir)
+        return pkg_json if pkg_json else None
 
-    def get_old_dep_lines(
-        self,
-        pkgname: str,
-        old_ver: str,
-        old_result: dict,
-    ) -> list[str]:
-        """Extract runtime dependency lines from the old version's
-        package.json."""
-        if not old_result.get('ok'):
+    def _extract_old_dep_lines(self, old_unpacked_dir: Path, pkgname: str) -> list[str]:
+        pkg_json = self._read_old_manifest(old_unpacked_dir, pkgname)
+        if not pkg_json:
             return []
-        old_unpacked = old_result.get('unpacked_dir')
-        if not old_unpacked or not Path(old_unpacked).is_dir():
-            return []
-        pkg_json = self._load_package_json(Path(old_unpacked))
         deps = pkg_json.get('dependencies', {}) or {}
         opt_deps = pkg_json.get('optionalDependencies', {}) or {}
         all_runtime = dict(deps)
@@ -1324,32 +1306,21 @@ class JavaScriptAnalyzer(shared.EcosystemAnalyzer):
         # --- A: Node.js built-in module names ---
         builtin_names = self._get_node_builtin_names()
         builtin_lower = {m.lower() for m in builtin_names}
-
-        for mod in builtin_names:
-            mod_lower = mod.lower()
-            if mod_lower == bare_name or mod_lower == pkg_lower:
-                concerns.append(
-                    f'EXACT_BUILTIN_MATCH: "{pkgname}" matches '
-                    f'Node.js built-in "{mod}". '
-                    'Installing an external package with the same '
-                    'name as a built-in is a '
-                    'strong dependency-confusion signal: '
-                    'the built-in will shadow the '
-                    'external package in most Node.js contexts.'
-                )
-            else:
-                dist = shared.levenshtein(bare_name, mod_lower)
-                if dist == 1:
-                    concerns.append(
-                        f'NEAR_MATCH(dist=1): "{pkgname}" is one edit'
-                        f' from built-in "{mod}". '
-                        'Classic typosquat pattern.'
-                    )
-                elif dist == 2:
-                    notes.append(
-                        f'NEAR_MATCH(dist=2): "{pkgname}" is two edits'
-                        f' from built-in "{mod}".'
-                    )
+        builtin_exact = {m for m in builtin_names
+                         if m.lower() == bare_name or m.lower() == pkg_lower}
+        for mod in builtin_exact:
+            concerns.append(
+                f'EXACT_BUILTIN_MATCH: "{pkgname}" matches '
+                f'Node.js built-in "{mod}". '
+                'Installing an external package with the same '
+                'name as a built-in is a '
+                'strong dependency-confusion signal: '
+                'the built-in will shadow the '
+                'external package in most Node.js contexts.'
+            )
+        self._lev_check(pkgname, bare_name,
+                        [m for m in builtin_names if m not in builtin_exact],
+                        'built-in', concerns, notes)
 
         # --- B: Project lockfile deps ---
         lockfile = self.get_lockfile_path(project_root)
@@ -1427,28 +1398,9 @@ class JavaScriptAnalyzer(shared.EcosystemAnalyzer):
                 )
 
         # C2: common JS wrapper prefix/suffix stripping
-        strip_prefixes = ('node-', 'js-', 'browser-')
-        strip_suffixes = ('-js', '-node')
-        for prefix in strip_prefixes:
-            if bare_name.startswith(prefix):
-                base = bare_name[len(prefix):]
-                if base in all_known_bare:
-                    concerns.append(
-                        f'PREFIX_SHADOW: "{pkgname}" appears to wrap '
-                        f'existing module/package '
-                        f'"{base}" (stripped prefix "{prefix}"). '
-                        'Verify this external wrapper is intentional.'
-                    )
-        for suffix in strip_suffixes:
-            if bare_name.endswith(suffix):
-                base = bare_name[: -len(suffix)]
-                if base in all_known_bare:
-                    concerns.append(
-                        f'SUFFIX_SHADOW: "{pkgname}" appears to wrap '
-                        f'existing module/package '
-                        f'"{base}" (stripped suffix "{suffix}"). '
-                        'Verify this external wrapper is intentional.'
-                    )
+        self._check_strip_rules(pkgname, bare_name, all_known_bare,
+                                ('node-', 'js-', 'browser-'), ('-js', '-node'),
+                                concerns)
 
         with shared.Printer(work / 'alternatives.txt') as _p_alt:
             return shared.write_alternatives(

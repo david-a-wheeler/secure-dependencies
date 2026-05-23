@@ -611,50 +611,20 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
                 unpacked_dir = candidates[0]
         return {'ok': ok, 'source': source, 'unpacked_dir': unpacked_dir}
 
-    def get_old_license(
-        self,
-        pkgname: str,
-        old_ver: str,
-        old_unpacked_dir: Path,
-    ) -> str | None:
-        """Extract raw license string from old version gemspec.
-
-        Returns the raw string or None if not found.
-        """
-        if not old_unpacked_dir or not old_unpacked_dir.is_dir():
-            return None
+    def _read_old_manifest(self, old_unpacked_dir: Path, pkgname: str) -> str | None:
         old_gs_path = old_unpacked_dir / f'{pkgname}.gemspec'
         if not old_gs_path.is_file():
             return None
-        old_gs_text = old_gs_path.read_text(
-            encoding='utf-8', errors='replace')
-        return self.extract_license(old_gs_text) or None
+        return old_gs_path.read_text(encoding='utf-8', errors='replace')
 
-    def get_old_dep_lines(
-        self,
-        pkgname: str,
-        old_ver: str,
-        old_result: dict,
-    ) -> list[str]:
-        """Extract runtime dependency lines from the old version's gemspec.
-
-        Returns list of raw lines containing add_runtime_dependency
-        or add_dependency.
-        """
-        if not old_result.get('ok'):
+    def _extract_old_dep_lines(self, old_unpacked_dir: Path, pkgname: str) -> list[str]:
+        text = self._read_old_manifest(old_unpacked_dir, pkgname)
+        if not text:
             return []
-        old_unpacked_dir = old_result.get('unpacked_dir')
-        if not old_unpacked_dir or not Path(old_unpacked_dir).is_dir():
-            return []
-        old_gs_path = Path(old_unpacked_dir) / f'{pkgname}.gemspec'
-        if not old_gs_path.is_file():
-            return []
-        old_gs_text = old_gs_path.read_text(
-            encoding='utf-8', errors='replace')
         return [
-            l for l in old_gs_text.splitlines()
-            if 'add_runtime_dependency' in l or
-               ('add_dependency' in l and 'development' not in l)
+            l for l in text.splitlines()
+            if 'add_runtime_dependency' in l
+            or ('add_dependency' in l and 'development' not in l)
         ]
 
     def fetch_all_registry_data(
@@ -1052,29 +1022,19 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
 
         pkg_lower = pkgname.lower()
 
-        for gem in gem_names:
-            gem_lower = gem.lower()
-            if gem_lower == pkg_lower:
-                concerns.append(
-                    f'EXACT_STDLIB_MATCH: "{pkgname}" matches'
-                    f' installed/stdlib gem "{gem}". '
-                    'Installing an external gem with the same name'
-                    ' as an already-available '
-                    'gem is a strong slopsquat signal.'
-                )
-            else:
-                dist = shared.levenshtein(pkg_lower, gem_lower)
-                if dist == 1:
-                    concerns.append(
-                        f'NEAR_MATCH(dist=1): "{pkgname}" is one'
-                        f' edit from installed gem "{gem}". '
-                        'Classic typosquat pattern.'
-                    )
-                elif dist == 2:
-                    notes.append(
-                        f'NEAR_MATCH(dist=2): "{pkgname}" is two'
-                        f' edits from installed gem "{gem}".'
-                    )
+        # --- A: installed/stdlib gems (exact then near-match) ---
+        gem_exact = {g for g in gem_names if g.lower() == pkg_lower}
+        for gem in gem_exact:
+            concerns.append(
+                f'EXACT_STDLIB_MATCH: "{pkgname}" matches'
+                f' installed/stdlib gem "{gem}". '
+                'Installing an external gem with the same name'
+                ' as an already-available '
+                'gem is a strong slopsquat signal.'
+            )
+        self._lev_check(pkgname, pkg_lower,
+                        [g for g in gem_names if g not in gem_exact],
+                        'installed gem', concerns, notes)
 
         # --- C: Read Gemfile.lock for project-specific deps ---
         lockfile = project_root / 'Gemfile.lock'
@@ -1096,29 +1056,17 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
 
         # Only flag lockfile matches not already caught by gem_names
         installed_lower = {g.lower() for g in gem_names}
-        for dep in lockfile_names:
-            dep_lower = dep.lower()
-            if dep_lower in installed_lower:
-                continue  # already checked in A
-            if dep_lower == pkg_lower:
-                concerns.append(
-                    f'EXACT_LOCKFILE_MATCH: "{pkgname}" matches'
-                    f' existing lockfile dep "{dep}". '
-                    'This name is already in use in this project.'
-                )
-            else:
-                dist = shared.levenshtein(pkg_lower, dep_lower)
-                if dist == 1:
-                    concerns.append(
-                        f'NEAR_LOCKFILE_MATCH(dist=1): "{pkgname}"'
-                        f' is one edit from '
-                        f'lockfile dep "{dep}". Possible targeted typosquat.'
-                    )
-                elif dist == 2:
-                    notes.append(
-                        f'NEAR_LOCKFILE_MATCH(dist=2): "{pkgname}"'
-                        f' is two edits from lockfile dep "{dep}".'
-                    )
+        new_lf_deps = [d for d in lockfile_names if d.lower() not in installed_lower]
+        lf_exact = {d for d in new_lf_deps if d.lower() == pkg_lower}
+        for dep in lf_exact:
+            concerns.append(
+                f'EXACT_LOCKFILE_MATCH: "{pkgname}" matches'
+                f' existing lockfile dep "{dep}". '
+                'This name is already in use in this project.'
+            )
+        self._lev_check(pkgname, pkg_lower,
+                        [d for d in new_lf_deps if d not in lf_exact],
+                        'lockfile dep', concerns, notes)
 
         # --- D: Structural heuristics ---
         # D1: hyphen/underscore normalization (ruby gems use both conventions)
@@ -1134,35 +1082,12 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
                         ' Could be a naming-convention confusion attack.'
                     )
 
-        # D2: language prefix/suffix stripping
-        # If stripping a Ruby-specific wrapper prefix/suffix reveals
-        # an installed gem name, this package may be an unnecessary
-        # (or malicious) wrapper around stdlib.
-        strip_prefixes = ('ruby-', 'rb-', 'gem-')
-        strip_suffixes = ('-rb', '-ruby', '-gem')
-        all_known_lower = (
-            {g.lower() for g in gem_names}
-            | {d.lower() for d in lockfile_names})
-        for prefix in strip_prefixes:
-            if pkg_lower.startswith(prefix):
-                base = pkg_lower[len(prefix):]
-                if base in all_known_lower:
-                    concerns.append(
-                        f'PREFIX_SHADOW: "{pkgname}" appears to'
-                        f' wrap installed gem "{base}"'
-                        f' (stripped prefix "{prefix}").'
-                        ' Verify this external wrapper is intentional.'
-                    )
-        for suffix in strip_suffixes:
-            if pkg_lower.endswith(suffix):
-                base = pkg_lower[: -len(suffix)]
-                if base in all_known_lower:
-                    concerns.append(
-                        f'SUFFIX_SHADOW: "{pkgname}" appears to'
-                        f' wrap installed gem "{base}"'
-                        f' (stripped suffix "{suffix}").'
-                        ' Verify this external wrapper is intentional.'
-                    )
+        # D2: Ruby-specific prefix/suffix stripping
+        all_known_lower = ({g.lower() for g in gem_names}
+                           | {d.lower() for d in lockfile_names})
+        self._check_strip_rules(pkgname, pkg_lower, all_known_lower,
+                                ('ruby-', 'rb-', 'gem-'), ('-rb', '-ruby', '-gem'),
+                                concerns)
 
         with shared.Printer(work / 'alternatives.txt') as _p_alt:
             return shared.write_alternatives(

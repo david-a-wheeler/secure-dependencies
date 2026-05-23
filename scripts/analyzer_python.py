@@ -796,60 +796,25 @@ class PythonAnalyzer(shared.EcosystemAnalyzer):
 
         return {'ok': ok, 'source': source, 'unpacked_dir': old_dir}
 
-    def get_old_dep_lines(
-        self,
-        pkgname: str,
-        old_ver: str,
-        old_result: dict,
-    ) -> list[str]:
-        """Extract runtime Requires-Dist lines from the old version's METADATA.
-
-        Returns list of Requires-Dist strings (without extras markers).
-        """
-        if not old_result.get('ok'):
-            return []
-        old_unpacked = old_result.get('unpacked_dir')
-        if not old_unpacked or not Path(old_unpacked).is_dir():
-            return []
-        old_unpacked = Path(old_unpacked)
-        dist_info = self._find_dist_info(old_unpacked, pkgname)
-        metadata_file = None
-        if dist_info and (dist_info / 'METADATA').is_file():
-            metadata_file = dist_info / 'METADATA'
-        elif (old_unpacked / 'PKG-INFO').is_file():
-            metadata_file = old_unpacked / 'PKG-INFO'
-        if not metadata_file:
-            return []
-        meta = self._parse_metadata(metadata_file.read_text(encoding='utf-8', errors='replace'))
-        requires = meta.get('Requires-Dist', [])
-        if isinstance(requires, str):
-            requires = [requires]
-        return [r for r in requires if r and '; extra ==' not in str(r)]
-
-    def get_old_license(
-        self,
-        pkgname: str,
-        old_ver: str,
-        old_unpacked_dir: Path,
-    ) -> str | None:
-        """Extract raw license string from old version METADATA.
-
-        Returns the raw string or None if not found.
-        """
-        if not old_unpacked_dir or not Path(old_unpacked_dir).is_dir():
-            return None
-        old_unpacked_dir = Path(old_unpacked_dir)
+    def _read_old_manifest(self, old_unpacked_dir: Path, pkgname: str) -> dict | None:
         dist_info = self._find_dist_info(old_unpacked_dir, pkgname)
-        metadata_file = None
         if dist_info and (dist_info / 'METADATA').is_file():
             metadata_file = dist_info / 'METADATA'
         elif (old_unpacked_dir / 'PKG-INFO').is_file():
             metadata_file = old_unpacked_dir / 'PKG-INFO'
-        if not metadata_file:
+        else:
             return None
-        meta = self._parse_metadata(
+        return self._parse_metadata(
             metadata_file.read_text(encoding='utf-8', errors='replace'))
-        return self.extract_license(meta) or None
+
+    def _extract_old_dep_lines(self, old_unpacked_dir: Path, pkgname: str) -> list[str]:
+        meta = self._read_old_manifest(old_unpacked_dir, pkgname)
+        if meta is None:
+            return []
+        requires = meta.get('Requires-Dist', [])
+        if isinstance(requires, str):
+            requires = [requires]
+        return [r for r in requires if r and '; extra ==' not in str(r)]
 
     def fetch_all_registry_data(
         self,
@@ -1275,34 +1240,26 @@ class PythonAnalyzer(shared.EcosystemAnalyzer):
         concerns: list[str] = []
         notes: list[str] = []
         pkg_lower = pkgname.lower()
-        norm_pkg = _NORM_RE.sub('_',pkg_lower)
+        norm_pkg = _NORM_RE.sub('_', pkg_lower)
 
         # --- A: Python stdlib module names ---
         stdlib_names = self._get_stdlib_names()
-
-        for mod in stdlib_names:
-            mod_lower = mod.lower()
-            if mod_lower == pkg_lower or _NORM_RE.sub('_',mod_lower) == norm_pkg:
-                concerns.append(
-                    f'EXACT_STDLIB_MATCH: "{pkgname}" matches Python stdlib module "{mod}". '
-                    'This is a strong dependency-confusion signal: the stdlib will shadow '
-                    'an external package of the same name in most Python contexts.'
-                )
-            else:
-                dist = shared.levenshtein(pkg_lower, mod_lower)
-                if dist == 1:
-                    concerns.append(
-                        f'NEAR_MATCH(dist=1): "{pkgname}" is one edit from stdlib module "{mod}". '
-                        'Classic typosquat pattern.'
-                    )
-                elif dist == 2:
-                    notes.append(
-                        f'NEAR_MATCH(dist=2): "{pkgname}" is two edits from stdlib module "{mod}".'
-                    )
+        stdlib_exact = {m for m in stdlib_names
+                        if m.lower() == pkg_lower or _NORM_RE.sub('_', m.lower()) == norm_pkg}
+        for mod in stdlib_exact:
+            concerns.append(
+                f'EXACT_STDLIB_MATCH: "{pkgname}" matches Python stdlib module "{mod}". '
+                'This is a strong dependency-confusion signal: the stdlib will shadow '
+                'an external package of the same name in most Python contexts.'
+            )
+        self._lev_check(pkgname, pkg_lower,
+                        [m for m in stdlib_names if m not in stdlib_exact],
+                        'stdlib module', concerns, notes)
 
         # --- B: Installed packages via pip list ---
         installed_names: list[str] = []
-        rc_pip, pip_out, _ = shared.run_cmd(['python3', '-m', 'pip', 'list', '--format=columns'], timeout=30)
+        rc_pip, pip_out, _ = shared.run_cmd(
+            ['python3', '-m', 'pip', 'list', '--format=columns'], timeout=30)
         if rc_pip == 0:
             for line in pip_out.splitlines()[2:]:  # skip header rows
                 parts = line.split()
@@ -1310,27 +1267,18 @@ class PythonAnalyzer(shared.EcosystemAnalyzer):
                     installed_names.append(parts[0])
 
         stdlib_lower = {m.lower() for m in stdlib_names}
-        for pkg in installed_names:
-            pkg_inst_lower = pkg.lower()
-            if pkg_inst_lower in stdlib_lower:
-                continue  # already checked in A
-            if pkg_inst_lower == pkg_lower or _NORM_RE.sub('_',pkg_inst_lower) == norm_pkg:
-                concerns.append(
-                    f'EXACT_INSTALLED_MATCH: "{pkgname}" matches already-installed package "{pkg}". '
-                    'Installing an external package with the same name as an existing installation '
-                    'could be a dependency-confusion or supply-chain attack.'
-                )
-            else:
-                dist = shared.levenshtein(pkg_lower, pkg_inst_lower)
-                if dist == 1:
-                    concerns.append(
-                        f'NEAR_MATCH(dist=1): "{pkgname}" is one edit from installed package "{pkg}". '
-                        'Classic typosquat pattern.'
-                    )
-                elif dist == 2:
-                    notes.append(
-                        f'NEAR_MATCH(dist=2): "{pkgname}" is two edits from installed package "{pkg}".'
-                    )
+        non_stdlib = [p for p in installed_names if p.lower() not in stdlib_lower]
+        inst_exact = {p for p in non_stdlib
+                      if p.lower() == pkg_lower or _NORM_RE.sub('_', p.lower()) == norm_pkg}
+        for pkg in inst_exact:
+            concerns.append(
+                f'EXACT_INSTALLED_MATCH: "{pkgname}" matches already-installed package "{pkg}". '
+                'Installing an external package with the same name as an existing installation '
+                'could be a dependency-confusion or supply-chain attack.'
+            )
+        self._lev_check(pkgname, pkg_lower,
+                        [p for p in non_stdlib if p not in inst_exact],
+                        'installed package', concerns, notes)
 
         # --- C: Project lockfile deps ---
         lockfile = self.get_lockfile_path(project_root)
@@ -1361,31 +1309,24 @@ class PythonAnalyzer(shared.EcosystemAnalyzer):
                     pass
 
         installed_and_stdlib_lower = {p.lower() for p in installed_names} | stdlib_lower
-        for dep in lockfile_names:
-            dep_lower = dep.lower()
-            if dep_lower in installed_and_stdlib_lower:
-                continue  # already checked
-            if dep_lower == pkg_lower or _NORM_RE.sub('_',dep_lower) == norm_pkg:
-                concerns.append(
-                    f'EXACT_LOCKFILE_MATCH: "{pkgname}" matches existing lockfile dep "{dep}". '
-                    'This name is already in use in this project.'
-                )
-            else:
-                dist = shared.levenshtein(pkg_lower, dep_lower)
-                if dist == 1:
-                    concerns.append(
-                        f'NEAR_LOCKFILE_MATCH(dist=1): "{pkgname}" is one edit from '
-                        f'lockfile dep "{dep}". Possible targeted typosquat.'
-                    )
-                elif dist == 2:
-                    notes.append(
-                        f'NEAR_LOCKFILE_MATCH(dist=2): "{pkgname}" is two edits from '
-                        f'lockfile dep "{dep}".'
-                    )
+        new_lf_deps = [d for d in lockfile_names
+                       if d.lower() not in installed_and_stdlib_lower]
+        lf_exact = {d for d in new_lf_deps
+                    if d.lower() == pkg_lower or _NORM_RE.sub('_', d.lower()) == norm_pkg}
+        for dep in lf_exact:
+            concerns.append(
+                f'EXACT_LOCKFILE_MATCH: "{pkgname}" matches existing lockfile dep "{dep}". '
+                'This name is already in use in this project.'
+            )
+        self._lev_check(pkgname, pkg_lower,
+                        [d for d in new_lf_deps if d not in lf_exact],
+                        'lockfile dep', concerns, notes)
 
         # --- D: Structural heuristics ---
         # D1: hyphen/underscore normalization (PyPI treats these as equivalent)
-        all_known_lower = {p.lower() for p in installed_names} | stdlib_lower | {d.lower() for d in lockfile_names}
+        all_known_lower = ({p.lower() for p in installed_names}
+                           | stdlib_lower
+                           | {d.lower() for d in lockfile_names})
         if norm_pkg != pkg_lower and norm_pkg in all_known_lower:
             concerns.append(
                 f'NORMALIZATION_MATCH: "{pkgname}" normalizes to the same name as an existing '
@@ -1394,26 +1335,9 @@ class PythonAnalyzer(shared.EcosystemAnalyzer):
             )
 
         # D2: Python-specific prefix/suffix stripping
-        strip_prefixes = ('python-', 'py-', 'pypi-')
-        strip_suffixes = ('-python', '-py')
-        for prefix in strip_prefixes:
-            if pkg_lower.startswith(prefix):
-                base = pkg_lower[len(prefix):]
-                if base in all_known_lower:
-                    concerns.append(
-                        f'PREFIX_SHADOW: "{pkgname}" appears to wrap existing package/module '
-                        f'"{base}" (stripped prefix "{prefix}"). '
-                        'Verify this wrapper is intentional.'
-                    )
-        for suffix in strip_suffixes:
-            if pkg_lower.endswith(suffix):
-                base = pkg_lower[: -len(suffix)]
-                if base in all_known_lower:
-                    concerns.append(
-                        f'SUFFIX_SHADOW: "{pkgname}" appears to wrap existing package/module '
-                        f'"{base}" (stripped suffix "{suffix}"). '
-                        'Verify this wrapper is intentional.'
-                    )
+        self._check_strip_rules(pkgname, pkg_lower, all_known_lower,
+                                ('python-', 'py-', 'pypi-'), ('-python', '-py'),
+                                concerns)
 
         with shared.Printer(work / 'alternatives.txt') as _p_alt:
             return shared.write_alternatives(

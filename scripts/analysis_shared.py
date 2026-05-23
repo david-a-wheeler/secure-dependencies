@@ -4028,6 +4028,66 @@ class EcosystemAnalyzer(ABC):
     def __init__(self, registry_url: str | None = None) -> None:
         self.registry_url = registry_url
 
+    def _lev_check(
+        self,
+        pkgname: str,
+        compare_name: str,
+        candidates: list[str],
+        label: str,
+        concerns: list[str],
+        notes: list[str],
+    ) -> None:
+        """Append NEAR_MATCH concerns/notes for candidates within edit distance 2.
+
+        compare_name: normalized form of pkgname used for distance comparison
+          (e.g. pkg_lower, or the bare name for scoped JS packages).
+        label: what to call the candidate set in the message (e.g. 'stdlib module').
+        Exact matches are NOT handled here; callers check those separately.
+        """
+        for name in candidates:
+            dist = levenshtein(compare_name, name.lower())
+            if dist == 1:
+                concerns.append(
+                    f'NEAR_MATCH(dist=1): "{pkgname}" is one edit'
+                    f' from {label} "{name}". Classic typosquat pattern.')
+            elif dist == 2:
+                notes.append(
+                    f'NEAR_MATCH(dist=2): "{pkgname}" is two edits'
+                    f' from {label} "{name}".')
+
+    def _check_strip_rules(
+        self,
+        pkgname: str,
+        check_name: str,
+        known_set: set[str],
+        prefixes: tuple[str, ...],
+        suffixes: tuple[str, ...],
+        concerns: list[str],
+    ) -> None:
+        """Append PREFIX_SHADOW/SUFFIX_SHADOW concerns when stripping a
+        language-specific prefix or suffix reveals a name already in known_set.
+
+        check_name: normalized name to strip from (e.g. pkg_lower or bare_name).
+        """
+        for prefix in prefixes:
+            if check_name.startswith(prefix):
+                base = check_name[len(prefix):]
+                if base in known_set:
+                    concerns.append(
+                        f'PREFIX_SHADOW: "{pkgname}" appears to wrap'
+                        f' existing package "{base}"'
+                        f' (stripped prefix "{prefix}").'
+                        ' Verify this wrapper is intentional.')
+        for suffix in suffixes:
+            if check_name.endswith(suffix):
+                base = check_name[: -len(suffix)]
+                if base in known_set:
+                    concerns.append(
+                        f'SUFFIX_SHADOW: "{pkgname}" appears to wrap'
+                        f' existing package "{base}"'
+                        f' (stripped suffix "{suffix}").'
+                        ' Verify this wrapper is intentional.')
+
     @abstractmethod
     def get_lockfile_path(self, project_root: Path) -> Path: ...
 
@@ -4048,14 +4108,40 @@ class EcosystemAnalyzer(ABC):
     ) -> dict: ...
 
     @abstractmethod
-    def get_old_license(
-        self, pkgname: str, old_ver: str, old_unpacked_dir: Path,
-    ) -> str | None: ...
+    def _read_old_manifest(
+        self, old_unpacked_dir: Path, pkgname: str,
+    ) -> object | None:
+        """Return the parsed manifest for the old version, or None.
+
+        The returned type is ecosystem-specific (dict for Python/JS,
+        str for Ruby). Used by get_old_license and _extract_old_dep_lines.
+        """
 
     @abstractmethod
+    def _extract_old_dep_lines(
+        self, old_unpacked_dir: Path, pkgname: str,
+    ) -> list[str]:
+        """Return dep strings from the old version manifest."""
+
+    def get_old_license(
+        self, pkgname: str, old_ver: str, old_unpacked_dir: Path,
+    ) -> str | None:
+        if not old_unpacked_dir or not Path(old_unpacked_dir).is_dir():
+            return None
+        manifest = self._read_old_manifest(Path(old_unpacked_dir), pkgname)
+        if manifest is None:
+            return None
+        return self.extract_license(manifest) or None
+
     def get_old_dep_lines(
         self, pkgname: str, old_ver: str, old_result: dict,
-    ) -> list[str]: ...
+    ) -> list[str]:
+        if not old_result.get('ok'):
+            return []
+        old_unpacked = old_result.get('unpacked_dir')
+        if not old_unpacked or not Path(old_unpacked).is_dir():
+            return []
+        return self._extract_old_dep_lines(Path(old_unpacked), pkgname)
 
     @abstractmethod
     def fetch_all_registry_data(
