@@ -57,7 +57,7 @@ Problems now solved (do not re-implement):
 
 ## 2. Proposed Architectural Changes
 
-### A. Narrow the `write_signals()` Interface (ACCEPTED, PENDING)
+### A. Narrow the `write_signals()` Interface (DONE, Phase 5 + 6)
 
 **Problem**: 48 arguments is genuinely hard to manage. Adding one new signal
 requires changing both the caller and the callee.
@@ -152,7 +152,7 @@ name. A decorator that duplicates what `import` already does is fad
 architecture: it looks organized but adds indirection and failure modes with
 no benefit.
 
-### C. Standardized Manifest Data Objects (ACCEPTED, PENDING)
+### C. Standardized Manifest Data Objects (DONE, Phase 4)
 
 `read_manifest()` in each hook returns an untyped `dict` with 15+ keys.
 Key names can drift between ecosystems silently. A `@dataclass` fixes this:
@@ -225,10 +225,9 @@ Achieved:
 
 Pending:
 
-*   **Interface stability** (Phase 5): `write_signals(ctx: SignalContext, p)`
-    can absorb new signals without changing the call site. Currently 48
-    arguments; each new signal type requires touching both caller and callee.
-*   **Type safety** (Phase 4): `PackageManifest` makes key-name drift a
+*   **Interface stability** (DONE, Phase 5): `write_signals(ctx: SignalContext, p)`
+    absorbs new signals without changing the call site.
+*   **Type safety** (DONE, Phase 4): `PackageManifest` makes key-name drift a
     type error rather than a silent `None` at `dict.get()` call sites.
 
 ## 5. Renaming and Restructuring: EcosystemAnalyzer
@@ -455,48 +454,42 @@ fields. Doing Step 1 (rename) before Phase 4 also keeps the
 
 ## 6. Implementation Roadmap
 
-Phases 1 and 2 are already complete. The remaining phases are ordered by
-value-to-effort ratio. The rename (Section 5) is listed as Phase 3a/3b;
-it can be skipped if the naming is deemed acceptable as-is, but should
-precede `PackageManifest` if both are done.
+All planned phases are complete as of 2026-05-23.
 
-1.  **Phase 1** (done): Add `BASE_DANGEROUS_PATTERNS` to `EcosystemHooks`.
-    Each hook file removed its 20 shared entries and calls
-    `all_dangerous_patterns()`. Immediate structural win, no behavior change.
+1.  **Phase 1** (done, commit 30a25dd): Add `BASE_DANGEROUS_PATTERNS` to
+    `EcosystemAnalyzer`. Each analyzer file removed its shared entries and
+    calls `all_dangerous_patterns()`. Immediate structural win, no behavior
+    change.
 
-2.  **Phase 2** (done): Promote SLSA provenance and velocity checks to base
-    class. `check_provenance()` and `check_publisher_velocity()` now live on
-    `EcosystemHooks`; `hooks_js.py` populates `_provenance` and
-    `_publisher_stats` dict keys; `dep_review.py` calls the shared methods.
+2.  **Phase 2** (done, commit ebfdd07): Promote SLSA provenance and velocity
+    checks to base class. `check_provenance()` and `check_publisher_velocity()`
+    now live on `EcosystemAnalyzer`; `analyzer_js.py` populates `_provenance`
+    and `_publisher_stats` dict keys; `dep_review.py` calls the shared methods.
 
-3.  **Phase 3a** (recommended): Rename `EcosystemHooks` to
+3.  **Phase 3a** (done, commit a2952c5): Renamed `EcosystemHooks` to
     `EcosystemAnalyzer` and `class Hooks` to `PythonAnalyzer`,
-    `RubyAnalyzer`, `JavaScriptAnalyzer` (Section 5, Step 1). Adds a
-    module-level `Analyzer` alias in each hook file; renames local
-    variable `hooks` to `analyzer` in `dep_review.py`. Mechanical;
-    easily verified.
+    `RubyAnalyzer`, `JavaScriptAnalyzer`.
 
-4.  **Phase 3b** (recommended, incremental): Move module-level code into
-    the class hierarchy (Section 5, Step 2). One hook file per commit.
-    Threshold constants become class-level attributes; cross-cutting
-    helpers (`extract_source_url`, `extract_license`, `unpack_archive`)
-    become overridable base class methods; ecosystem-specific helpers
-    become regular instance methods on the subclass.
+4.  **Phase 3b** (done, commits 597515a/093309a/7b704a5): Moved module-level
+    code into the class hierarchy. One commit per file. Threshold constants
+    became class-level attributes; cross-cutting helpers became overridable
+    base class methods; ecosystem-specific helpers became instance methods.
 
-5.  **Phase 3c** (optional, low-urgency): Rename the files from
-    `hooks_*.py` to `analyzer_*.py` (Section 5, Step 3). Kept separate
-    so `git log --follow` works and reviewers can verify rename-only.
-    Requires updating `test_doctests.py`.
+5.  **Phase 3c** (done, commit 1844ce6): Renamed the files from
+    `hooks_*.py` to `analyzer_*.py`.
 
-6.  **Phase 4**: Introduce `PackageManifest` dataclass (proposal C). Migrate
-    `read_manifest()` one hook at a time; callers in `dep_review.py` switch
-    from `manifest.get('key', '')` to typed attribute access. Do after 3a
-    if the rename is proceeding, so the diff stays clean.
+6.  **Phase 4** (done, commit 6d61353): Introduced `PackageManifest`
+    dataclass. `read_manifest()` returns typed data; all `manifest.get(...)`
+    calls replaced with attribute access.
 
-7.  **Phase 5**: Bundle `write_signals()` inputs into `SignalContext` (proposal
-    A). Replace the 47-argument signature. Highest-impact cleanup for
-    `dep_review.py` but requires updating every call site in the driver.
+7.  **Phase 5** (done, commit ec6d621): Bundled `write_signals()` inputs
+    into `SignalContext`. Signature is now `(ctx: SignalContext, p: Printer)`.
 
-8.  **Phase 6**: Add `SignalReport` output struct if the output structure
-    needs programmatic consumption (e.g., structured JSON output). Skip if
-    not needed: the current line-by-line printer is fine for AI input.
+8.  **Phase 6** (done, commit f94e9cb): Added `SignalReport` output struct.
+    `write_signals()` returns it; caller writes `signals.json` alongside
+    `signals.txt`. `_parse_signals()` reads JSON first, falls back to text
+    for pre-existing results.
+
+Remaining optional item: **B2** (`evaluate_health()` as a virtual method on
+`EcosystemAnalyzer`) is minor and low-urgency; the current function-based
+approach in `analysis_shared.py` works correctly.
