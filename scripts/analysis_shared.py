@@ -2758,9 +2758,10 @@ def run_sandboxed(
 
     shell_cmd (required for multi-command pipelines): a shell command string
     passed to 'sh -c'. May chain commands with && or ;. Use '{src}' and '{out}'
-    as placeholders. Needed when the command requires cd, pipes, or shell
-    variable expansion. Required positional argument; pass '' when only cmd is
-    used and containers have their own container_shell_cmd.
+    as literal placeholders (substituted via str.replace, not str.format, so
+    braces in paths do not cause errors). Needed when the command requires cd,
+    pipes, or shell variable expansion. Required positional argument; pass ''
+    when only cmd is used and containers have their own container_shell_cmd.
     IMPORTANT: must never be constructed from attacker-controlled data such as
     filenames discovered via rglob. Use cmd= for that; see the cmd description
     and analyzer_ruby.py reproducible_build for the canonical pattern.
@@ -2823,7 +2824,9 @@ def run_sandboxed(
         if cmd is not None:
             args += [a.replace('{src}', '/src').replace('{out}', '/out') for a in cmd]
         else:
-            args += ['/usr/bin/sh', '-c', shell_cmd.format(src='/src', out='/out')]
+            # Use .replace() not .format(): host paths may contain '{' or '}'.
+            args += ['/usr/bin/sh', '-c',
+                     shell_cmd.replace('{src}', '/src').replace('{out}', '/out')]
         rc, out, err = run_cmd(args, timeout=timeout)
         return rc, out + err
 
@@ -2842,7 +2845,9 @@ def run_sandboxed(
         if cmd is not None:
             args += [a.replace('{src}', str(src_dir)).replace('{out}', str(out_dir)) for a in cmd]
         else:
-            args += ['sh', '-c', shell_cmd.format(src=str(src_dir), out=str(out_dir))]
+            # Use .replace() not .format(): host paths may contain '{' or '}'.
+            args += ['sh', '-c',
+                     shell_cmd.replace('{src}', str(src_dir)).replace('{out}', str(out_dir))]
         rc, out, err = run_cmd(args, cwd=cwd, timeout=timeout)
         return rc, out + err
 
@@ -2853,7 +2858,8 @@ def run_sandboxed(
         # static container_shell_cmd (e.g. a glob like '*.gemspec'). See
         # analyzer_ruby.py reproducible_build for the canonical pattern.
         raw = container_shell_cmd if container_shell_cmd is not None else shell_cmd
-        script = raw.format(src='/src', out='/out')
+        # Use .replace() not .format(): paths may contain '{' or '}'.
+        script = raw.replace('{src}', '/src').replace('{out}', '/out')
         args = [sandbox, 'run', '--rm']
         if not container_allow_network:
             args += ['--network', 'none']
