@@ -1633,7 +1633,10 @@ def run_analysis(  # noqa: C901
     print()
     print('--- Registry / provenance data ---')
     with Printer(work / 'provenance.txt') as _p_prov:
-        registry = hooks.fetch_all_registry_data(pkgname, new_ver, work, _p_prov, source_url)
+        registry = hooks.fetch_all_registry_data(
+            pkgname, new_ver, work, _p_prov, source_url)
+        hooks.check_provenance(registry, source_url, _p_prov)
+        hooks.check_publisher_velocity(registry, _p_prov)
     print(f'  MFA required: {registry.get("mfa_status", "unknown")}')
 
     # 9b. Vulnerability lookup

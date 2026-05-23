@@ -3642,6 +3642,63 @@ def lookup_oss_rebuild(
 
 
 # ---------------------------------------------------------------------------
+# Sigstore / SLSA provenance helpers (shared across ecosystems)
+# ---------------------------------------------------------------------------
+
+def slsa_signer_repo(attest: dict) -> tuple[str, str]:
+    """Extract (signer_repo_url, workflow_path) from one SLSA attestation.
+
+    Handles two predicate formats:
+      SLSA v1  (predicateType .../provenance/v1):
+        predicate.buildDefinition.externalParameters.workflow.{repository,path}
+      SLSA v0.2 (predicateType .../provenance/v0.2):
+        predicate.materials[0].uri  (git+https://github.com/owner/repo@ref)
+    Returns ('', '') when no usable URI is found.
+    """
+    import re as _re
+    predicate = attest.get('predicate', {}) or {}
+
+    # SLSA v1 path
+    workflow = (
+        predicate
+        .get('buildDefinition', {})
+        .get('externalParameters', {})
+        .get('workflow', {})
+    )
+    if isinstance(workflow, dict):
+        repo = str(workflow.get('repository', '') or '')
+        if repo:
+            return repo, str(workflow.get('path', '') or '')
+
+    # SLSA v0.2: materials[0].uri contains "git+https://...@ref"
+    materials = predicate.get('materials', []) or []
+    if materials and isinstance(materials[0], dict):
+        uri = str(materials[0].get('uri', '') or '')
+        if uri.startswith('git+'):
+            repo = _re.sub(r'^git\+', '', uri)
+            repo = _re.sub(r'@[^@]{0,200}$', '', repo)
+            if repo:
+                return repo, ''
+
+    return '', ''
+
+
+def norm_repo_url(url: str) -> str:
+    """Normalise a source/signer repo URL for comparison.
+
+    Strips scheme, git+ transport, .git suffix, and trailing slash, then
+    lowercases. Two URLs that differ only in these ways refer to the same repo.
+    """
+    import re as _re
+    url = _re.sub(r'^git\+', '', url.strip().lower().rstrip('/'))
+    url = _re.sub(r'^https?://', '', url)
+    url = _re.sub(r'^ssh://git@', '', url)
+    url = _re.sub(r'^git@([^:]+):', r'\1/', url)
+    url = _re.sub(r'\.git$', '', url)
+    return url
+
+
+# ---------------------------------------------------------------------------
 # Ecosystem hooks contract
 # ---------------------------------------------------------------------------
 
@@ -3715,6 +3772,115 @@ class EcosystemHooks(ABC):
     def dangerous_what(self) -> str:
         """Return a comma-separated summary of all patterns for the report."""
         return ', '.join(desc for _, _, desc in self.all_dangerous_patterns())
+
+    # Publisher velocity policy (override in a subclass to tighten/loosen).
+    VELOCITY_WINDOW_SECS: int = 72 * 3600   # 72-hour publish window
+    VELOCITY_THRESHOLD: int = 10            # packages in window to flag
+    NEW_PUBLISHER_DAYS: int = 90            # tenure below which = HIGH severity
+
+    def check_provenance(
+        self, registry_data: dict, source_url: str, p: 'Printer',
+    ) -> None:
+        """Emit SLSA provenance report from registry_data['_provenance'].
+
+        Ecosystems populate registry_data['_provenance'] in
+        fetch_all_registry_data() using one of these sentinel values:
+          None                    provenance not checked (key absent or None)
+          {'status': 'no_data'}   HTTP fetch returned nothing
+          {'status': 'error'}     JSON parse failed
+          {'status': 'ok', 'attestations': [...]}  parsed attestation list
+        """
+        prov = registry_data.get('_provenance')
+        if not prov:
+            return
+        p('')
+        p('=== SLSA provenance ===')
+        status = prov.get('status', '')
+        if status == 'no_data':
+            p('SLSA_PROVENANCE: none (package not published with --provenance)')
+            return
+        if status == 'error':
+            p('SLSA_PROVENANCE: parse error')
+            return
+        attestations = prov.get('attestations') or []
+        if not attestations:
+            p('SLSA_PROVENANCE: none (no attestations in registry response)')
+            return
+
+        signer_repo, workflow_path = '', ''
+        for attest in attestations:
+            signer_repo, workflow_path = slsa_signer_repo(attest)
+            if signer_repo:
+                break
+
+        if not signer_repo:
+            p('SLSA_PROVENANCE: present but signer repository URI not found')
+            return
+
+        p(f'SLSA_SIGNER_REPO: {sanitize_line(signer_repo[:300])}')
+        if workflow_path:
+            p(f'SLSA_WORKFLOW_PATH: {sanitize_line(workflow_path[:200])}')
+
+        if not source_url:
+            p('SIGSTORE_REPO_MISMATCH: N/A (no declared source URL to compare)')
+            return
+
+        if norm_repo_url(signer_repo) != norm_repo_url(source_url):
+            p('SIGSTORE_REPO_MISMATCH: YES')
+            p(f'  declared: {sanitize_line(source_url[:300])}')
+            p(f'  signer:   {sanitize_line(signer_repo[:300])}')
+            p('  NOTE: surface for human review; monorepos may sign from a')
+            p('  parent repo. A mismatch combined with other signals is HIGH.')
+        else:
+            p('SIGSTORE_REPO_MISMATCH: NO')
+
+    def check_publisher_velocity(
+        self, registry_data: dict, p: 'Printer',
+    ) -> None:
+        """Emit publisher velocity report from registry_data['_publisher_stats'].
+
+        Ecosystems populate registry_data['_publisher_stats'] in
+        fetch_all_registry_data() as:
+          {'publisher_name': str, 'recent_72h_count': int,
+           'total_count': int, 'oldest_dt': datetime | None}
+        Absent or None means velocity was not checked for this ecosystem.
+        """
+        stats = registry_data.get('_publisher_stats')
+        if not stats:
+            return
+
+        publisher_name = stats.get('publisher_name', '')
+        recent_count = stats.get('recent_72h_count', 0)
+        total_count = stats.get('total_count', 0)
+        oldest_dt = stats.get('oldest_dt')
+
+        p('')
+        p(f'=== Publisher velocity: {sanitize_line(publisher_name)} ===')
+        p(f'PUBLISHER_TOTAL_PACKAGES: {total_count}')
+        p(f'PUBLISHER_RECENT_72H: {recent_count}')
+
+        if recent_count >= self.VELOCITY_THRESHOLD:
+            now = datetime.now(timezone.utc)
+            tenure_days = (
+                int((now - oldest_dt).total_seconds() / 86400)
+                if oldest_dt else None
+            )
+            is_new = (
+                tenure_days is not None and tenure_days < self.NEW_PUBLISHER_DAYS
+            )
+            severity = 'HIGH' if is_new else 'MEDIUM'
+            p(f'PUBLISHER_VELOCITY_ANOMALOUS: YES ({severity})')
+            p(f'  {recent_count} packages published in last 72h '
+              f'(threshold: {self.VELOCITY_THRESHOLD})')
+            if is_new:
+                p(f'  Publisher tenure: {tenure_days} days '
+                  f'(<{self.NEW_PUBLISHER_DAYS} days; '
+                  f'new publisher + high velocity = HIGH)')
+            elif tenure_days is not None:
+                p(f'  Publisher tenure: {tenure_days} days '
+                  f'(consider: may be a high-volume CI pipeline such as a monorepo)')
+        else:
+            p('PUBLISHER_VELOCITY_ANOMALOUS: NO')
 
     def __init__(self, registry_url: str | None = None) -> None:
         self.registry_url = registry_url
