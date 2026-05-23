@@ -68,6 +68,8 @@ _RE_UV_GIT_SOURCE = re.compile(
 # ---------------------------------------------------------------------------
 
 class PythonAnalyzer(shared.EcosystemAnalyzer):
+    """EcosystemAnalyzer implementation for Python packages (PyPI/wheels)."""
+
     ECOSYSTEM = 'python'
     OSV_ECOSYSTEM = 'PyPI'
     OSS_REBUILD_ECOSYSTEM = 'pypi'

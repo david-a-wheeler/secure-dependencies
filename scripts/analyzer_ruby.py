@@ -47,6 +47,8 @@ _RE_GEMLOCK_SPECS = re.compile(r'^\s{4}(\S+)\s+\(', re.MULTILINE)
 # ---------------------------------------------------------------------------
 
 class RubyAnalyzer(shared.EcosystemAnalyzer):
+    """EcosystemAnalyzer implementation for Ruby packages (RubyGems/gems)."""
+
     ECOSYSTEM = 'ruby'
     LOCKFILE_NAME = 'Gemfile.lock'
     OSV_ECOSYSTEM = 'RubyGems'

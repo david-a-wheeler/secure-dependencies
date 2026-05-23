@@ -170,6 +170,8 @@ _RE_NPM_USER = re.compile(r'^[A-Za-z0-9._-]{1,80}$')
 # ---------------------------------------------------------------------------
 
 class JavaScriptAnalyzer(shared.EcosystemAnalyzer):
+    """EcosystemAnalyzer implementation for JavaScript packages (npm/tarballs)."""
+
     ECOSYSTEM = 'javascript'
     OSV_ECOSYSTEM = 'npm'
     OSS_REBUILD_ECOSYSTEM = 'npm'
