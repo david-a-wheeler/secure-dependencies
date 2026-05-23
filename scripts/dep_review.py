@@ -36,7 +36,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 import analysis_shared as shared
-from analysis_shared import PackageManifest, Printer
+from analysis_shared import PackageManifest, Printer, SignalContext
 
 
 # ---------------------------------------------------------------------------
@@ -161,55 +161,55 @@ def _get_old_dep_lines(analyzer, pkgname: str, old_ver: str, old_result: dict) -
 # Signals writer
 # ---------------------------------------------------------------------------
 
-def write_signals(  # noqa: C901
-    work: Path,
-    p: Printer,
-    pkgname: str,
-    old_ver: str,
-    new_ver: str,
-    diff_mode: bool,
-    deeper: bool,
-    sha256: str,
-    manifest: PackageManifest,
-    scan_details: list[tuple[str, int]],
-    total_matches: int,
-    diff_scan_details: list[tuple[str, int]],
-    diff_scan_matches: int,
-    clone_ok: bool,
-    version_tag: str,
-    commit_guessed: bool,
-    source_url: str,
-    badge: dict,
-    extra_files: int,
-    binary_files: int,
-    diff_lines: int,
-    changed_files: str,
-    registry: dict,
-    scorecard: str,
-    health_concerns: list[str],
-    license_result: dict,
-    dep_result: dict,
-    dep_registry: dict,
-    transitive: dict,
-    deeper_result: dict,
-    failures: list[str],
-    ecosystem: str,
-    deeper_mode: bool = False,
-    install_probe: bool = False,
-    install_probe_mode: bool = False,
-    vuln_result: dict | None = None,
-    has_security_policy: bool | None = None,
-    scorecard_checks: dict | None = None,
-    recent_commits: int | None = None,
-    commit_activity: dict | None = None,
-    source_likely_incompatible: bool = False,
-    source_lines: int = 0,
-    ecosystems_data: dict | None = None,
-    oss_rebuild_result: dict | None = None,
-    diff_semantic_result: dict | None = None,
-    source_review_result: dict | None = None,
-) -> None:
+def write_signals(ctx: SignalContext, p: Printer) -> None:  # noqa: C901
     """Write the rich self-describing signals.txt report."""
+    # Unpack context fields into local names used throughout this function.
+    work = ctx.work
+    pkgname = ctx.pkgname
+    old_ver = ctx.old_ver
+    new_ver = ctx.new_ver
+    diff_mode = ctx.diff_mode
+    ecosystem = ctx.ecosystem
+    sha256 = ctx.sha256
+    manifest = ctx.manifest
+    scan_details = ctx.scan_details
+    total_matches = ctx.total_matches
+    diff_scan_details = ctx.diff_scan_details
+    diff_scan_matches = ctx.diff_scan_matches
+    source_lines = ctx.source_lines
+    clone_ok = ctx.clone_ok
+    version_tag = ctx.version_tag
+    commit_guessed = ctx.commit_guessed
+    source_url = ctx.source_url
+    source_likely_incompatible = ctx.source_likely_incompatible
+    registry = ctx.registry
+    badge = ctx.badge
+    scorecard = ctx.scorecard
+    health_concerns = ctx.health_concerns
+    extra_files = ctx.extra_files
+    binary_files = ctx.binary_files
+    diff_lines = ctx.diff_lines
+    changed_files = ctx.changed_files
+    license_result = ctx.license_result
+    dep_result = ctx.dep_result
+    dep_registry = ctx.dep_registry
+    transitive = ctx.transitive
+    deeper_result = ctx.deeper_result
+    failures = ctx.failures
+    deeper = ctx.deeper
+    deeper_mode = ctx.deeper_mode
+    install_probe = ctx.install_probe
+    install_probe_mode = ctx.install_probe_mode
+    vuln_result = ctx.vuln_result
+    has_security_policy = ctx.has_security_policy
+    scorecard_checks = ctx.scorecard_checks
+    recent_commits = ctx.recent_commits
+    commit_activity = ctx.commit_activity
+    ecosystems_data = ctx.ecosystems_data
+    oss_rebuild_result = ctx.oss_rebuild_result
+    diff_semantic_result = ctx.diff_semantic_result
+    source_review_result = ctx.source_review_result
+
     timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
     mode_label = 'UPDATE' if diff_mode else 'NEW/CURRENT'
 
@@ -1858,29 +1858,37 @@ def run_analysis(  # noqa: C901
     print('--- Writing signals ---')
     with Printer(work / 'signals.txt') as _p_signals:
         write_signals(
-            work, _p_signals, pkgname, old_ver, new_ver, diff_mode, deeper, sha256,
-            manifest, scan_details, total_matches, diff_scan_details, diff_scan_matches,
-            clone_ok, version_tag, commit_guessed, source_url, badge,
-            extra_files, binary_files,
-            diff_lines, changed_files,
-            registry, scorecard, health_concerns,
-            license_result, dep_result, dep_registry,
-            transitive, deeper_result, failures,
-            ecosystem=analyzer.ECOSYSTEM,
-            deeper_mode=deeper_mode,
-            install_probe=install_probe,
-            install_probe_mode=install_probe_mode,
-            vuln_result=vuln_result,
-            has_security_policy=has_security_policy,
-            scorecard_checks=scorecard_checks,
-            recent_commits=recent_commits,
-            commit_activity=commit_activity,
-            source_likely_incompatible=source_likely_incompatible,
-            source_lines=source_lines,
-            ecosystems_data=ecosystems_data,
-            oss_rebuild_result=oss_rebuild_result,
-            diff_semantic_result=diff_semantic_result,
-            source_review_result=source_review_result,
+            shared.SignalContext(
+                work=work, pkgname=pkgname, old_ver=old_ver, new_ver=new_ver,
+                diff_mode=diff_mode, ecosystem=analyzer.ECOSYSTEM,
+                sha256=sha256, manifest=manifest,
+                scan_details=scan_details, total_matches=total_matches,
+                diff_scan_details=diff_scan_details,
+                diff_scan_matches=diff_scan_matches, source_lines=source_lines,
+                clone_ok=clone_ok, version_tag=version_tag,
+                commit_guessed=commit_guessed, source_url=source_url,
+                source_likely_incompatible=source_likely_incompatible,
+                registry=registry, badge=badge, scorecard=scorecard,
+                health_concerns=health_concerns,
+                extra_files=extra_files, binary_files=binary_files,
+                diff_lines=diff_lines, changed_files=changed_files,
+                license_result=license_result, dep_result=dep_result,
+                dep_registry=dep_registry, transitive=transitive,
+                deeper_result=deeper_result, failures=failures,
+                deeper=deeper, deeper_mode=deeper_mode,
+                install_probe=install_probe,
+                install_probe_mode=install_probe_mode,
+                vuln_result=vuln_result,
+                has_security_policy=has_security_policy,
+                scorecard_checks=scorecard_checks,
+                recent_commits=recent_commits,
+                commit_activity=commit_activity,
+                ecosystems_data=ecosystems_data,
+                oss_rebuild_result=oss_rebuild_result,
+                diff_semantic_result=diff_semantic_result,
+                source_review_result=source_review_result,
+            ),
+            _p_signals,
         )
 
     # Final summary

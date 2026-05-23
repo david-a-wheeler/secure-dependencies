@@ -3728,6 +3728,75 @@ class PackageManifest:
 
 
 # ---------------------------------------------------------------------------
+# Signal context object
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SignalContext:
+    """All inputs to write_signals(), bundled so the call site is stable.
+
+    Adding a new signal requires adding one field here and one reference
+    inside write_signals(); the call site itself does not change.
+    """
+    # Package identity
+    work: 'Path'
+    pkgname: str
+    old_ver: str
+    new_ver: str
+    diff_mode: bool
+    ecosystem: str
+    # Archive
+    sha256: str
+    # Manifest
+    manifest: PackageManifest
+    # Scans
+    scan_details: 'list[tuple[str, int]]'
+    total_matches: int
+    diff_scan_details: 'list[tuple[str, int]]'
+    diff_scan_matches: int
+    source_lines: int
+    # Source clone
+    clone_ok: bool
+    version_tag: str
+    commit_guessed: bool
+    source_url: str
+    source_likely_incompatible: bool
+    # Registry
+    registry: dict
+    badge: dict
+    scorecard: str
+    health_concerns: 'list[str]'
+    # Package content
+    extra_files: int
+    binary_files: int
+    # Diff (update mode)
+    diff_lines: int
+    changed_files: str
+    # Analysis results
+    license_result: dict
+    dep_result: dict
+    dep_registry: dict
+    transitive: dict
+    deeper_result: dict
+    failures: 'list[str]'
+    # Mode flags
+    deeper: bool
+    deeper_mode: bool = False
+    install_probe: bool = False
+    install_probe_mode: bool = False
+    # Optional results
+    vuln_result: 'dict | None' = None
+    has_security_policy: 'bool | None' = None
+    scorecard_checks: 'dict | None' = None
+    recent_commits: 'int | None' = None
+    commit_activity: 'dict | None' = None
+    ecosystems_data: 'dict | None' = None
+    oss_rebuild_result: 'dict | None' = None
+    diff_semantic_result: 'dict | None' = None
+    source_review_result: 'dict | None' = None
+
+
+# ---------------------------------------------------------------------------
 # Ecosystem hooks contract
 # ---------------------------------------------------------------------------
 
