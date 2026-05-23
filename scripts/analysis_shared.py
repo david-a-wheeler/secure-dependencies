@@ -3797,6 +3797,35 @@ class SignalContext:
 
 
 # ---------------------------------------------------------------------------
+# Signal report object
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SignalReport:
+    """Machine-readable summary written as signals.json alongside signals.txt.
+
+    Fields mirror what _parse_signals() in dep_session.py extracts from
+    the text file, but are typed and authoritative. dep_session.py reads
+    signals.json when present rather than parsing text.
+    """
+    sha256: str = ''
+    risk_flags: str = 'NONE'
+    positive_flags: str = 'NONE'
+    adversarial_gate: str = 'CLEAR'
+    concern_count: int = 0
+    concern_level: str = 'NONE'
+    mode: str = ''
+    old_version: str = ''
+    license_line: str = ''
+    health_line: str = ''
+    clone_url: str = ''
+    clone_status: str = ''
+    extensions: str = 'NO'
+    executables: str = 'NO'
+    new_transitive_deps: str = ''
+
+
+# ---------------------------------------------------------------------------
 # Ecosystem hooks contract
 # ---------------------------------------------------------------------------
 

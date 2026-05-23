@@ -1,5 +1,6 @@
 """Tests for file-parsing functions that require fixture files."""
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -11,8 +12,9 @@ FIXTURES = Path(__file__).parent / 'fixtures'
 
 
 def _signals():
-    """Return parsed fields from the shared signals fixture (cached)."""
+    """Return parsed fields from the shared signals fixture (JSON path, cached)."""
     if not hasattr(_signals, '_cache'):
+        # signals.json is present alongside signals.txt, so JSON path is used.
         _signals._cache = dep_session._parse_signals(FIXTURES / 'signals.txt')
     return _signals._cache
 
@@ -41,6 +43,20 @@ class TestParseAutoFindings(unittest.TestCase):
     def test_missing_file_returns_empty_dict(self):
         self.assertEqual(
             dep_session._parse_signals(Path('/no/such/file.txt')), {})
+
+    def test_text_fallback_when_no_json(self):
+        """Text parsing is used when only signals.txt exists (no signals.json)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            txt = Path(tmp) / 'signals.txt'
+            txt.write_text(
+                (FIXTURES / 'signals.txt').read_text(encoding='utf-8'),
+                encoding='utf-8',
+            )
+            f = dep_session._parse_signals(txt)
+        self.assertEqual(f['sha256'], 'abc123def456')
+        self.assertEqual(f['risk_flags'], 'NATIVE_EXTENSION')
+        self.assertIn('MIT', f['license_line'])
+        self.assertEqual(f['clone_url'], 'https://github.com/example/pkg')
 
 
 class TestParseReportSummary(unittest.TestCase):

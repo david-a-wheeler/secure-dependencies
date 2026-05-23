@@ -28,6 +28,7 @@ import sys
 if sys.version_info < (3, 10):
     sys.exit(f'dep_review.py requires Python 3.10 or later (running {sys.version})')
 
+import dataclasses
 import importlib
 import json
 import re
@@ -36,7 +37,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 import analysis_shared as shared
-from analysis_shared import PackageManifest, Printer, SignalContext
+from analysis_shared import PackageManifest, Printer, SignalContext, SignalReport
 
 
 # ---------------------------------------------------------------------------
@@ -161,7 +162,7 @@ def _get_old_dep_lines(analyzer, pkgname: str, old_ver: str, old_result: dict) -
 # Signals writer
 # ---------------------------------------------------------------------------
 
-def write_signals(ctx: SignalContext, p: Printer) -> None:  # noqa: C901
+def write_signals(ctx: SignalContext, p: Printer) -> SignalReport:  # noqa: C901
     """Write the rich self-describing signals.txt report."""
     # Unpack context fields into local names used throughout this function.
     work = ctx.work
@@ -460,6 +461,7 @@ def write_signals(ctx: SignalContext, p: Printer) -> None:  # noqa: C901
             f'{diff_lines}  [large update diff; threshold is 500; read diff-filenames.txt and key changed files for semantic meaning]',
         ))
     _not_in_lockfile = transitive.get('not_in_lockfile', [])
+    new_trans_str = str(len(_not_in_lockfile))
     if _not_in_lockfile:
         _lf_note = '  [unusually large transitive footprint; review each new dep]' if len(_not_in_lockfile) > 10 \
             else '  [not in lockfile; each is a new unreviewed code surface]'
@@ -571,7 +573,8 @@ def write_signals(ctx: SignalContext, p: Printer) -> None:  # noqa: C901
 
     # ---- LICENSE ----
     p(sec('LICENSE'))
-    p(f'SPDX: {license_spdx}  |  OSI-approved: {license_osi}  |  Status: {license_status}')
+    license_line_str = f'SPDX: {license_spdx}  |  OSI-approved: {license_osi}  |  Status: {license_status}'
+    p(license_line_str)
     if license_changed:
         old_raw = license_result.get('old_raw', '')
         p(f'[!] License changed from previous version: "{old_raw}" -> "{license_result.get("current_raw", license_spdx)}"')
@@ -587,7 +590,8 @@ def write_signals(ctx: SignalContext, p: Printer) -> None:  # noqa: C901
     ver_pub_str = f'{ver_pub} days ago' if ver_pub is not None else 'unknown'
     owner_str = str(registry.get('owner_count_int')) if registry.get('owner_count_int') is not None else 'unknown'
     sc_str = scorecard
-    p(f'Age: {age_str} yr  |  Last release: {last_rel_str}  |  Owners: {owner_str}  |  Scorecard: {sc_str}')
+    health_line_str = f'Age: {age_str} yr  |  Last release: {last_rel_str}  |  Owners: {owner_str}  |  Scorecard: {sc_str}'
+    p(health_line_str)
     p(f'This version published: {ver_pub_str}')
     p(f'Stability: {registry.get("version_stability", "unknown")}')
     if recent_commits is not None:
@@ -727,6 +731,16 @@ def write_signals(ctx: SignalContext, p: Printer) -> None:  # noqa: C901
         p('All clean.')
 
     # ---- SOURCE REPOSITORY ----
+    if clone_ok and commit_guessed:
+        clone_status_str = 'GUESSED'
+    elif source_likely_incompatible:
+        clone_status_str = 'INCOMPATIBLE'
+    elif clone_ok:
+        clone_status_str = 'OK'
+    elif not source_url:
+        clone_status_str = 'SKIPPED'
+    else:
+        clone_status_str = 'FAILED'
     p(sec('SOURCE REPOSITORY'))
     p(f'URL  : {shared.sanitize_line(source_url) if source_url else "(not found in manifest)"}')
     if clone_ok and commit_guessed:
@@ -1122,6 +1136,24 @@ def write_signals(ctx: SignalContext, p: Printer) -> None:  # noqa: C901
     p('raw-*.txt, raw-*.json')
     if deeper:
         p('raw-repro-diff.txt, raw-build-output.txt')
+
+    return SignalReport(
+        sha256=stored_sha,
+        risk_flags=risk_flags,
+        positive_flags=positive_flags,
+        adversarial_gate=_gate_str,
+        concern_count=_concern_count,
+        concern_level=_concern_level,
+        mode=mode_label,
+        old_version=old_ver if diff_mode else '',
+        license_line=license_line_str,
+        health_line=health_line_str,
+        clone_url=source_url,
+        clone_status=clone_status_str,
+        extensions=manifest.extensions,
+        executables=manifest.executables,
+        new_transitive_deps=new_trans_str,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1857,7 +1889,7 @@ def run_analysis(  # noqa: C901
     print()
     print('--- Writing signals ---')
     with Printer(work / 'signals.txt') as _p_signals:
-        write_signals(
+        _report = write_signals(
             shared.SignalContext(
                 work=work, pkgname=pkgname, old_ver=old_ver, new_ver=new_ver,
                 diff_mode=diff_mode, ecosystem=analyzer.ECOSYSTEM,
@@ -1890,6 +1922,10 @@ def run_analysis(  # noqa: C901
             ),
             _p_signals,
         )
+    (work / 'signals.json').write_text(
+        json.dumps(dataclasses.asdict(_report), indent=2),
+        encoding='utf-8',
+    )
 
     # Final summary
     stored_sha = sha256 or 'UNKNOWN'

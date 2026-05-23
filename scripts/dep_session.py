@@ -936,11 +936,23 @@ def _run_cmd(cmd: list[str], cwd: Path) -> tuple[int, str, str]:
 
 
 def _parse_signals(path: Path) -> dict[str, str]:
-    """Extract key fields from a machine-written signals.txt.
+    """Extract key fields from signals.json (preferred) or signals.txt (fallback).
 
     Returns a dict of field_name → string.  Missing fields are absent.
     Tolerant of old-format files that pre-date ADVERSARIAL_GATE / CONCERN_SUMMARY.
     """
+    # Prefer machine-written JSON: faster and format-stable.
+    json_path = path.with_suffix('.json')
+    if json_path.is_file():
+        try:
+            data = json.loads(json_path.read_text(encoding='utf-8'))
+            # concern_count is int in SignalReport; convert to str for callers.
+            if 'concern_count' in data:
+                data['concern_count'] = str(data['concern_count'])
+            return {k: str(v) for k, v in data.items() if v is not None and str(v) != ''}
+        except (json.JSONDecodeError, OSError):
+            pass  # fall through to text parsing
+
     if not path.is_file():
         return {}
 

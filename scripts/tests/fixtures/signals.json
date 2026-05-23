@@ -1,0 +1,17 @@
+{
+  "sha256": "abc123def456",
+  "risk_flags": "NATIVE_EXTENSION",
+  "positive_flags": "MFA_REQUIRED",
+  "adversarial_gate": "PASS",
+  "concern_count": 2,
+  "concern_level": "MEDIUM",
+  "mode": "UPDATE",
+  "old_version": "",
+  "license_line": "SPDX: MIT  |  OSI-approved: YES  |  Status: OK",
+  "health_line": "Age: 3.2 yr  |  Last release: 45 days ago  |  Owners: unknown  |  Scorecard: 7.5/10",
+  "clone_url": "https://github.com/example/pkg",
+  "clone_status": "OK",
+  "extensions": "YES",
+  "executables": "NO",
+  "new_transitive_deps": "3"
+}
