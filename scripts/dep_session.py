@@ -158,8 +158,65 @@ def _read_lockfile_baseline(root: Path, registry: str) -> list[str]:
                         in_specs = False  # end of this specs block; keep scanning for more
             return names
 
-    # TODO: Python (requirements.txt, poetry.lock, uv.lock)
-    # TODO: JavaScript (package-lock.json, yarn.lock)
+    # Python: uv.lock / poetry.lock (TOML [[package]] sections), then requirements.txt
+    if registry == 'pypi':
+        for lockname in ('uv.lock', 'poetry.lock'):
+            lockfile = root / lockname
+            if lockfile.is_file():
+                names: list[str] = []
+                for line in lockfile.read_text(encoding='utf-8', errors='replace').splitlines():
+                    m = re.match(r'^name\s*=\s*"([A-Za-z0-9._-]{1,200})"', line)
+                    if m:
+                        names.append(re.sub(r'[-_.]+', '-', m.group(1)).lower())
+                return names
+        req = root / 'requirements.txt'
+        if req.is_file():
+            names = []
+            for line in req.read_text(encoding='utf-8', errors='replace').splitlines():
+                line = line.strip()
+                if not line or line.startswith('#') or line.startswith('-'):
+                    continue
+                m = re.match(r'^([A-Za-z0-9][A-Za-z0-9._-]{0,199})', line)
+                if m:
+                    names.append(re.sub(r'[-_.]+', '-', m.group(1)).lower())
+            return names
+
+    # JavaScript: package-lock.json (v2/v3 'packages' or v1 'dependencies')
+    if registry == 'npm':
+        lockfile = root / 'package-lock.json'
+        if lockfile.is_file():
+            try:
+                data = json.loads(lockfile.read_text(encoding='utf-8', errors='replace'))
+                names = []
+                pkg_map: dict = data.get('packages', {})
+                if pkg_map:
+                    # v2/v3: keys are paths like "node_modules/foo" or
+                    # "node_modules/@scope/bar"; skip nested and the root ""
+                    for key in pkg_map:
+                        if not key.startswith('node_modules/'):
+                            continue
+                        pkg = key[len('node_modules/'):]
+                        # Nested dep path: "node_modules/foo/node_modules/bar"
+                        tail = pkg.lstrip('@')
+                        if '/' in tail:
+                            continue
+                        names.append(pkg.lower())
+                else:
+                    for key in data.get('dependencies', {}):
+                        names.append(key.lower())
+                return names
+            except (json.JSONDecodeError, ValueError):
+                pass
+        yarn = root / 'yarn.lock'
+        if yarn.is_file():
+            names = []
+            for line in yarn.read_text(encoding='utf-8', errors='replace').splitlines():
+                # Entry header: "foo@^1.0", "foo@^1.0, foo@^1.1":, or @scope/pkg@ver:
+                m = re.match(r'^"?(@?[A-Za-z0-9][A-Za-z0-9._/-]{0,213})@', line)
+                if m and line.rstrip().endswith(':'):
+                    names.append(m.group(1).lower())
+            return names
+
     return []
 
 
@@ -167,15 +224,41 @@ def _read_lockfile_baseline(root: Path, registry: str) -> list[str]:
 # Version resolution (network, stdlib only)
 # ---------------------------------------------------------------------------
 
+def _fetch_version_json(url: str) -> dict:
+    """Fetch a registry JSON endpoint; return parsed dict or raise on error."""
+    req = urllib.request.Request(url, headers={'User-Agent': 'dep_session/1 (security-review)'})
+    with urllib.request.urlopen(req, timeout=15) as resp:  # noqa: S310
+        return json.loads(resp.read().decode('utf-8', errors='replace'))
+
+
 def _resolve_rubygems(name: str, registry_url: str | None) -> str | None:
     base = (registry_url or 'https://rubygems.org').rstrip('/')
-    url = f'{base}/api/v1/gems/{name}.json'
     try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'dep_session/1 (security-review)'})
-        with urllib.request.urlopen(req, timeout=15) as resp:  # noqa: S310
-            data = json.loads(resp.read().decode('utf-8', errors='replace'))
-            v = str(data.get('version', '')).strip()
-            return v or None
+        data = _fetch_version_json(f'{base}/api/v1/gems/{name}.json')
+        v = str(data.get('version', '')).strip()
+        return v or None
+    except Exception:
+        return None
+
+
+def _resolve_pypi(name: str, registry_url: str | None) -> str | None:
+    base = (registry_url or 'https://pypi.org').rstrip('/')
+    try:
+        data = _fetch_version_json(f'{base}/pypi/{name}/json')
+        v = str(data.get('info', {}).get('version', '')).strip()
+        return v or None
+    except Exception:
+        return None
+
+
+def _resolve_npm(name: str, registry_url: str | None) -> str | None:
+    base = (registry_url or 'https://registry.npmjs.org').rstrip('/')
+    # Scoped packages (@scope/name) include '/' in the URL path; the npm
+    # registry API accepts them unencoded (e.g. /@scope/name/latest).
+    try:
+        data = _fetch_version_json(f'{base}/{name}/latest')
+        v = str(data.get('version', '')).strip()
+        return v or None
     except Exception:
         return None
 
@@ -184,7 +267,10 @@ def resolve_version(name: str, registry: str, registry_url: str | None = None) -
     """Query the registry for the current published version of a package."""
     if registry == 'rubygems':
         return _resolve_rubygems(name, registry_url)
-    # TODO: pypi, npm
+    if registry == 'pypi':
+        return _resolve_pypi(name, registry_url)
+    if registry == 'npm':
+        return _resolve_npm(name, registry_url)
     return None
 
 
@@ -597,11 +683,16 @@ def cmd_complete(args: argparse.Namespace) -> None:
         except (json.JSONDecodeError, OSError) as e:
             print(f'Warning: could not read {update_file}: {e}', file=sys.stderr)
 
-    # Capture introduced_by before filtering the queue.
+    # Capture introduced_by and mode before filtering the queue.
     introduced_by = next(
         (q.get('introduced_by') for q in session.get('queue', [])
          if q['name'].lower() == name.lower()),
         'user request',
+    )
+    pkg_mode = next(
+        (q.get('mode') for q in session.get('queue', [])
+         if q['name'].lower() == name.lower()),
+        'NEW',
     )
 
     # Remove this package from the queue (it may have been there with a version)
@@ -617,6 +708,7 @@ def cmd_complete(args: argparse.Namespace) -> None:
     analyzed_entry = {
         'name': name,
         'version': version,
+        'mode': pkg_mode,
         'recommendation': recommendation,
         'risk': risk,
         'deeper_needed': deeper_needed,
@@ -1341,13 +1433,24 @@ def cmd_wrap_up(args: argparse.Namespace) -> None:
     # Sort by risk (CRITICAL first)
     pkg_data.sort(key=lambda x: x['sort_key'])
 
-    rel_session = f'temp/dep-review/session.json'
+    # Derive session mode from analyzed entries; sessions have no top-level mode field.
+    _modes = {v.get('mode', 'NEW') for v in analyzed.values()}
+    if 'UPDATE' in _modes and len(_modes) > 1:
+        _session_mode = 'MIXED'
+    elif 'UPDATE' in _modes:
+        _session_mode = 'UPDATE'
+    elif _modes:
+        _session_mode = next(iter(_modes))
+    else:
+        _session_mode = 'UNKNOWN'
+
+    rel_session = 'temp/dep-review/session.json'
 
     lines: list[str] = [
         '# Dependency Security Report',
         '',
         f'**Date:** {today}',
-        f'**Mode:** {session.get("mode", "unknown").upper() if session.get("mode") else "unknown"}',
+        f'**Mode:** {_session_mode}',
         f'**Project root:** {root}',
         f'**Packages reviewed:** {len(pkg_data)}',
         f'**Session:** {rel_session}',
@@ -1672,57 +1775,31 @@ def _query_pkg_metadata(name: str, registry: str,
     try:
         if registry == 'rubygems':
             base = (registry_url or 'https://rubygems.org').rstrip('/')
-            url = f'{base}/api/v1/gems/{name}.json'
-            req = urllib.request.Request(
-                url, headers={'User-Agent': 'dep_session/1 (security-review)'},
-            )
-            with urllib.request.urlopen(req, timeout=15) as resp:  # noqa: S310
-                data = json.loads(resp.read().decode('utf-8', errors='replace'))
+            data = _fetch_version_json(f'{base}/api/v1/gems/{name}.json')
             lic = data.get('licenses') or data.get('license_links', '')
             result['license'] = ', '.join(lic) if isinstance(lic, list) else (lic or None)
-            ts_str = data.get('version_created_at') or data.get('created_at')
-            if ts_str:
-                ts = ts_str.rstrip('Z').split('.')[0]
-                dt = datetime.strptime(ts, '%Y-%m-%dT%H:%M:%S').replace(tzinfo=timezone.utc)
-                result['last_release_days'] = (datetime.now(timezone.utc) - dt).days
+            ts_str = data.get('version_created_at') or data.get('created_at', '')
+            result['last_release_days'] = shared.days_since(ts_str)
 
         elif registry == 'pypi':
             base = (registry_url or 'https://pypi.org').rstrip('/')
-            url = f'{base}/pypi/{name}/json'
-            req = urllib.request.Request(
-                url, headers={'User-Agent': 'dep_session/1 (security-review)'},
-            )
-            with urllib.request.urlopen(req, timeout=15) as resp:  # noqa: S310
-                data = json.loads(resp.read().decode('utf-8', errors='replace'))
+            data = _fetch_version_json(f'{base}/pypi/{name}/json')
             result['license'] = data.get('info', {}).get('license') or None
             latest = data.get('info', {}).get('version', '')
             files = data.get('releases', {}).get(latest, [])
             if files:
                 ts_str = files[-1].get('upload_time_iso_8601') or files[-1].get('upload_time', '')
-                if ts_str:
-                    ts = ts_str.rstrip('Z').split('.')[0]
-                    dt = datetime.strptime(ts, '%Y-%m-%dT%H:%M:%S').replace(tzinfo=timezone.utc)
-                    result['last_release_days'] = (datetime.now(timezone.utc) - dt).days
+                result['last_release_days'] = shared.days_since(ts_str)
 
         elif registry == 'npm':
             base = (registry_url or 'https://registry.npmjs.org').rstrip('/')
-            url = f'{base}/{name}'
-            req = urllib.request.Request(
-                url,
-                headers={'User-Agent': 'dep_session/1 (security-review)',
-                         'Accept': 'application/json'},
-            )
-            with urllib.request.urlopen(req, timeout=15) as resp:  # noqa: S310
-                data = json.loads(resp.read().decode('utf-8', errors='replace'))
+            data = _fetch_version_json(f'{base}/{name}')
             latest = data.get('dist-tags', {}).get('latest', '')
             lic = (data.get('versions', {}).get(latest, {}).get('license')
                    or data.get('license'))
             result['license'] = str(lic) if lic else None
-            ts_str = data.get('time', {}).get(latest, '')
-            if ts_str:
-                ts = ts_str.rstrip('Z').split('.')[0]
-                dt = datetime.strptime(ts, '%Y-%m-%dT%H:%M:%S').replace(tzinfo=timezone.utc)
-                result['last_release_days'] = (datetime.now(timezone.utc) - dt).days
+            result['last_release_days'] = shared.days_since(
+                data.get('time', {}).get(latest, ''))
 
     except Exception:  # noqa: BLE001
         pass

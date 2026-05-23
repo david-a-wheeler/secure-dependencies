@@ -154,11 +154,6 @@ def _write_source_review(p: 'Printer', result: dict) -> None:
 # Old dep lines extraction
 # ---------------------------------------------------------------------------
 
-def _get_old_dep_lines(analyzer, pkgname: str, old_ver: str, old_result: dict) -> list[str]:
-    """Extract runtime dep lines from old package manifest."""
-    return analyzer.get_old_dep_lines(pkgname, old_ver, old_result)
-
-
 # ---------------------------------------------------------------------------
 # Signals writer
 # ---------------------------------------------------------------------------
@@ -459,7 +454,7 @@ def write_signals(ctx: SignalContext, p: Printer) -> SignalReport:  # noqa: C901
     if diff_mode and diff_lines > 500:
         _concerns.append((
             'diff_lines',
-            f'{diff_lines}  [large update diff; threshold is 500; read diff-filenames.txt and key changed files for semantic meaning]',
+            f'{diff_lines}  [large update diff; threshold is 500; read diff-semantic.txt for tier 3 AI-reviewed diff summary]',
         ))
     _not_in_lockfile = transitive.get('not_in_lockfile', [])
     new_trans_str = str(len(_not_in_lockfile))
@@ -564,7 +559,7 @@ def write_signals(ctx: SignalContext, p: Printer) -> SignalReport:  # noqa: C901
     else:
         p('  (none)')
     p(f'CONCERN_COUNT: {_concern_count}')
-    p(f'CONCERN_LEVEL: {_concern_level}  (LOW=1, MEDIUM=2-3, HIGH=4+)')
+    p(f'CONCERN_LEVEL: {_concern_level}  (NONE=0, LOW=1, MEDIUM=2-3, HIGH=4+)')
 
     # Tier 3 AI review results
     ds_assessment = (diff_semantic_result or {}).get('assessment', 'NOT_RUN')
@@ -841,7 +836,7 @@ def write_signals(ctx: SignalContext, p: Printer) -> SignalReport:  # noqa: C901
             for fh in file_headers[:10]:
                 p(f'  {fh}')
             if len(file_headers) > 10:
-                p('  ... (full list in diff-filenames.txt)')
+                p('  ... (full list in diff-semantic.txt)')
             p(f'Context: {diff_lines} lines is {size_desc}. Larger diffs increase the')
             p('  surface area that automated scans cannot fully cover.')
             p('')
@@ -857,7 +852,7 @@ def write_signals(ctx: SignalContext, p: Printer) -> SignalReport:  # noqa: C901
                     p('  All diff scans clean.')
             else:
                 p('  Skipped (no diff available).')
-        p('Details: diff-filenames.txt')
+        p('Details: diff-semantic.txt (tier 3 AI review); diff-filenames.txt (sanitized paths)')
 
     # ---- MANIFEST / INSTALL HOOKS ----
     p(sec('MANIFEST / INSTALL HOOKS'))
@@ -999,8 +994,8 @@ def write_signals(ctx: SignalContext, p: Printer) -> SignalReport:  # noqa: C901
         else:
             p('Context: Build could not be completed or compared. This does not indicate a problem,')
             p('  but reduces confidence in the package\'s provenance.')
-        p('Deep source comparison: see source-deep-diff.txt')
-        p('Details: sandbox-detection.txt, reproducible-build.txt, source-deep-diff.txt')
+        p('Deep source comparison: see source-review.txt (tier 3 AI review)')
+        p('Details: sandbox-detection.txt, reproducible-build.txt, source-review.txt')
         p('DO NOT READ: raw-repro-diff.txt, raw-build-output.txt')
 
     # ---- OPEN QUESTIONS ----
@@ -1070,7 +1065,7 @@ def write_signals(ctx: SignalContext, p: Printer) -> SignalReport:  # noqa: C901
         questions.append(
             '- All automated checks passed. The main remaining uncertainty is semantic correctness\n'
             '  of the diff, which was not reviewed. For security-critical packages, consider manual\n'
-            '  inspection of the changed files listed in diff-filenames.txt.'
+            '  inspection of the changed files listed in diff-semantic.txt.'
         )
 
     for q in questions:
@@ -1103,10 +1098,10 @@ def write_signals(ctx: SignalContext, p: Printer) -> SignalReport:  # noqa: C901
         p('  new-deps.txt, dep-lockfile-check.txt, dep-registry.txt, transitive-deps.txt')
     if diff_mode:
         p('If diff (UPDATE mode):')
-        p('  diff-filenames.txt')
+        p('  diff-semantic.txt (tier 3 AI diff review)')
     if deeper:
         p('If deeper analysis run:')
-        p('  sandbox-detection.txt, reproducible-build.txt, source-deep-diff.txt')
+        p('  sandbox-detection.txt, reproducible-build.txt, source-review.txt')
 
     # ---- NEXT STEPS REQUIRED ----
     # Emitted whenever the session was started with a non-standard depth, so
@@ -1122,7 +1117,7 @@ def write_signals(ctx: SignalContext, p: Printer) -> SignalReport:  # noqa: C901
             else:
                 p('[ ] Deeper analysis (--deeper): NOT YET RUN.')
                 p('    Run --deeper now, then read sandbox-detection.txt,')
-                p('    reproducible-build.txt, and source-deep-diff.txt.')
+                p('    reproducible-build.txt, and source-review.txt.')
         if install_probe_mode:
             if install_probe:
                 p('[DONE] Install probe (--install-probe): already run above.')
@@ -1354,7 +1349,16 @@ def run_analysis(  # noqa: C901
     install_probe_mode: bool = False,
     registry_key: str = '',
 ) -> bool:
-    """Execute full analysis for one package version.
+    """Execute the full security analysis pipeline for one package version.
+
+    Runs download, manifest parsing, adversarial and dangerous-code scans,
+    source clone and comparison, registry/badge/scorecard lookups, diff
+    computation (UPDATE mode), optional deeper analysis, and writes all
+    output files to work/. Writes signals.txt and signals.json for the
+    sub-agent to read.
+
+    old_ver: previous version string (UPDATE mode) or 'none' (NEW/CURRENT).
+    diff_mode: True when old_ver is a real version and a diff should be computed.
 
     Returns True if the adversarial gate triggered and analysis was aborted,
     False on normal completion.
@@ -1783,7 +1787,7 @@ def run_analysis(  # noqa: C901
     # 13. Dependencies
     print()
     print('--- Dependency analysis ---')
-    old_dep_lines = _get_old_dep_lines(analyzer, pkgname, old_ver, old_result) if diff_mode else []
+    old_dep_lines = analyzer.get_old_dep_lines(pkgname, old_ver, old_result) if diff_mode else []
     dep_result = analyzer.check_lockfile(manifest.runtime_dep_lines, old_dep_lines, root)
     dep_registry = {d: analyzer.check_dep_registry(d) for d in dep_result.get('not_in_lockfile', [])}
     with Printer(work / 'new-deps.txt') as _p_deps, \
@@ -2190,10 +2194,17 @@ def main() -> None:  # noqa: C901 (complexity acceptable for CLI validation)
             errors.append('PKGNAME must not be empty.')
         elif len(pkgname) > 200:
             errors.append(f'PKGNAME is suspiciously long ({len(pkgname)} chars): {pkgname[:40]!r}...')
-        elif '/' in pkgname or ' ' in pkgname:
+        elif ' ' in pkgname:
             errors.append(
-                f'PKGNAME contains an illegal character: {pkgname!r}\n'
-                '  Package names must not contain spaces or slashes.'
+                f'PKGNAME contains a space: {pkgname!r}\n'
+                '  Package names must not contain spaces.'
+            )
+        elif '/' in pkgname and registry != 'npm':
+            # npm scoped packages (@scope/name) legitimately contain '/'.
+            # Other ecosystems do not use slashes in package names.
+            errors.append(
+                f'PKGNAME contains a slash: {pkgname!r}\n'
+                '  Package names must not contain slashes (except npm scoped packages).'
             )
 
         # Sanity-check new version
@@ -2428,7 +2439,6 @@ def main() -> None:  # noqa: C901 (complexity acceptable for CLI validation)
 
     # --install-probe requires --basic artifacts; auto-enable if missing
     if do_install_probe and not do_basic:
-        signals_file = root / 'temp' / 'dep-review' / shared.safe_dir_component(pkgname, new_ver) / 'signals.txt'
         if not signals_file.exists():
             print(
                 f'NOTE: --install-probe requested but no prior --basic run found for {pkgname} {new_ver}.\n'
