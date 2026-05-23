@@ -236,15 +236,18 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
         gem_file = work / f'{pkgname}-{version}.gem'
         sha256 = ''
 
+        # Guard: prevent package names beginning with '-'. We do this for
+        # defense-in-depth because `gem` doesn't accept `--` usefully.
+        if pkgname.startswith('-'):
+            failures.append(f'SECURITY_VIOLATION:gem-name-starts-with-dash({pkgname!r})')
+            return {}
+
         # Do NOT use '--' before the gem name here.
         # The gem CLI's GemRunner uses '--' as a build-args separator
         # (GemRunner#extract_build_args slices everything from '--'
         # onwards out of the args array before the subcommand sees them).
         # Passing '--' would silently discard the gem name, producing
         # "Please specify at least one gem name" rather than a useful error.
-        # Injection defense is provided by the leading-'-' check in
-        # dep_review.py (which rejects names starting with '-')
-        # and by _DEP_NAME_RE in dep_session.py.
         fetch_cmd = ['gem', 'fetch', '-v', version]
         if self.registry_url:
             fetch_cmd += ['--source', self.registry_url]
@@ -669,6 +672,20 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
         license_from_registry: list[str] = []
         ver_info_lines: list[str] = []
 
+        # Guard: gem does not accept '--' as end-of-options (GemRunner strips it).
+        # Reject names starting with '-' so they cannot be misread as flags.
+        if pkgname.startswith('-'):
+            return {
+                'mfa_status': mfa_status,
+                'age_years_float': age_years_float,
+                'last_release_days': last_release_days,
+                'version_published_days': version_published_days,
+                'owner_count_int': owner_count_int,
+                'version_stability': version_stability,
+                'license_from_registry': license_from_registry,
+                'ver_info_lines': ver_info_lines,
+            }
+
         p(f'=== Provenance: {pkgname} {version} ===')
         p('')
         rc_gi, gi_out, _ = shared.run_cmd(['gem', 'info', '-r', pkgname])
@@ -952,6 +969,11 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
         Writes: transitive-deps.txt (via p), raw-transitive-deps.txt.
         Returns dict with keys: total (int), not_in_lockfile (list[str]).
         """
+        # Guard: gem does not accept '--' as end-of-options (GemRunner strips it).
+        # Reject names starting with '-' so they cannot be misread as flags.
+        if pkgname.startswith('-'):
+            return shared.write_transitive_deps(work, pkgname, version, 0, [], p)
+
         rc_dep, dep_out, _ = shared.run_cmd(
             ['gem', 'dependency', '-v', version, '--remote', '--pipe',
              pkgname],

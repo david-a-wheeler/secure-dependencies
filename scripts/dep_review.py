@@ -2194,8 +2194,8 @@ def main() -> None:  # noqa: C901 (complexity acceptable for CLI validation)
             errors.append('PKGNAME must not be empty.')
         elif pkgname.startswith('-'):
             # The gem CLI uses '--' as a build-args separator, not end-of-options,
-            # so we cannot use '--' before the gem name. This guard ensures names
-            # starting with '-' are rejected before reaching any ecosystem CLI.
+            # so we cannot use '--' before the gem name. Reject early here;
+            # analyzer_ruby.py also guards at the call site.
             errors.append(
                 f'PKGNAME starts with a dash: {pkgname!r}\n'
                 '  Package names must not start with \'-\'.'
