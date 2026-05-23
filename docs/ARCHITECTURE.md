@@ -232,6 +232,33 @@ included in the SKILL.md prompt provided to the sub-agent. The orchestrator
 the correct token. This prevents a compromised package from injecting a fake
 `NEXT_ACTION: APPROVE` that the orchestrator would accept.
 
+## Tier 2 partial exposure to package-derived data
+
+Tier 2 cannot be completely shielded from package-derived content:
+it must read `signals.txt` and related structured files to do its job,
+and those files include values drawn from the package (name, version,
+source URL, pattern-match results, etc.).
+
+Several measures limit the risk from this unavoidable exposure:
+
+- **Character-level sanitization**: all values pass through `Printer`
+  before being written to any file tier 2 reads, stripping bidi controls,
+  zero-width characters, terminal escape sequences, and other non-printable
+  characters used in "Trojan Source" and similar attacks.
+- **Structured field labels**: each piece of package-derived data appears
+  after an explicit label (`PACKAGE:`, `VERSION:`, `SOURCE_URL:`, etc.),
+  providing framing that makes it harder for a field value to be
+  mistaken for an instruction.
+- **Adversarial gate**: before tier 2 reads anything, the deterministic
+  scripts scan for explicit prompt-injection patterns and known campaign
+  fingerprints; a match aborts the analysis immediately (see above).
+- **No raw content**: tier 2 never reads raw source files, diffs, or file
+  listings; only summarized signals and validated tier 3 JSON reach it.
+
+A sufficiently crafted package name or description could still attempt
+injection through a structured field. The field-label framing reduces this
+risk; the adversarial gate is the primary defense against explicit attempts.
+
 ## "Download before install" principle
 
 A core workflow constraint: the package is always downloaded and analyzed
