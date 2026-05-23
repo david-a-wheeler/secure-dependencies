@@ -64,207 +64,6 @@ _RE_UV_GIT_SOURCE = re.compile(
 
 
 # ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-def _find_dist_info(unpacked_dir: Path, pkgname: str) -> Path | None:
-    """Find the .dist-info directory inside an unpacked wheel.
-
-    Normalizes pkgname (PEP 427: hyphens become underscores, case-insensitive).
-
-    >>> # Returns None for a nonexistent directory
-    """
-    if not unpacked_dir.is_dir():
-        return None
-    norm = _NORM_RE.sub('_', pkgname).lower()
-    first_dist_info: Path | None = None
-    for candidate in unpacked_dir.iterdir():
-        if candidate.is_dir() and candidate.name.endswith('.dist-info'):
-            if first_dist_info is None:
-                first_dist_info = candidate
-            cname = _NORM_RE.sub('_', candidate.name.split('-')[0]).lower()
-            if cname == norm:
-                return candidate
-    return first_dist_info
-
-
-def _parse_metadata(metadata_text: str) -> dict:
-    """Parse an RFC 822-style METADATA or PKG-INFO file.
-
-    Returns a dict where multi-valued headers (like Requires-Dist) are lists
-    and single-valued headers are strings.
-
-    >>> m = _parse_metadata('Name: foo\\nVersion: 1.0\\nRequires-Dist: bar\\nRequires-Dist: baz\\n')
-    >>> m['Name']
-    'foo'
-    >>> m['Requires-Dist']
-    ['bar', 'baz']
-    """
-    result: dict[str, str | list[str]] = {}
-    multi_keys = {
-        'Requires-Dist', 'Classifier', 'Project-URL', 'Provides-Extra',
-        'Requires-External', 'Provides', 'Obsoletes', 'Requires',
-    }
-    for line in metadata_text.splitlines():
-        if ':' not in line:
-            continue
-        # Stop at the long description separator
-        if line.strip() == 'UNKNOWN' or line.startswith('        '):
-            continue
-        key, _, value = line.partition(':')
-        key = key.strip()
-        value = value.strip()
-        if not key or ' ' in key:
-            continue
-        if key in multi_keys:
-            lst = result.setdefault(key, [])
-            if isinstance(lst, list):
-                lst.append(value)
-            else:
-                result[key] = [str(lst), value]
-        else:
-            if key not in result:
-                result[key] = value
-    return result
-
-
-def _extract_source_url_from_meta(meta: dict) -> str:
-    """Extract source/homepage URL from parsed METADATA dict.
-
-    Tries Project-URL: Source, Repository, Homepage in that order,
-    then falls back to the Home-page header.
-
-    >>> _extract_source_url_from_meta({'Project-URL': ['Source, https://github.com/foo/bar']})
-    'https://github.com/foo/bar'
-    >>> _extract_source_url_from_meta({'Home-page': 'https://example.com'})
-    'https://example.com'
-    >>> _extract_source_url_from_meta({})
-    ''
-    """
-    project_urls = meta.get('Project-URL', [])
-    if isinstance(project_urls, str):
-        project_urls = [project_urls]
-    # Priority: Source > Repository > Code > Homepage
-    order = ('source', 'repository', 'code', 'homepage')
-    by_label: dict[str, str] = {}
-    for entry in project_urls:
-        if ',' in entry:
-            label, _, url = entry.partition(',')
-            by_label[label.strip().lower()] = url.strip()
-    for label in order:
-        if label in by_label:
-            return by_label[label]
-    # Also check direct Project-URL entries
-    hp = meta.get('Home-page', '') or meta.get('home-page', '')
-    if isinstance(hp, list):
-        hp = hp[0] if hp else ''
-    return str(hp).strip()
-
-
-def _extract_license_from_meta(meta: dict) -> str:
-    """Extract raw license string from METADATA dict.
-
-    Returns the License header value; falls back to extracting from
-    Classifier: License :: OSI Approved :: <SPDX_ID> entries.
-
-    >>> _extract_license_from_meta({'License': 'MIT'})
-    'MIT'
-    >>> _extract_license_from_meta({'Classifier': ['License :: OSI Approved :: MIT License']})
-    'MIT License'
-    >>> _extract_license_from_meta({})
-    ''
-    """
-    lic = meta.get('License', '') or ''
-    if isinstance(lic, list):
-        lic = lic[0] if lic else ''
-    lic = str(lic).strip()
-    if lic and lic.upper() != 'UNKNOWN':
-        return lic
-    classifiers = meta.get('Classifier', [])
-    if isinstance(classifiers, str):
-        classifiers = [classifiers]
-    for clf in classifiers:
-        m = re.search(r'License\s*::\s*OSI Approved\s*::\s*(.+)', clf)
-        if m:
-            return m.group(1).strip()
-        m2 = re.search(r'License\s*::\s*(.+)', clf)
-        if m2:
-            return m2.group(1).strip()
-    return ''
-
-
-def _unpack_pkg(
-    pkg_file: Path,
-    target_dir: Path,
-    failures: list[str],
-    failure_key: str,
-) -> str:
-    """Unpack a wheel (.whl) or sdist (.tar.gz/.zip) into target_dir.
-
-    Returns a dist_type string: 'wheel', 'sdist', 'sdist-zip', or 'unknown'.
-    Uses Python stdlib only (tarfile; zip via shared.extract_zip_securely).
-    """
-    name = pkg_file.name
-    try:
-        if pkg_file.suffix == '.whl' or name.endswith('.zip'):
-            # extract_zip_securely enforces size limits, filters symlinks, and
-            # checks paths during extraction (no post-extraction race window).
-            shared.extract_zip_securely(pkg_file, target_dir)
-            return 'wheel' if pkg_file.suffix == '.whl' else 'sdist-zip'
-        if name.endswith(('.tar.gz', '.tgz', '.tar.bz2', '.tar.xz')):
-            with tarfile.open(str(pkg_file), 'r:*') as tf:
-                members = []
-                for m in tf.getmembers():
-                    # Strip top-level directory (typically pkgname-version/)
-                    parts = Path(m.name).parts
-                    if len(parts) > 1:
-                        m.name = '/'.join(parts[1:])
-                        # Guard against path traversal
-                        if '..' in Path(m.name).parts:
-                            continue
-                        members.append(m)
-                shared.tarfile_extractall_safe(tf, target_dir, members)
-            # tarfile_extractall_safe already filters symlinks; belt-and-suspenders.
-            shared.remove_symlinks(target_dir)
-            return 'sdist'
-    except shared.ArchiveSecurityError as exc:
-        # An ArchiveSecurityError (size limit, file count, path traversal, or
-        # symlink in a zip) is a strong indicator of a malicious package: benign
-        # packages do not contain zip bombs or path-traversal payloads.
-        failures.append(f'SECURITY_VIOLATION:{failure_key}: {exc}')
-    except Exception as exc:
-        failures.append(f'{failure_key}: {exc}')
-    return 'unknown'
-
-
-def _get_pkg_file(directory: Path, pkgname: str, version: str) -> Path | None:
-    """Find the downloaded package file (wheel preferred, then sdist)."""
-    # Wheels use normalized names (hyphens to underscores, case-insensitive)
-    norm = _NORM_RE.sub('_',pkgname)
-    ver_norm = _NORM_RE.sub('_',version)
-    # Search in order of preference: wheels first, then source dists
-    for pattern in ('*.whl', '*.tar.gz', '*.tar.bz2', '*.tar.xz', '*.zip'):
-        candidates = list(directory.glob(pattern))
-        if len(candidates) == 1:
-            return candidates[0]
-        # Multiple candidates: pick one matching name+version
-        for c in candidates:
-            cname = _NORM_RE.sub('_',c.stem.split('-')[0]).lower()
-            if cname == norm.lower():
-                return c
-        if candidates:
-            return candidates[0]
-    return None
-
-
-# Size thresholds for Python install scripts (setup.py).
-# Even numpy's historically large setup.py was under 1000 lines;
-# 40 KB or 1000 lines is extremely unusual for any legitimate package.
-_SETUP_PY_WARN_BYTES = 40_000
-_SETUP_PY_WARN_LINES = 1_000
-
-
-# ---------------------------------------------------------------------------
 # Public API: called by dep_review.py
 # ---------------------------------------------------------------------------
 
@@ -396,6 +195,193 @@ class PythonAnalyzer(shared.EcosystemAnalyzer):
          r'^\+[^\n]{0,500}pickle\.(?:load|loads|Unpickler)\b'),
     ]
 
+    # Size thresholds for setup.py.
+    # Even numpy's historically large setup.py was under 1000 lines;
+    # 40 KB or 1000 lines is extremely unusual for any legitimate package.
+    SETUP_PY_WARN_BYTES: int = 40_000
+    SETUP_PY_WARN_LINES: int = 1_000
+
+    def extract_source_url(self, raw_data: object) -> str:
+        """Extract source URL from a parsed METADATA dict.
+
+        Tries Project-URL: Source, Repository, Homepage in that order,
+        then falls back to the Home-page header.
+
+        >>> PythonAnalyzer(None).extract_source_url({'Project-URL': ['Source, https://github.com/foo/bar']})
+        'https://github.com/foo/bar'
+        >>> PythonAnalyzer(None).extract_source_url({'Home-page': 'https://example.com'})
+        'https://example.com'
+        >>> PythonAnalyzer(None).extract_source_url({})
+        ''
+        """
+        meta = raw_data if isinstance(raw_data, dict) else {}
+        project_urls = meta.get('Project-URL', [])
+        if isinstance(project_urls, str):
+            project_urls = [project_urls]
+        order = ('source', 'repository', 'code', 'homepage')
+        by_label: dict[str, str] = {}
+        for entry in project_urls:
+            if ',' in entry:
+                label, _, url = entry.partition(',')
+                by_label[label.strip().lower()] = url.strip()
+        for label in order:
+            if label in by_label:
+                return by_label[label]
+        hp = meta.get('Home-page', '') or meta.get('home-page', '')
+        if isinstance(hp, list):
+            hp = hp[0] if hp else ''
+        return str(hp).strip()
+
+    def extract_license(self, raw_data: object) -> str:
+        """Extract raw license string from a parsed METADATA dict.
+
+        Returns the License header value; falls back to Classifier entries.
+
+        >>> PythonAnalyzer(None).extract_license({'License': 'MIT'})
+        'MIT'
+        >>> PythonAnalyzer(None).extract_license({'Classifier': ['License :: OSI Approved :: MIT License']})
+        'MIT License'
+        >>> PythonAnalyzer(None).extract_license({})
+        ''
+        """
+        meta = raw_data if isinstance(raw_data, dict) else {}
+        lic = meta.get('License', '') or ''
+        if isinstance(lic, list):
+            lic = lic[0] if lic else ''
+        lic = str(lic).strip()
+        if lic and lic.upper() != 'UNKNOWN':
+            return lic
+        classifiers = meta.get('Classifier', [])
+        if isinstance(classifiers, str):
+            classifiers = [classifiers]
+        for clf in classifiers:
+            m = re.search(r'License\s*::\s*OSI Approved\s*::\s*(.+)', clf)
+            if m:
+                return m.group(1).strip()
+            m2 = re.search(r'License\s*::\s*(.+)', clf)
+            if m2:
+                return m2.group(1).strip()
+        return ''
+
+    def _find_dist_info(
+        self, unpacked_dir: Path, pkgname: str,
+    ) -> Path | None:
+        """Find the .dist-info directory inside an unpacked wheel.
+
+        Normalizes pkgname (PEP 427: hyphens become underscores,
+        case-insensitive).
+        """
+        if not unpacked_dir.is_dir():
+            return None
+        norm = _NORM_RE.sub('_', pkgname).lower()
+        first_dist_info: Path | None = None
+        for candidate in unpacked_dir.iterdir():
+            if candidate.is_dir() and candidate.name.endswith('.dist-info'):
+                if first_dist_info is None:
+                    first_dist_info = candidate
+                cname = _NORM_RE.sub('_', candidate.name.split('-')[0]).lower()
+                if cname == norm:
+                    return candidate
+        return first_dist_info
+
+    def _parse_metadata(self, metadata_text: str) -> dict:
+        """Parse an RFC 822-style METADATA or PKG-INFO file.
+
+        Returns a dict where multi-valued headers (like Requires-Dist) are
+        lists and single-valued headers are strings.
+
+        >>> m = PythonAnalyzer(None)._parse_metadata('Name: foo\\nVersion: 1.0\\nRequires-Dist: bar\\nRequires-Dist: baz\\n')
+        >>> m['Name']
+        'foo'
+        >>> m['Requires-Dist']
+        ['bar', 'baz']
+        """
+        result: dict[str, str | list[str]] = {}
+        multi_keys = {
+            'Requires-Dist', 'Classifier', 'Project-URL', 'Provides-Extra',
+            'Requires-External', 'Provides', 'Obsoletes', 'Requires',
+        }
+        for line in metadata_text.splitlines():
+            if ':' not in line:
+                continue
+            if line.strip() == 'UNKNOWN' or line.startswith('        '):
+                continue
+            key, _, value = line.partition(':')
+            key = key.strip()
+            value = value.strip()
+            if not key or ' ' in key:
+                continue
+            if key in multi_keys:
+                lst = result.setdefault(key, [])
+                if isinstance(lst, list):
+                    lst.append(value)
+                else:
+                    result[key] = [str(lst), value]
+            else:
+                if key not in result:
+                    result[key] = value
+        return result
+
+    def _unpack_pkg(
+        self,
+        pkg_file: Path,
+        target_dir: Path,
+        failures: list[str],
+        failure_key: str,
+    ) -> str:
+        """Unpack a wheel (.whl) or sdist (.tar.gz/.zip) into target_dir.
+
+        Returns a dist_type string: 'wheel', 'sdist', 'sdist-zip', or
+        'unknown'. Uses Python stdlib only (tarfile; zip via
+        shared.extract_zip_securely).
+        """
+        name = pkg_file.name
+        try:
+            if pkg_file.suffix == '.whl' or name.endswith('.zip'):
+                # extract_zip_securely enforces size limits, filters symlinks,
+                # and checks paths during extraction (no race window).
+                shared.extract_zip_securely(pkg_file, target_dir)
+                return 'wheel' if pkg_file.suffix == '.whl' else 'sdist-zip'
+            if name.endswith(('.tar.gz', '.tgz', '.tar.bz2', '.tar.xz')):
+                with tarfile.open(str(pkg_file), 'r:*') as tf:
+                    members = []
+                    for m in tf.getmembers():
+                        parts = Path(m.name).parts
+                        if len(parts) > 1:
+                            m.name = '/'.join(parts[1:])
+                            if '..' in Path(m.name).parts:
+                                continue
+                            members.append(m)
+                    shared.tarfile_extractall_safe(tf, target_dir, members)
+                # tarfile_extractall_safe already filters symlinks;
+                # belt-and-suspenders.
+                shared.remove_symlinks(target_dir)
+                return 'sdist'
+        except shared.ArchiveSecurityError as exc:
+            # An ArchiveSecurityError (size limit, file count, path traversal,
+            # or symlink in a zip) is a strong indicator of a malicious package.
+            failures.append(f'SECURITY_VIOLATION:{failure_key}: {exc}')
+        except Exception as exc:
+            failures.append(f'{failure_key}: {exc}')
+        return 'unknown'
+
+    def _get_pkg_file(
+        self, directory: Path, pkgname: str, version: str,
+    ) -> Path | None:
+        """Find the downloaded package file (wheel preferred, then sdist)."""
+        norm = _NORM_RE.sub('_', pkgname)
+        for pattern in ('*.whl', '*.tar.gz', '*.tar.bz2', '*.tar.xz', '*.zip'):
+            candidates = list(directory.glob(pattern))
+            if len(candidates) == 1:
+                return candidates[0]
+            for c in candidates:
+                cname = _NORM_RE.sub('_', c.stem.split('-')[0]).lower()
+                if cname == norm.lower():
+                    return c
+            if candidates:
+                return candidates[0]
+        return None
+
     def get_lockfile_path(self, project_root: Path) -> Path:
         """Return the path to the first existing Python lockfile.
 
@@ -438,7 +424,7 @@ class PythonAnalyzer(shared.EcosystemAnalyzer):
 
         rc, _out, err = shared.run_cmd(dl_cmd, cwd=work, timeout=180)
 
-        pkg_file = _get_pkg_file(work, pkgname, version)
+        pkg_file = self._get_pkg_file(work, pkgname, version)
         sha256 = ''
         dist_type = 'unknown'
 
@@ -447,7 +433,7 @@ class PythonAnalyzer(shared.EcosystemAnalyzer):
             (work / 'package-hash.txt').write_text(
                 f'{sha256}  {pkg_file.name}\n', encoding='utf-8'
             )
-            dist_type = _unpack_pkg(pkg_file, unpacked_dir, failures, 'unpack-new')
+            dist_type = self._unpack_pkg(pkg_file, unpacked_dir, failures, 'unpack-new')
             if dist_type == 'unknown' and 'unpack-new' not in ' '.join(failures):
                 failures.append('unpack-new')
         else:
@@ -493,7 +479,7 @@ class PythonAnalyzer(shared.EcosystemAnalyzer):
         runtime_dep_lines: list[str] = []
 
         # Locate METADATA (wheel) or PKG-INFO (sdist)
-        dist_info = _find_dist_info(unpacked_dir, pkgname) if unpacked_dir.is_dir() else None
+        dist_info = self._find_dist_info(unpacked_dir, pkgname) if unpacked_dir.is_dir() else None
         metadata_file: Path | None = None
         meta: dict = {}
 
@@ -514,7 +500,7 @@ class PythonAnalyzer(shared.EcosystemAnalyzer):
             dest_meta = work / 'pyproject-metadata.txt'
             if metadata_file != dest_meta:
                 dest_meta.write_text(manifest_text, encoding='utf-8', errors='replace')
-            meta = _parse_metadata(manifest_text)
+            meta = self._parse_metadata(manifest_text)
         else:
             failures.append('metadata-missing')
 
@@ -590,7 +576,7 @@ class PythonAnalyzer(shared.EcosystemAnalyzer):
                 ))
                 _sp_size_warn = shared.report_install_script_size(
                     sp_text, 'setup.py', p,
-                    _SETUP_PY_WARN_BYTES, _SETUP_PY_WARN_LINES,
+                    self.SETUP_PY_WARN_BYTES, self.SETUP_PY_WARN_LINES,
                 )
                 if _sp_size_warn:
                     install_cmd_warnings.append(_sp_size_warn)
@@ -650,7 +636,7 @@ class PythonAnalyzer(shared.EcosystemAnalyzer):
             p(f'REQUIRES_PYTHON: {shared.sanitize_line(py_req)}')
 
         # Homepage / source URL
-        source_url = _extract_source_url_from_meta(meta)
+        source_url = self.extract_source_url(meta)
         hp_display = shared.sanitize_line(source_url) if source_url else '(not found)'
         p('')
         p(f'HOMEPAGE: {hp_display}')
@@ -662,7 +648,7 @@ class PythonAnalyzer(shared.EcosystemAnalyzer):
         p(f'AUTHOR: {shared.sanitize_line(str(author)[:200])}')
 
         # License
-        manifest_license_raw = _extract_license_from_meta(meta)
+        manifest_license_raw = self.extract_license(meta)
         p('')
         p(f'LICENSE_DECLARED: {shared.sanitize_line(manifest_license_raw) or "(not declared)"}')
 
@@ -780,7 +766,7 @@ class PythonAnalyzer(shared.EcosystemAnalyzer):
                     break
 
         if pkg_file_cached:
-            dist_type = _unpack_pkg(pkg_file_cached, old_dir, failures, 'unpack-old')
+            dist_type = self._unpack_pkg(pkg_file_cached, old_dir, failures, 'unpack-old')
             if dist_type != 'unknown':
                 ok = True
                 source = 'pip-cache'
@@ -797,9 +783,9 @@ class PythonAnalyzer(shared.EcosystemAnalyzer):
             dl_cmd += ['--', f'{pkgname}=={old_ver}']
             rc_dl, _, _ = shared.run_cmd(dl_cmd, cwd=raw_old, timeout=180)
             if rc_dl == 0:
-                pkg_file = _get_pkg_file(raw_old, pkgname, old_ver)
+                pkg_file = self._get_pkg_file(raw_old, pkgname, old_ver)
                 if pkg_file and pkg_file.is_file():
-                    dist_type = _unpack_pkg(pkg_file, old_dir, failures, 'unpack-old')
+                    dist_type = self._unpack_pkg(pkg_file, old_dir, failures, 'unpack-old')
                     if dist_type != 'unknown':
                         ok = True
                         source = 'fetched'
@@ -832,7 +818,7 @@ class PythonAnalyzer(shared.EcosystemAnalyzer):
         if not old_unpacked or not Path(old_unpacked).is_dir():
             return []
         old_unpacked = Path(old_unpacked)
-        dist_info = _find_dist_info(old_unpacked, pkgname)
+        dist_info = self._find_dist_info(old_unpacked, pkgname)
         metadata_file = None
         if dist_info and (dist_info / 'METADATA').is_file():
             metadata_file = dist_info / 'METADATA'
@@ -840,7 +826,7 @@ class PythonAnalyzer(shared.EcosystemAnalyzer):
             metadata_file = old_unpacked / 'PKG-INFO'
         if not metadata_file:
             return []
-        meta = _parse_metadata(metadata_file.read_text(encoding='utf-8', errors='replace'))
+        meta = self._parse_metadata(metadata_file.read_text(encoding='utf-8', errors='replace'))
         requires = meta.get('Requires-Dist', [])
         if isinstance(requires, str):
             requires = [requires]
@@ -859,7 +845,7 @@ class PythonAnalyzer(shared.EcosystemAnalyzer):
         if not old_unpacked_dir or not Path(old_unpacked_dir).is_dir():
             return None
         old_unpacked_dir = Path(old_unpacked_dir)
-        dist_info = _find_dist_info(old_unpacked_dir, pkgname)
+        dist_info = self._find_dist_info(old_unpacked_dir, pkgname)
         metadata_file = None
         if dist_info and (dist_info / 'METADATA').is_file():
             metadata_file = dist_info / 'METADATA'
@@ -867,8 +853,9 @@ class PythonAnalyzer(shared.EcosystemAnalyzer):
             metadata_file = old_unpacked_dir / 'PKG-INFO'
         if not metadata_file:
             return None
-        meta = _parse_metadata(metadata_file.read_text(encoding='utf-8', errors='replace'))
-        return _extract_license_from_meta(meta) or None
+        meta = self._parse_metadata(
+            metadata_file.read_text(encoding='utf-8', errors='replace'))
+        return self.extract_license(meta) or None
 
     def fetch_all_registry_data(
         self,
@@ -1645,7 +1632,7 @@ class PythonAnalyzer(shared.EcosystemAnalyzer):
         # Hashes differ: unpack both and compare contents
         built_unpacked = work / 'raw-built-unpacked'
         built_unpacked.mkdir(exist_ok=True)
-        _unpack_pkg(built_whl, built_unpacked, [], 'repro-unpack')
+        self._unpack_pkg(built_whl, built_unpacked, [], 'repro-unpack')
 
         dist_unpacked = work / 'unpacked'
         if not dist_unpacked.is_dir():
