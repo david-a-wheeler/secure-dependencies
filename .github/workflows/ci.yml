@@ -35,7 +35,7 @@ jobs:
           cache: "pip"
           cache-dependency-path: .github/workflows/ci.yml
       - name: Install pyright
-        run: pip install pyright==1.1.408
+        run: pip install pyright==1.1.409
       - name: Run type check
         run: make typecheck
 
