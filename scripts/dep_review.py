@@ -36,7 +36,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 import analysis_shared as shared
-from analysis_shared import Printer
+from analysis_shared import PackageManifest, Printer
 
 
 # ---------------------------------------------------------------------------
@@ -170,7 +170,7 @@ def write_signals(  # noqa: C901
     diff_mode: bool,
     deeper: bool,
     sha256: str,
-    manifest: dict,
+    manifest: PackageManifest,
     scan_details: list[tuple[str, int]],
     total_matches: int,
     diff_scan_details: list[tuple[str, int]],
@@ -227,11 +227,11 @@ def write_signals(  # noqa: C901
         risk_parts.append(f'MANY_EXTRA_FILES({extra_files})')
     if binary_files > 0:
         risk_parts.append(f'EMBEDDED_EXECUTABLES({binary_files})')
-    if manifest.get('extensions') == 'YES':
+    if manifest.extensions == 'YES':
         risk_parts.append('NATIVE_EXTENSION')
-    if manifest.get('post_install_msg') == 'YES':
+    if manifest.post_install_msg == 'YES':
         risk_parts.append('POST_INSTALL_MESSAGE')
-    _install_cmd_warns = manifest.get('install_cmd_warnings', [])
+    _install_cmd_warns = manifest.install_cmd_warnings
     if _install_cmd_warns:
         risk_parts.append(f'INSTALL_CMD_ATTACK({len(_install_cmd_warns)})')
     if diff_scan_matches > 0:
@@ -404,17 +404,17 @@ def write_signals(  # noqa: C901
             'extra_files',
             f'{extra_files}  [unusually high; threshold is 5; review extra-in-package.txt]',
         ))
-    if manifest.get('extensions') == 'YES':
+    if manifest.extensions == 'YES':
         _concerns.append((
             'native_extensions',
             'YES  [compiled code runs at install time; review build scripts in source for malicious steps]',
         ))
-    if manifest.get('executables') == 'YES':
+    if manifest.executables == 'YES':
         _concerns.append((
             'executables',
             'YES  [new executables added to PATH; risk of persistence or path hijacking]',
         ))
-    for _icw in manifest.get('install_cmd_warnings', []):
+    for _icw in manifest.install_cmd_warnings:
         _icw_sig, _, _icw_rest = _icw.partition(':')
         _icw_hook = _icw_rest or 'install script'
         if _icw_sig == 'INSTALL_SCRIPT_LARGE':
@@ -705,11 +705,10 @@ def write_signals(  # noqa: C901
     p(sec('DANGEROUS CODE PATTERNS'))
     # Use ecosystem-specific description if the analyzer module provides one,
     # otherwise fall back to a generic summary.
-    dangerous_what = manifest.get(
-        '_dangerous_what',
+    dangerous_what = manifest.dangerous_what or (
         'eval/exec variants, shell execution, obfuscated execution, unsafe deserialization, '
         'network calls at import/load scope, credential env-var access, home-dir writes, '
-        'dynamic dispatch on external input, install-time hooks',
+        'dynamic dispatch on external input, install-time hooks'
     )
     p(f'Scanned for: {dangerous_what}')
     todo_labels_set = {label for label, _ in shared.TODO_PATTERNS}
@@ -847,28 +846,25 @@ def write_signals(  # noqa: C901
 
     # ---- MANIFEST / INSTALL HOOKS ----
     p(sec('MANIFEST / INSTALL HOOKS'))
-    ext = manifest.get('extensions', 'NO')
+    ext = manifest.extensions
     p(f'Native extensions (compile at install): {ext}')
     if ext == 'YES':
         p('Context: Compiled code runs during package installation. The build')
         p('  process can execute arbitrary code. Verify build scripts in the source.')
-    exe = manifest.get('executables', 'NO')
+    exe = manifest.executables
     p(f'Executables added to PATH: {exe}')
     if exe == 'YES':
-        p(f'  Files: {manifest.get("executables_list", "(see manifest-analysis.txt)")}')
-    p(f'Post-install message: {manifest.get("post_install_msg", "NO")}')
-    _build_hooks = manifest.get('has_build_hooks', 'NO')
-    p(f'Build hooks / install-time code: {_build_hooks}')
-    if manifest.get('has_install_scripts') == 'YES':
+        p(f'  Files: {manifest.executables_list or "(see manifest-analysis.txt)"}')
+    p(f'Post-install message: {manifest.post_install_msg}')
+    p(f'Build hooks / install-time code: {manifest.has_build_hooks}')
+    if manifest.has_install_scripts == 'YES':
         p('Install-time scripts extracted: YES  [READ install-scripts.txt]')
-        # Use ecosystem-specific context if provided; fall back to a generic message
-        for ctx_line in manifest.get('install_hook_context', [
+        for ctx_line in manifest.install_hook_context or [
             '  Context: code was found that executes during package installation.',
             '  Review install-scripts.txt for malicious or unexpected behavior.',
-        ]):
+        ]:
             p(ctx_line)
-    _manifest_detail = manifest.get('manifest_extra_file', '')
-    _detail_suffix = f', {_manifest_detail}' if _manifest_detail else ''
+    _detail_suffix = f', {manifest.manifest_extra_file}' if manifest.manifest_extra_file else ''
     p(f'Details: manifest-analysis.txt{_detail_suffix}')
 
     # ---- DEPENDENCIES ----
@@ -1072,8 +1068,10 @@ def write_signals(  # noqa: C901
     # ---- FILES FOR FURTHER REVIEW ----
     p(sec('FILES FOR FURTHER REVIEW'))
     p('Always useful:')
-    _extra_manifest = manifest.get('manifest_extra_file', '')
-    _manifest_files = f'manifest-analysis.txt, {_extra_manifest}' if _extra_manifest else 'manifest-analysis.txt'
+    _manifest_files = (
+        f'manifest-analysis.txt, {manifest.manifest_extra_file}'
+        if manifest.manifest_extra_file else 'manifest-analysis.txt'
+    )
     p(f'  {_manifest_files}')
     p('  license.txt, project-health.txt')
     p('  clone-status.txt, source-url.txt')
@@ -1386,21 +1384,21 @@ def run_analysis(  # noqa: C901
     with Printer(work / 'manifest-analysis.txt') as _p_manifest:
         manifest = analyzer.read_manifest(pkgname, new_ver, unpacked_dir, work, failures, _p_manifest)
     # Inject ecosystem-level metadata into manifest for write_signals
-    if '_dangerous_what' not in manifest:
-        manifest['_dangerous_what'] = analyzer.dangerous_what()
-    source_url = manifest.get('source_url', '')
+    if not manifest.dangerous_what:
+        manifest.dangerous_what = analyzer.dangerous_what()
+    source_url = manifest.source_url
     if not source_url:
         _get_src = getattr(analyzer, 'get_source_url_from_registry', None)
         if _get_src:
             source_url = _get_src(pkgname) or ''
             if source_url:
-                manifest['source_url'] = source_url
+                manifest.source_url = source_url
                 print(f'  Source URL (registry API fallback): {shared.sanitize_line(source_url)}')
-    print(f'  Extensions: {manifest.get("extensions", "?")}')
-    print(f'  Executables: {manifest.get("executables", "?")}')
-    print(f'  Post-install message: {manifest.get("post_install_msg", "?")}')
-    print(f'  Build hooks / install-time code: {manifest.get("has_build_hooks", "?")}')
-    print(f'  License (manifest): {shared.sanitize_line(str(manifest.get("manifest_license_raw", ""))) or "(not declared)"}')
+    print(f'  Extensions: {manifest.extensions}')
+    print(f'  Executables: {manifest.executables}')
+    print(f'  Post-install message: {manifest.post_install_msg}')
+    print(f'  Build hooks / install-time code: {manifest.has_build_hooks}')
+    print(f'  License (manifest): {shared.sanitize_line(manifest.manifest_license_raw) or "(not declared)"}')
 
     # 3. Scans
     print()
@@ -1753,7 +1751,7 @@ def run_analysis(  # noqa: C901
     print()
     print('--- Dependency analysis ---')
     old_dep_lines = _get_old_dep_lines(analyzer, pkgname, old_ver, old_result) if diff_mode else []
-    dep_result = analyzer.check_lockfile(manifest.get('runtime_dep_lines', []), old_dep_lines, root)
+    dep_result = analyzer.check_lockfile(manifest.runtime_dep_lines, old_dep_lines, root)
     dep_registry = {d: analyzer.check_dep_registry(d) for d in dep_result.get('not_in_lockfile', [])}
     with Printer(work / 'new-deps.txt') as _p_deps, \
          Printer(work / 'dep-lockfile-check.txt') as _p_lock, \
@@ -1926,9 +1924,9 @@ def run_analysis(  # noqa: C901
 
     # Write session-update.json for dep_session.py complete to consume
     if session_file is not None:
-        install_time = manifest.get('extensions') == 'YES'
+        install_time = manifest.extensions == 'YES'
         install_reason = 'native extension' if install_time else ''
-        if not install_time and manifest.get('post_install_msg') == 'YES':
+        if not install_time and manifest.post_install_msg == 'YES':
             install_time = True
             install_reason = 'post_install_msg'
         _write_session_update(

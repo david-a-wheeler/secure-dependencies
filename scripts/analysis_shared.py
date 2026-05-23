@@ -39,6 +39,7 @@ import urllib.parse
 import urllib.request
 import zipfile
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
@@ -3699,6 +3700,34 @@ def norm_repo_url(url: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Manifest data object
+# ---------------------------------------------------------------------------
+
+@dataclass
+class PackageManifest:
+    """Typed result from EcosystemAnalyzer.read_manifest().
+
+    All fields have safe defaults so a partially-populated instance is valid.
+    String 'YES'/'NO' fields match the established signal vocabulary used
+    throughout write_signals() and the AI prompt.
+    """
+    source_url: str = ''
+    extensions: str = 'NO'
+    executables: str = 'NO'
+    executables_list: str = ''
+    post_install_msg: str = 'NO'
+    has_build_hooks: str = 'NO'
+    has_install_scripts: str = 'NO'
+    manifest_license_raw: str = ''
+    manifest_text: str = ''
+    manifest_extra_file: str = ''
+    runtime_dep_lines: list[str] = field(default_factory=list)
+    install_hook_context: list[str] = field(default_factory=list)
+    install_cmd_warnings: list[str] = field(default_factory=list)
+    dangerous_what: str = ''
+
+
+# ---------------------------------------------------------------------------
 # Ecosystem hooks contract
 # ---------------------------------------------------------------------------
 
@@ -3913,7 +3942,7 @@ class EcosystemAnalyzer(ABC):
     def read_manifest(
         self, pkgname: str, version: str, unpacked_dir: Path,
         work: Path, failures: list[str], p: 'Printer',
-    ) -> dict: ...
+    ) -> 'PackageManifest': ...
 
     @abstractmethod
     def download_old(

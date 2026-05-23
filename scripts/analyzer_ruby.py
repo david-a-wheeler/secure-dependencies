@@ -315,14 +315,8 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
         work: Path,
         failures: list[str],
         p: 'shared.Printer',
-    ) -> dict:
-        """Parse gemspec; write manifest-analysis.txt and gemspec.txt.
-
-        Returns dict with keys: source_url, extensions, executables,
-        executables_list, post_install_msg, runtime_dep_lines,
-        manifest_license_raw, manifest_text, manifest_extra_file,
-        has_build_hooks, has_install_scripts, install_hook_context.
-        """
+    ) -> shared.PackageManifest:
+        """Parse gemspec; write manifest-analysis.txt and gemspec.txt."""
         extensions = 'NO'
         executables = 'NO'
         executables_list = ''
@@ -503,21 +497,21 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
                 ' or unexpected behavior.',
             ])
 
-        return {
-            'source_url': source_url,
-            'extensions': extensions,
-            'executables': executables,
-            'executables_list': executables_list,
-            'post_install_msg': post_install_msg,
-            'has_build_hooks': has_rakefile_tasks,
-            'has_install_scripts': 'YES' if has_install_scripts else 'NO',
-            'runtime_dep_lines': runtime_dep_lines,
-            'manifest_license_raw': gemspec_license_raw,
-            'manifest_text': gemspec_text,
-            'manifest_extra_file': 'gemspec.txt',
-            'install_hook_context': install_hook_context,
-            'install_cmd_warnings': install_cmd_warnings,
-        }
+        return shared.PackageManifest(
+            source_url=source_url,
+            extensions=extensions,
+            executables=executables,
+            executables_list=executables_list,
+            post_install_msg=post_install_msg,
+            has_build_hooks=has_rakefile_tasks,
+            has_install_scripts='YES' if has_install_scripts else 'NO',
+            runtime_dep_lines=runtime_dep_lines,
+            manifest_license_raw=gemspec_license_raw,
+            manifest_text=gemspec_text,
+            manifest_extra_file='gemspec.txt',
+            install_hook_context=install_hook_context,
+            install_cmd_warnings=install_cmd_warnings,
+        )
 
     def download_old(
         self,

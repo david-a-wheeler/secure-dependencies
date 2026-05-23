@@ -474,15 +474,9 @@ class JavaScriptAnalyzer(shared.EcosystemAnalyzer):
         work: Path,
         failures: list[str],
         p: 'shared.Printer',
-    ) -> dict:
+    ) -> shared.PackageManifest:
         """Parse package.json from the unpacked tarball; write
         manifest-analysis.txt.
-
-        Returns dict with keys: source_url, extensions, executables,
-        executables_list, post_install_msg, has_build_hooks,
-        has_install_scripts, runtime_dep_lines, manifest_license_raw,
-        manifest_text, manifest_extra_file, install_hook_context,
-        install_cmd_warnings.
         """
         source_url = ''
         extensions = 'NO'
@@ -733,21 +727,21 @@ class JavaScriptAnalyzer(shared.EcosystemAnalyzer):
         install_cmd_warnings.extend(
             shared.check_bundled_ide_dirs(unpacked_dir, p))
 
-        return {
-            'source_url': source_url,
-            'extensions': extensions,
-            'executables': executables,
-            'executables_list': executables_list,
-            'post_install_msg': post_install_msg,
-            'has_build_hooks': has_build_hooks,
-            'has_install_scripts': 'YES' if has_install_scripts else 'NO',
-            'runtime_dep_lines': runtime_dep_lines,
-            'manifest_license_raw': manifest_license_raw,
-            'manifest_text': manifest_text,
-            'manifest_extra_file': 'package-json.txt',
-            'install_hook_context': install_hook_context,
-            'install_cmd_warnings': install_cmd_warnings,
-        }
+        return shared.PackageManifest(
+            source_url=source_url,
+            extensions=extensions,
+            executables=executables,
+            executables_list=executables_list,
+            post_install_msg=post_install_msg,
+            has_build_hooks=has_build_hooks,
+            has_install_scripts='YES' if has_install_scripts else 'NO',
+            runtime_dep_lines=runtime_dep_lines,
+            manifest_license_raw=manifest_license_raw,
+            manifest_text=manifest_text,
+            manifest_extra_file='package-json.txt',
+            install_hook_context=install_hook_context,
+            install_cmd_warnings=install_cmd_warnings,
+        )
 
     def download_old(
         self,
