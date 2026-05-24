@@ -1328,26 +1328,21 @@ def detect_monorepo(
 ) -> tuple[bool, str]:
     """Return (is_monorepo, note) for a package source URL and optional clone.
 
-    Detection strategies applied in order, returning on the first match:
-    1. Subdirectory URL: a GitHub tree/blob URL with a path component
-       definitively identifies a monorepo subdirectory.
-    2. Manifest count: if a clone is available, more than one package
-       manifest file found in immediate subdirectories indicates a monorepo.
-       Works across rubygems, pypi, and npm without ecosystem-specific logic.
+    Detection is based solely on manifest count: more than one package
+    manifest file in immediate subdirectories of the clone confirms a
+    monorepo. When a subdirectory path is also present in the source URL,
+    it is used to name the specific component in the note.
 
-    Limitation: neither strategy detects monorepos that list the root repo
-    URL for every package with no subdirectory path. Those require a registry
-    cross-reference (querying ecosyste.ms for all packages sharing the same
-    repository URL), which is not attempted here.
+    A subdirectory path in the URL alone is NOT treated as confirmation:
+    a project may simply organize its code under a subdirectory without
+    being a monorepo (e.g. https://github.com/user/lib/tree/main/src).
+
+    Limitation: does not detect monorepos that list the root repo URL for
+    every package with no subdirectory path. Detecting those would require
+    a registry cross-reference (querying ecosyste.ms for all packages
+    sharing the same repository URL).
     """
     _, subdir = _extract_clone_url_and_subdir(source_url)
-    if subdir:
-        m = _RE_GITHUB_REPO.search(source_url)
-        repo_label = f'{m.group(1)}/{m.group(2)}' if m else sanitize_line(source_url)
-        return True, (
-            f'Monorepo: diff covers only {sanitize_line(subdir)}/ in {repo_label};'
-            f' changes to other components are not reflected here.'
-        )
 
     if source_dir and source_dir.is_dir():
         for glob_pat in _MONOREPO_MANIFEST_GLOBS:
@@ -1357,9 +1352,19 @@ def detect_monorepo(
             ]
             if len(found) > 1:
                 manifest_name = glob_pat.lstrip('*/')
+                if subdir:
+                    m = _RE_GITHUB_REPO.search(source_url)
+                    repo_label = (f'{m.group(1)}/{m.group(2)}' if m
+                                  else sanitize_line(source_url))
+                    return True, (
+                        f'Monorepo: diff covers only {sanitize_line(subdir)}/'
+                        f' in {repo_label};'
+                        f' changes to other components are not reflected here.'
+                    )
                 return True, (
-                    f'Monorepo: source repo contains multiple {manifest_name} files;'
-                    f' diff covers only this package, not all repo changes.'
+                    f'Monorepo: source repo contains multiple {manifest_name}'
+                    f' files; diff covers only this package, not all repo'
+                    f' changes.'
                 )
 
     return False, ''
