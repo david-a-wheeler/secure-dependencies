@@ -26,6 +26,7 @@ emdash:
 	    -path ./.git -prune -o \
 	    -path ./scripts/temp -prune -o \
 	    -path '*/__pycache__' -prune -o \
+	    -name ',*' -prune -o \
 	    -type f -print0 | xargs -0 grep -HInF \
 	        -e "$$(printf '\342\200\224')" \
 	        -e "$$(printf '\342\200\223')"
