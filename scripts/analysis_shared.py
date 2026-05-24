@@ -1307,6 +1307,63 @@ def _extract_clone_url_and_subdir(source_url: str) -> tuple[str, str]:
         return m.group(1), m.group(2)
     return source_url, ''
 
+
+# Package manifest filenames used for manifest-count monorepo detection.
+# One manifest per immediate subdirectory is the common monorepo layout.
+# Limitation: this does not detect monorepos that list the root repo URL as
+# the source for every package without any subdirectory path component.
+# Detecting those requires a registry cross-reference (e.g. querying
+# ecosyste.ms for all packages sharing the same repository URL).
+_MONOREPO_MANIFEST_GLOBS: list[str] = [
+    '*/*.gemspec',       # rubygems monorepo (e.g. chef/chef, rails/rails)
+    '*/pyproject.toml',  # python monorepo
+    '*/setup.py',        # python monorepo (legacy)
+    '*/package.json',    # npm monorepo (workspaces)
+]
+
+
+def detect_monorepo(
+    source_url: str,
+    source_dir: Path | None = None,
+) -> tuple[bool, str]:
+    """Return (is_monorepo, note) for a package source URL and optional clone.
+
+    Detection strategies applied in order, returning on the first match:
+    1. Subdirectory URL: a GitHub tree/blob URL with a path component
+       definitively identifies a monorepo subdirectory.
+    2. Manifest count: if a clone is available, more than one package
+       manifest file found in immediate subdirectories indicates a monorepo.
+       Works across rubygems, pypi, and npm without ecosystem-specific logic.
+
+    Limitation: neither strategy detects monorepos that list the root repo
+    URL for every package with no subdirectory path. Those require a registry
+    cross-reference (querying ecosyste.ms for all packages sharing the same
+    repository URL), which is not attempted here.
+    """
+    _, subdir = _extract_clone_url_and_subdir(source_url)
+    if subdir:
+        m = _RE_GITHUB_REPO.search(source_url)
+        repo_label = f'{m.group(1)}/{m.group(2)}' if m else sanitize_line(source_url)
+        return True, (
+            f'Monorepo: diff covers only {sanitize_line(subdir)}/ in {repo_label};'
+            f' changes to other components are not reflected here.'
+        )
+
+    if source_dir and source_dir.is_dir():
+        for glob_pat in _MONOREPO_MANIFEST_GLOBS:
+            found = [
+                p for p in source_dir.glob(glob_pat)
+                if 'node_modules' not in p.parts
+            ]
+            if len(found) > 1:
+                manifest_name = glob_pat.lstrip('*/')
+                return True, (
+                    f'Monorepo: source repo contains multiple {manifest_name} files;'
+                    f' diff covers only this package, not all repo changes.'
+                )
+
+    return False, ''
+
 # Campaign strings written by the Shai-Halud worm into GitHub repo
 # descriptions. Literal matches are zero-false-positive.
 CAMPAIGN_STRINGS: frozenset[str] = frozenset({
