@@ -1285,6 +1285,28 @@ _RE_GITHUB_REPO = re.compile(
     r'github\.com[/:]([A-Za-z0-9_.-]{1,100})/([A-Za-z0-9_.-]{1,100})'
 )
 
+# Matches GitHub tree/blob URLs that embed a subdirectory path.
+# Example: https://github.com/USER/REPO/tree/BRANCH/sub/dir
+# Bounds on each segment prevent ReDoS.
+_RE_GITHUB_SUBDIR = re.compile(
+    r'^(https://github\.com/[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100})'
+    r'/(?:tree|blob)/[^/?#]{1,200}/([^?#]{1,500})$'
+)
+
+
+def _extract_clone_url_and_subdir(source_url: str) -> tuple[str, str]:
+    """Return (clone_url, subdir) for a source URL.
+
+    GitHub tree/blob URLs like
+    https://github.com/USER/REPO/tree/BRANCH/PATH are converted to the
+    base clone URL and the subdirectory path. All other URLs are returned
+    unchanged with an empty subdir.
+    """
+    m = _RE_GITHUB_SUBDIR.match(source_url)
+    if m:
+        return m.group(1), m.group(2)
+    return source_url, ''
+
 # Campaign strings written by the Shai-Halud worm into GitHub repo
 # descriptions. Literal matches are zero-false-positive.
 CAMPAIGN_STRINGS: frozenset[str] = frozenset({
@@ -1586,8 +1608,12 @@ def clone_source_repo(
         p('CLONE_STATUS: SKIPPED (non-https source URL)')
         return False, '', False, False
 
+    # Strip GitHub tree/blob paths (e.g. /tree/main/chef-utils) to get the
+    # actual clone URL; record the subdirectory for targeted log searches.
+    clone_url, subdir = _extract_clone_url_and_subdir(source_url)
+
     # Find a matching version tag via ls-remote (no clone needed)
-    rc_ls, ls_out, _ = run_cmd(['git', 'ls-remote', '--tags', '--', source_url], timeout=30)
+    rc_ls, ls_out, _ = run_cmd(['git', 'ls-remote', '--tags', '--', clone_url], timeout=30)
     tag = ''
     if rc_ls == 0:
         escaped_ver = re.escape(new_ver)
@@ -1611,20 +1637,24 @@ def clone_source_repo(
                     break
 
     if not tag:
-        # No version tag found. Attempt to locate the release commit by scanning
-        # recent history for a commit message that mentions the version string.
+        # No version tag found. Attempt to locate the release commit by
+        # scanning recent history for a commit that mentions the version.
         p(f'SOURCE_URL: {sanitize_line(source_url)}')
         p('NO_TAG: no matching version tag found in repository')
+        if subdir:
+            p(f'MONOREPO_SUBDIR: {sanitize_line(subdir)}')
         source_dir = work / 'source'
         guessed_sha = ''
         commits: list[tuple[str, str, str]] = []  # (sha, date, subject)
 
-        if source_dir.exists() and any(source_dir.iterdir()):
+        reused = source_dir.exists() and any(source_dir.iterdir())
+        if reused:
             clone_err_text = 'Reused existing clone from previous run.\n'
+            rc_shallow = 0
         else:
             source_dir.mkdir(parents=True, exist_ok=True)
             rc_shallow, _, clone_err_text = run_cmd(
-                ['git', 'clone', '--depth', '20', '--', source_url, str(source_dir)],
+                ['git', 'clone', '--depth', '50', '--', clone_url, str(source_dir)],
                 timeout=120,
             )
             if rc_shallow != 0:
@@ -1633,28 +1663,68 @@ def clone_source_repo(
             clone_err_text, encoding='utf-8', errors='replace'
         )
 
-        # Parse recent commit log: hash, author-date (ISO), subject
-        rc_log, log_out, _ = run_cmd(
-            ['git', '-C', str(source_dir), 'log', '--format=%H\t%ai\t%s', '-20'],
-            timeout=15,
-        )
-        if rc_log == 0:
-            for log_line in log_out.splitlines():
-                parts = log_line.split('\t', 2)
-                if len(parts) == 3:
-                    commits.append((parts[0], parts[1], parts[2]))
-
-        # Search for a commit whose subject mentions the version number
         ver_pat = re.compile(
             rf'(?:version|release|bump|tag)[^0-9]*{re.escape(new_ver)}|{re.escape(new_ver)}',
             re.IGNORECASE,
         )
+
+        if rc_shallow == 0:
+            # Strategy 1: scan recent commit subjects across the whole repo
+            rc_log, log_out, _ = run_cmd(
+                ['git', '-C', str(source_dir), 'log', '--format=%H\t%ai\t%s', '-50'],
+                timeout=15,
+            )
+            if rc_log == 0:
+                for log_line in log_out.splitlines():
+                    parts = log_line.split('\t', 2)
+                    if len(parts) == 3:
+                        commits.append((parts[0], parts[1], parts[2]))
+
         guessed_idx = -1
         for i, (sha, _date, subject) in enumerate(commits):
             if ver_pat.search(subject):
                 guessed_sha = sha
                 guessed_idx = i
                 break
+
+        # Strategy 2: for monorepos, search commits touching the subdir
+        if not guessed_sha and subdir and rc_shallow == 0:
+            subdir_safe = sanitize_line(subdir)
+            rc_log2, log_out2, _ = run_cmd(
+                ['git', '-C', str(source_dir), 'log', '--format=%H\t%ai\t%s',
+                 '-50', '--', subdir],
+                timeout=15,
+            )
+            if rc_log2 == 0:
+                sub_commits: list[tuple[str, str, str]] = []
+                for log_line in log_out2.splitlines():
+                    parts = log_line.split('\t', 2)
+                    if len(parts) == 3:
+                        sub_commits.append((parts[0], parts[1], parts[2]))
+                for i, (sha, _date, subject) in enumerate(sub_commits):
+                    if ver_pat.search(subject):
+                        guessed_sha = sha
+                        guessed_idx = i
+                        commits = sub_commits
+                        p(f'NOTE: commit found via subdir log ({subdir_safe})')
+                        break
+
+        # Strategy 3: search commit message bodies via --grep
+        if not guessed_sha and rc_shallow == 0:
+            rc_grep, grep_out, _ = run_cmd(
+                ['git', '-C', str(source_dir), 'log', '--format=%H\t%ai\t%s',
+                 '--grep', new_ver, '-10'],
+                timeout=15,
+            )
+            if rc_grep == 0:
+                for log_line in grep_out.splitlines():
+                    parts = log_line.split('\t', 2)
+                    if len(parts) == 3:
+                        guessed_sha = parts[0]
+                        guessed_idx = 0
+                        commits = [(parts[0], parts[1], parts[2])]
+                        p('NOTE: commit found via --grep in full commit body')
+                        break
 
         if guessed_sha:
             # Check out exactly that commit so pkg-vs-source comparison works
@@ -1715,7 +1785,7 @@ def clone_source_repo(
             clone_ok = True
         else:
             rc_clone, _, clone_err = run_cmd(
-                ['git', 'clone', '--depth', '1', '--branch', tag, '--', source_url, str(source_dir)],
+                ['git', 'clone', '--depth', '1', '--branch', tag, '--', clone_url, str(source_dir)],
                 timeout=120,
             )
             (work / 'raw-git-clone-output.txt').write_text(
@@ -2303,8 +2373,9 @@ def git_diff_between_tags(
     if not source_dir.is_dir():
         return 0, ''
 
+    clone_url, _subdir = _extract_clone_url_and_subdir(source_url)
     # Find old version tag with the same matching logic as clone_source_repo.
-    rc_ls, ls_out, _ = run_cmd(['git', 'ls-remote', '--tags', '--', source_url], timeout=30)
+    rc_ls, ls_out, _ = run_cmd(['git', 'ls-remote', '--tags', '--', clone_url], timeout=30)
     old_tag = ''
     if rc_ls == 0:
         escaped_old = re.escape(old_ver)
