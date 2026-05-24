@@ -236,13 +236,22 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
         gem_file = work / f'{pkgname}-{version}.gem'
         sha256 = ''
 
-        # Options before '--'; pkgname after cannot be mistaken for a flag.
-        # Defense-in-depth: _DEP_NAME_RE already prevents leading '-', but
-        # explicit '--' is portable and works even if that check is bypassed.
+        # Guard: prevent package names beginning with '-'. We do this for
+        # defense-in-depth because `gem` doesn't accept `--` usefully.
+        if pkgname.startswith('-'):
+            failures.append(f'SECURITY_VIOLATION:gem-name-starts-with-dash({pkgname!r})')
+            return {}
+
+        # Do NOT use '--' before the gem name here.
+        # The gem CLI's GemRunner uses '--' as a build-args separator
+        # (GemRunner#extract_build_args slices everything from '--'
+        # onwards out of the args array before the subcommand sees them).
+        # Passing '--' would silently discard the gem name, producing
+        # "Please specify at least one gem name" rather than a useful error.
         fetch_cmd = ['gem', 'fetch', '-v', version]
         if self.registry_url:
             fetch_cmd += ['--source', self.registry_url]
-        fetch_cmd += ['--', pkgname]
+        fetch_cmd += [pkgname]
         rc, _, err = shared.run_cmd(fetch_cmd, cwd=work)
 
         # gem fetch may download a platform-specific gem
@@ -260,7 +269,7 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
             )
             rc2, _, _ = shared.run_cmd(
                 ['gem', 'unpack', '--target', str(unpacked_dir_base),
-                 '--', str(gem_file)]
+                 str(gem_file)]
             )
             if rc2 != 0:
                 failures.append('gem-unpack-new')
@@ -285,8 +294,9 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
         if unpacked_dir.is_dir():
             _n = shared.remove_symlinks(unpacked_dir)
             if _n:
-                # Symlinks in gem archives are a strong attack signal: legitimate
-                # gems do not contain symlinks pointing outside the package tree.
+                # Symlinks in gem archives are a strong attack signal.
+                # Legitimate gems do not contain symlinks pointing
+                # outside the package tree.
                 failures.append(
                     f'SECURITY_VIOLATION:symlinks-in-gem({_n} symlinks removed)'
                 )
@@ -296,7 +306,7 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
         gemspec_file = unpacked_dir / f'{pkgname}.gemspec'
         if not gemspec_file.is_file() and gem_file.is_file():
             rc_spec, spec_out, _ = shared.run_cmd(
-                ['gem', 'specification', '--ruby', '--', str(gem_file)]
+                ['gem', 'specification', '--ruby', str(gem_file)]
             )
             if rc_spec == 0 and spec_out.strip():
                 extracted = work / 'gemspec.txt'
@@ -555,7 +565,7 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
         if old_cached_gem and old_cached_gem.is_file():
             rc_up, _, _ = shared.run_cmd(
                 ['gem', 'unpack', '--target', str(old_dir_base),
-                 '--', str(old_cached_gem)]
+                 str(old_cached_gem)]
             )
             if rc_up == 0:
                 ok = True
@@ -568,7 +578,7 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
             fetch_cmd = ['gem', 'fetch', '-v', old_ver]
             if self.registry_url:
                 fetch_cmd += ['--source', self.registry_url]
-            fetch_cmd += ['--', pkgname]
+            fetch_cmd += [pkgname]
             rc_fetch, _, _ = shared.run_cmd(fetch_cmd, cwd=raw_old_pkg)
             if rc_fetch == 0:
                 old_gem = raw_old_pkg / f'{pkgname}-{old_ver}.gem'
@@ -581,7 +591,7 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
                 if old_gem.is_file():
                     rc_up2, _, _ = shared.run_cmd(
                         ['gem', 'unpack', '--target', str(old_dir_base),
-                         '--', str(old_gem)]
+                         str(old_gem)]
                     )
                     if rc_up2 == 0:
                         ok = True
@@ -662,9 +672,23 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
         license_from_registry: list[str] = []
         ver_info_lines: list[str] = []
 
+        # Guard: gem does not accept '--' as end-of-options (GemRunner strips it).
+        # Reject names starting with '-' so they cannot be misread as flags.
+        if pkgname.startswith('-'):
+            return {
+                'mfa_status': mfa_status,
+                'age_years_float': age_years_float,
+                'last_release_days': last_release_days,
+                'version_published_days': version_published_days,
+                'owner_count_int': owner_count_int,
+                'version_stability': version_stability,
+                'license_from_registry': license_from_registry,
+                'ver_info_lines': ver_info_lines,
+            }
+
         p(f'=== Provenance: {pkgname} {version} ===')
         p('')
-        rc_gi, gi_out, _ = shared.run_cmd(['gem', 'info', '-r', '--', pkgname])
+        rc_gi, gi_out, _ = shared.run_cmd(['gem', 'info', '-r', pkgname])
         p('GEM_INFO:')
         p(shared.sanitize(gi_out[:2000]) if rc_gi == 0 else '(unavailable)')
         p('')
@@ -945,9 +969,14 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
         Writes: transitive-deps.txt (via p), raw-transitive-deps.txt.
         Returns dict with keys: total (int), not_in_lockfile (list[str]).
         """
+        # Guard: gem does not accept '--' as end-of-options (GemRunner strips it).
+        # Reject names starting with '-' so they cannot be misread as flags.
+        if pkgname.startswith('-'):
+            return shared.write_transitive_deps(work, pkgname, version, 0, [], p)
+
         rc_dep, dep_out, _ = shared.run_cmd(
             ['gem', 'dependency', '-v', version, '--remote', '--pipe',
-             '--', pkgname],
+             pkgname],
             timeout=60,
         )
         (work / 'raw-transitive-deps.txt').write_text(
