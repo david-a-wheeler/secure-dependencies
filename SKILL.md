@@ -444,23 +444,27 @@ findings that warrant immediate HIGH or CRITICAL escalation.
 
 ---
 
-## Phase 3: Report and Get Approval
+## Phase 3: Report, Full Session Report, and Get Approval
 
-Generate the summary cards:
+Generate the summary cards and full session report:
 
 ```bash
 python3 SCRIPTS_DIR/dep_session.py report SESSION_FILE
+python3 SCRIPTS_DIR/dep_session.py wrap-up SESSION_FILE
 ```
 
-Present the output to the user. Then ask the mode-appropriate follow-up:
+Present the summary card output to the user, then extract the report path
+from the `wrap-up` output line `Report written: PATH` and tell the user:
+
+> "The full session report is at: PATH
+> You can copy or share this file before approving any installation."
+
+**Wait for the user to review the report before asking about installation.**
+Then ask the mode-appropriate follow-up:
 
 - **UPDATE**: "Shall I install the approved packages?"
 - **NEW**: "Do you want to add PKGNAME? Recommendation: [X] because [reason]."
 - **CURRENT**: "These [N] packages have concerns. Which to address first?"
-
-> "The full session report will be written to `temp/dep-review/report-YYYY-MM-DD-SEQ.md`
-> when you run Phase 5 wrap-up. That file summarizes all findings and is suitable for
-> committing to the repository or sharing with a security team."
 
 **Do not install anything until the user explicitly confirms.**
 
@@ -480,25 +484,21 @@ cat temp/dep-review/install-manifest.txt
 
 After each install: run tests, commit lock file separately.
 
----
-
-## Phase 5: Session Wrap-Up
+After all installs succeed, record what was installed in the session report
+(one `--package NAME VERSION` per package actually installed):
 
 ```bash
-python3 SCRIPTS_DIR/dep_session.py wrap-up SESSION_FILE
+python3 SCRIPTS_DIR/dep_session.py record-install SESSION_FILE \
+  --package PKGNAME NEW_VERSION [--package PKGNAME2 NEW_VERSION2 ...]
 ```
 
-This generates `temp/dep-review/report-YYYY-MM-DD-SEQ.md`: a markdown session report
-summarizing all findings with per-package risk assessments, license status, risk
-factors, and summaries. It links to the detailed per-package `assessment.txt` files
-for full technical detail. The report is suitable for committing to the repository,
-attaching to a pull request, or sharing with a security team.
-
-Present the report path to the user after it is generated.
+This appends an installation record to the report generated in Phase 3
+(if that file is still present). Skip this step if the user deleted the
+report or if no packages were installed.
 
 ---
 
-## Phase 6: Follow-On Summary (UPDATE mode)
+## Phase 5: Follow-On Summary (UPDATE mode)
 
 ```bash
 python3 SCRIPTS_DIR/dep_session.py follow-on --root PROJECT_ROOT --from REGISTRY \

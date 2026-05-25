@@ -1505,6 +1505,11 @@ def run_analysis(  # noqa: C901
         print(f'  Clone: [HIGH RISK] source identified but version unmatched (see clone-status.txt)')
     else:
         print(f'  Clone: {"OK" if clone_ok else ("SKIPPED" if not source_url else "FAILED/SKIPPED")}')
+    _monorepo, _monorepo_note = shared.detect_monorepo(
+        source_url, (work / 'source') if clone_ok else None
+    )
+    if _monorepo:
+        print(f'  {_monorepo_note}')
 
     # 4b. Commit activity (only if clone succeeded)
     raw_clone_dir = work / 'source'
