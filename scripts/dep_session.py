@@ -439,6 +439,7 @@ def print_next_action(session: dict, session_path: Path) -> None:
             _dwork_rel = _dwork
         print(f'=== NEXT_ACTION{_tok_part}: RUN_DEEPER ===')
         print(f'Package  : {sname} {sversion}')
+        print(f'Work dir : {_dwork_rel}')
         print('Reason   : MEDIUM risk requires reproducible-build verification before approval.')
         print()
         print('Step 1: run deeper analysis:')
@@ -548,21 +549,22 @@ def print_next_action(session: dict, session_path: Path) -> None:
         f' {sname} {sversion}'
     )
 
-    print(f'=== NEXT_ACTION{_tok_part}: ANALYZE ===')
-    print(f'Package      : {sname}')
-    print(f'Version      : {sversion}')
-    print(f'Mode         : {mode}' + (f' (was {old_version})' if old_version else ''))
-    print(f'Introduced by: {shared.sanitize_line(introduced_by)}')
-    print()
-    print('Step 1: run analysis:')
-    print(f'  {cmd}')
-    print()
     _aroot = Path(session['project_root'])
     _awork = _aroot / 'temp' / 'dep-review' / shared.safe_dir_component(name, version)
     try:
         _awork_rel = _awork.relative_to(Path.cwd())
     except ValueError:
         _awork_rel = _awork
+    print(f'=== NEXT_ACTION{_tok_part}: ANALYZE ===')
+    print(f'Package      : {sname}')
+    print(f'Version      : {sversion}')
+    print(f'Mode         : {mode}' + (f' (was {old_version})' if old_version else ''))
+    print(f'Introduced by: {shared.sanitize_line(introduced_by)}')
+    print(f'Work dir     : {_awork_rel}')
+    print()
+    print('Step 1: run analysis:')
+    print(f'  {cmd}')
+    print()
     print('Step 2: pre-fill assessment.md, fill judgment, write verdict.json')
     prefill_cmd = (
         f'python3 {scripts_rel}/dep_session.py pre-fill-assessment'
