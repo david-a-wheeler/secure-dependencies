@@ -653,20 +653,21 @@ def cmd_complete(args: argparse.Namespace) -> None:
     # Read session-update.json written by dep_review.py --session
     root = Path(session['project_root'])
     work = root / 'temp' / 'dep-review' / shared.safe_dir_component(name, version)
-    # Enforce adversarial gate: if dep_review.py found adversarial content,
-    # only DO_NOT_INSTALL/CRITICAL is accepted. This prevents a
-    # compromised sub-agent from approving a malicious package,
-    # even though it was detected by the adversarial gate,
-    # by ignoring the ABORT in signals.txt.
+    # Enforce adversarial gate deterministically: if dep_review.py flagged
+    # adversarial content, override whatever the sub-agent submitted.
+    # This means a compromised sub-agent cannot approve a package that the
+    # deterministic gate already rejected, regardless of what it returns.
     _abort_flag = work / 'adversarial-abort.flag'
-    if _abort_flag.exists() and (
-        recommendation != 'DO_NOT_INSTALL' or risk != 'CRITICAL'
-    ):
-        sys.exit(
-            f'Adversarial gate was triggered for {name} {version}.\n'
-            f'Only DO_NOT_INSTALL / CRITICAL is accepted.\n'
-            f'See {work / "signals.txt"} for details.'
-        )
+    if _abort_flag.exists():
+        if recommendation != 'DO_NOT_INSTALL' or risk != 'CRITICAL':
+            print(
+                f'WARNING: adversarial gate was triggered for {name} {version}. '
+                f'Sub-agent verdict ({recommendation}/{risk}) overridden to '
+                f'DO_NOT_INSTALL/CRITICAL.',
+                file=sys.stderr,
+            )
+        recommendation = 'DO_NOT_INSTALL'
+        risk = 'CRITICAL'
     update_file = work / 'session-update.json'
     new_dep_names: list[str] = []
     alternatives_critical = False

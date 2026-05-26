@@ -32,7 +32,7 @@ Tier 2 reads both, doubling its input for no benefit.
 
 ---
 
-## 2. Adversarial gate: auto-enforce in `dep_session.py complete`
+## 2. ~~Adversarial gate: auto-enforce in `dep_session.py complete`~~ DONE
 
 **Current behaviour:** Brief Step 3 tells tier 2 to read the `ADVERSARIAL_GATE`
 line in `signals.txt` and, if `ABORT`, return `CRITICAL / DO_NOT_INSTALL`.
