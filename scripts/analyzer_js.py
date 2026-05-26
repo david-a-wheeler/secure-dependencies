@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
-# analyzer_js.py: JavaScript/Node.js language operations for the
-# dependency analysis driver.
+# analyzer_js.py: JavaScript ecosystem analyzer for dep_review.py.
 #
 # Handles the npm package format (download with npm pack, unpack tarball) and
-# the npm registry API. Used for --from npm; can be reused for other
-# npm-compatible registries (GitHub Packages, Verdaccio, Nexus,
-# Artifactory, etc.)
-# with a different registry entry in REGISTRY_TO_HOOKS pointing here.
+# the npm registry API.
 #
-# Called by dep_review.py; do not invoke directly.
+# Each function accepts a `failures: list[str]` param and calls
+# failures.append(...) on errors rather than raising exceptions.
 # Each function accepts a `failures: list[str]` param and calls
 # failures.append(...) on errors rather than raising exceptions.
 #
@@ -1570,4 +1567,3 @@ class JavaScriptAnalyzer(shared.EcosystemAnalyzer):
             diff_out, p, work, _RE_REPRO_CODE, _RE_REPRO_META)
 
 
-Analyzer = JavaScriptAnalyzer   # used by dep_review.py for instantiation

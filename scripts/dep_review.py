@@ -15,7 +15,7 @@
 #
 # Known registries: rubygems, pypi, npm
 #
-# Loads ecosystem analyzers via REGISTRY_TO_HOOKS map (e.g. rubygems → analyzer_ruby).
+# Loads ecosystem analyzers via REGISTRY_TO_ANALYZER map.
 # Output directory: ROOT/temp/dep-review/PKGNAME-NEW_VERSION/  (ROOT defaults to cwd)
 #
 # AI agents: read signals.txt for the complete self-describing report.
@@ -29,16 +29,18 @@ if sys.version_info < (3, 10):
     sys.exit(f'dep_review.py requires Python 3.10 or later (running {sys.version})')
 
 import dataclasses
-import importlib
 import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import NoReturn, cast
+from typing import NoReturn
 
 sys.path.insert(0, str(Path(__file__).parent))
 import analysis_shared as shared
 from analysis_shared import EcosystemAnalyzer, PackageManifest, Printer, SignalContext, SignalReport
+from analyzer_ruby   import RubyAnalyzer
+from analyzer_python import PythonAnalyzer
+from analyzer_js     import JavaScriptAnalyzer
 
 
 # ---------------------------------------------------------------------------
@@ -1999,16 +2001,12 @@ def run_analysis(  # noqa: C901
 # Entry point
 # ---------------------------------------------------------------------------
 
-# Maps registry name (--from value) to the ecosystem analyzer module.
-# Registry names describe where to download from; analyzer modules describe
-# how to handle the package format. Multiple registries can share one module
-# (e.g. a private gem server would also use analyzer_ruby).
-REGISTRY_TO_HOOKS: dict[str, str] = {
-    'rubygems': 'analyzer_ruby',
-    'pypi':     'analyzer_python',
-    'npm':      'analyzer_js',
+REGISTRY_TO_ANALYZER: dict[str, type[EcosystemAnalyzer]] = {
+    'rubygems': RubyAnalyzer,
+    'pypi':     PythonAnalyzer,
+    'npm':      JavaScriptAnalyzer,
 }
-KNOWN_REGISTRIES: list[str] = list(REGISTRY_TO_HOOKS)
+KNOWN_REGISTRIES: list[str] = list(REGISTRY_TO_ANALYZER)
 
 HELP = """\
 dep_review.py: dependency security review
@@ -2200,7 +2198,7 @@ def main() -> None:  # noqa: C901 (complexity acceptable for CLI validation)
         elif pkgname.startswith('-'):
             # The gem CLI uses '--' as a build-args separator, not end-of-options,
             # so we cannot use '--' before the gem name. Reject early here;
-            # analyzer_ruby.py also guards at the call site.
+            # RubyAnalyzer also guards at the call site.
             errors.append(
                 f'PKGNAME starts with a dash: {pkgname!r}\n'
                 '  Package names must not start with \'-\'.'
@@ -2250,7 +2248,7 @@ def main() -> None:  # noqa: C901 (complexity acceptable for CLI validation)
         errors.append(
             f'Unknown registry: {registry!r}\n'
             f'  Known registries: {", ".join(KNOWN_REGISTRIES)}\n'
-            '  To add a new registry, add it to REGISTRY_TO_HOOKS and provide an analyzer_LANGUAGE.py file.'
+            '  To add a new registry, add it to REGISTRY_TO_ANALYZER with a new EcosystemAnalyzer subclass.'
         )
 
     # --- Validate: --registry-url ---
@@ -2307,14 +2305,7 @@ def main() -> None:  # noqa: C901 (complexity acceptable for CLI validation)
         _die(f'--root directory does not exist: {root}')
 
     # --- Load ecosystem analyzer ---
-    hooks_module = REGISTRY_TO_HOOKS[registry]
-    try:
-        analyzer = cast(EcosystemAnalyzer, importlib.import_module(hooks_module).Analyzer(registry_url=registry_url))
-    except ImportError as exc:
-        _die(
-            f'No analyzer module for registry {registry!r}: {exc}\n'
-            f'  Expected: {hooks_module}.py in the same directory as dep_review.py'
-        )
+    analyzer: EcosystemAnalyzer = REGISTRY_TO_ANALYZER[registry](registry_url=registry_url)
 
     # --- Warn: no lockfile found ---
     lockfile_name = getattr(analyzer, 'LOCKFILE_NAME', None)

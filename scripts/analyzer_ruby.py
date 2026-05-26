@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# analyzer_ruby.py: Ruby language operations for the dependency analysis driver.
+# analyzer_ruby.py: Ruby ecosystem analyzer for dep_review.py.
 #
 # Handles the Ruby gem format (download, unpack, gemspec, Rakefile) and the
-# rubygems.org registry API. Used for --from rubygems; can be reused for other
-# Ruby gem registries (Gemfury, GitHub Packages, etc.) with a different
-# registry entry in REGISTRY_TO_HOOKS pointing here.
+# rubygems.org registry API.
 #
-# Called by dep_review.py; do not invoke directly.
+# Each function accepts a `failures: list[str]` param and calls
+# failures.append(...) on errors rather than raising exceptions.
 # Each function accepts a `failures: list[str]` param and calls
 # failures.append(...) on errors rather than raising exceptions.
 #
@@ -1272,4 +1271,3 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
             diff_out, p, work, _RE_REPRO_CODE, _RE_REPRO_META)
 
 
-Analyzer = RubyAnalyzer   # used by dep_review.py for instantiation
