@@ -1,6 +1,6 @@
 PYTHON ?= python3
 
-all: test syntax_valid typecheck emdash validate
+all: test syntax_valid typecheck lint emdash validate
 	@echo Verification complete
 
 test:
@@ -20,6 +20,15 @@ typecheck:
 	    echo 'WARNING: pyright not found; skipping (install: pip install pyright)'; \
 	fi
 
+lint:
+	@echo "Linting Python scripts with ruff:"
+	@if command -v ruff > /dev/null 2>&1; then \
+	    ruff check scripts/; \
+	    echo 'OK, no lint errors found'; \
+	else \
+	    echo 'WARNING: ruff not found; skipping (install: pip install ruff)'; \
+	fi
+
 emdash:
 	@echo "Finding lines in textual format files with em or en dashes:"
 	@! find . \
@@ -36,4 +45,4 @@ validate:
 	@echo "Validating SKILL.md frontmatter:"
 	$(PYTHON) scripts/validate_skill.py
 
-.PHONY: all test syntax_valid typecheck emdash validate
+.PHONY: all test syntax_valid typecheck lint emdash validate

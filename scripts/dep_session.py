@@ -369,7 +369,6 @@ def print_next_action(session: dict, session_path: Path) -> None:
     The orchestrating agent reads this after every dep_session.py call and
     follows the instruction exactly; no state tracking required on its part.
     """
-    root = Path(session['project_root'])
     # Scripts live wherever this file lives; use that path directly.
     scripts = Path(__file__).parent.resolve()
     try:
@@ -429,7 +428,7 @@ def print_next_action(session: dict, session_path: Path) -> None:
         sversion = shared.sanitize_line(version)
         print(f'=== NEXT_ACTION{_tok_part}: RUN_DEEPER ===')
         print(f'Package  : {sname} {sversion}')
-        print(f'Reason   : MEDIUM risk requires reproducible-build verification before approval.')
+        print('Reason   : MEDIUM risk requires reproducible-build verification before approval.')
         print()
         print('Step 1: run deeper analysis:')
         print(f'  python3 {scripts_rel}/dep_review.py'
@@ -515,7 +514,7 @@ def print_next_action(session: dict, session_path: Path) -> None:
         print(f'Package      : {sname}')
         print(f'Mode         : {mode}')
         print(f'Introduced by: {shared.sanitize_line(introduced_by)}')
-        print(f'Version      : UNKNOWN (registry lookup required)')
+        print('Version      : UNKNOWN (registry lookup required)')
         print()
         print(f'Run: python3 {scripts_rel}/dep_session.py resolve {session_rel} {sname}')
         print('(This will query the registry, update the session, and print the next command.)')
@@ -541,12 +540,12 @@ def print_next_action(session: dict, session_path: Path) -> None:
     print(f'Mode         : {mode}' + (f' (was {old_version})' if old_version else ''))
     print(f'Introduced by: {shared.sanitize_line(introduced_by)}')
     print()
-    print(f'Step 1: run analysis:')
+    print('Step 1: run analysis:')
     print(f'  {cmd}')
     print()
-    print(f'Step 2: read output, make security judgment, write assessment.txt')
+    print('Step 2: read output, make security judgment, write assessment.txt')
     print()
-    print(f'Step 3: record verdict:')
+    print('Step 3: record verdict:')
     _token_flag = f' --token {_tok}' if _tok else ''
     print(f'  python3 {scripts_rel}/dep_session.py complete{_token_flag} -- {session_rel} \\')
     print(f'    {sname} {sversion} RECOMMENDATION RISK')
@@ -1381,7 +1380,6 @@ def cmd_wrap_up(args: argparse.Namespace) -> None:
         fields = _parse_assessment_fields(work_dir / 'assessment.txt')
 
         old_ver = af.get('old_version', fields.get('version', ''))
-        pkg_mode = af.get('mode', fields.get('mode', 'unknown'))
         lic_raw = af.get('license_line', '')
         if '|' in lic_raw:
             spdx = lic_raw.split('|')[0].replace('SPDX:', '').strip()
@@ -1978,7 +1976,7 @@ def cmd_health_scan(args: argparse.Namespace) -> None:
             concerns.append('LICENSE_MISSING')
             lic_display = 'MISSING*'
         elif lic_upper not in _OSI_LICENSES:
-            concerns.append(f'LICENSE_NON_OSI')
+            concerns.append('LICENSE_NON_OSI')
             lic_display = f'{lic[:W_LIC-1]}*'
         else:
             lic_display = lic[:W_LIC]

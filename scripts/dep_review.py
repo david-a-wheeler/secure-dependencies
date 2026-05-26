@@ -37,7 +37,7 @@ from typing import NoReturn
 
 sys.path.insert(0, str(Path(__file__).parent))
 import analysis_shared as shared
-from analysis_shared import EcosystemAnalyzer, PackageManifest, Printer, SignalContext, SignalReport
+from analysis_shared import EcosystemAnalyzer, Printer, SignalContext, SignalReport
 from ruby_analyzer   import RubyAnalyzer
 from python_analyzer import PythonAnalyzer
 from js_analyzer     import JavaScriptAnalyzer
@@ -496,7 +496,6 @@ def write_signals(ctx: SignalContext, p: Printer) -> SignalReport:  # noqa: C901
             'human verification required before install]',
         ))
     dep_repos = eco.get('dependent_repos_count')
-    dep_pkgs = eco.get('dependent_packages_count')
     if eco_status in ('deprecated', 'archived'):
         _concerns.append(('ecosystems_status', eco_status))
     if dep_repos is not None and dep_repos == 0:
@@ -1473,7 +1472,7 @@ def run_analysis(  # noqa: C901
         print('  Halting analysis. Sub-agent must return CRITICAL / DO_NOT_INSTALL.')
         (work / 'signals.txt').write_text(
             '\n'.join([
-                f'ADVERSARIAL_GATE: ABORT',
+                'ADVERSARIAL_GATE: ABORT',
                 f'ABORT_REASON: {", ".join(abort_labels)}',
                 f'ABORT_MATCHES: {abort_matches}',
                 '',
@@ -1502,9 +1501,9 @@ def run_analysis(  # noqa: C901
         clone_ok, version_tag, commit_guessed, source_likely_incompatible = shared.clone_source_repo(source_url, pkgname, new_ver, work, _p_clone)
     print(f'  Source URL: {shared.sanitize_line(source_url) or "(none)"}')
     if clone_ok and commit_guessed:
-        print(f'  Clone: GUESSED (no version tag; commit inferred from history)')
+        print('  Clone: GUESSED (no version tag; commit inferred from history)')
     elif source_likely_incompatible:
-        print(f'  Clone: [HIGH RISK] source identified but version unmatched (see clone-status.txt)')
+        print('  Clone: [HIGH RISK] source identified but version unmatched (see clone-status.txt)')
     else:
         print(f'  Clone: {"OK" if clone_ok else ("SKIPPED" if not source_url else "FAILED/SKIPPED")}')
     _monorepo, _monorepo_note = shared.detect_monorepo(
@@ -2294,7 +2293,7 @@ def main() -> None:  # noqa: C901 (complexity acceptable for CLI validation)
     if errors:
         for e in errors:
             print(f'ERROR: {e}', file=sys.stderr)
-        print(f'\nRun with --help for usage information.', file=sys.stderr)
+        print('\nRun with --help for usage information.', file=sys.stderr)
         sys.exit(1)
 
     assert registry is not None  # validated above; None adds error → sys.exit
@@ -2347,8 +2346,6 @@ def main() -> None:  # noqa: C901 (complexity acceptable for CLI validation)
         # Default: use ROOT/temp/dep-review/session.json if it exists.
         default_session = root / 'temp' / 'dep-review' / 'session.json'
         session_file = default_session if default_session.exists() else None
-    alternatives_critical = False
-
     # --- Execute requested modes in order ---
     if do_alternatives:
         result = analyzer.check_alternatives(pkgname, new_ver, work, root)
@@ -2410,7 +2407,6 @@ def main() -> None:  # noqa: C901 (complexity acceptable for CLI validation)
         critical = [c for c in concerns if c.startswith(_critical_prefixes)]
 
         if critical:
-            alternatives_critical = True
             print(
                 '\nALTERNATIVES_RESULT: CRITICAL\n'
                 f'  {len(critical)} high-confidence attack signal(s) found.\n'

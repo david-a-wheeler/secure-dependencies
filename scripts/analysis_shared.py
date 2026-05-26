@@ -243,8 +243,8 @@ def compute_dep_diff(
     >>> removed
     ['c']
     """
-    dep_lines_new = sorted(sanitize_line(l) for l in runtime_dep_lines)
-    dep_lines_old = sorted(sanitize_line(l) for l in old_dep_lines)
+    dep_lines_new = sorted(sanitize_line(ln) for ln in runtime_dep_lines)
+    dep_lines_old = sorted(sanitize_line(ln) for ln in old_dep_lines)
     added_deps = sorted(set(dep_lines_new) - set(dep_lines_old))
     removed_deps = sorted(set(dep_lines_old) - set(dep_lines_new))
     return dep_lines_new, dep_lines_old, added_deps, removed_deps
@@ -4538,7 +4538,7 @@ def run_ai_sandbox(
         return failure_sentinel
 
     if not isinstance(data, dict) or not _validate_ai_output(data, schema):
-        print(f'  WARNING: AI sandbox output failed schema validation', file=sys.stderr)
+        print('  WARNING: AI sandbox output failed schema validation', file=sys.stderr)
         return failure_sentinel
 
     return data

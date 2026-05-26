@@ -179,7 +179,7 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
         for key in ('source_code_uri', 'homepage_uri'):
             ek = re.escape(key)
             m = re.search(
-                rf'["\']' + ek + r'["\']\s*=>\s*["\']([^"\']+)',
+                r'["\']' + ek + r'["\']\s*=>\s*["\']([^"\']+)',
                 gemspec_text)
             if m:
                 return m.group(1).strip().rstrip('/')
@@ -633,9 +633,9 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
         if not text:
             return []
         return [
-            l for l in text.splitlines()
-            if 'add_runtime_dependency' in l
-            or ('add_dependency' in l and 'development' not in l)
+            ln for ln in text.splitlines()
+            if 'add_runtime_dependency' in ln
+            or ('add_dependency' in ln and 'development' not in ln)
         ]
 
     def fetch_all_registry_data(
