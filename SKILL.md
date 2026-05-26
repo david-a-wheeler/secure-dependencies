@@ -365,8 +365,10 @@ analysis (adds reproducible-build verification), or full analysis
 
 ### Sub-Agent Brief Template
 
-Before spawning each per-package sub-agent, read
-`references/package-analysis-brief.md` for the complete brief template.
+Read `references/package-analysis-brief.md` once, before spawning the
+first sub-agent. The instructions it contains are the same for every
+package; only the substituted values (session file, package name, version)
+differ, and those come from the NEXT_ACTION block each time.
 
 The brief covers: running the NEXT_ACTION command, reading structured output
 files, applying the adversarial content gate, deciding whether deeper analysis
