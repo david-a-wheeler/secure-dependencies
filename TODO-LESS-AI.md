@@ -8,7 +8,7 @@ Items are ordered roughly by impact (tokens saved / complexity removed).
 
 ---
 
-## 1. Tier 2: read `signals.txt` instead of `run-log.txt`
+## 1. ~~Tier 2: read `signals.txt` instead of `run-log.txt`~~ DONE
 
 **Current behaviour:** `package-analysis-brief.md` Step 1 redirects
 `dep_review.py` stdout to `run-log.txt`, then Step 2 tells tier 2 to read
