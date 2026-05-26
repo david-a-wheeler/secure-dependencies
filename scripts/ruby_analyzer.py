@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# analyzer_ruby.py: Ruby ecosystem analyzer for dep_review.py.
+# ruby_analyzer.py: Ruby ecosystem analyzer for dep_review.py.
 #
 # Handles the Ruby gem format (download, unpack, gemspec, Rakefile) and the
 # rubygems.org registry API.

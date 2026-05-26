@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# analyzer_python.py: Python ecosystem analyzer for dep_review.py.
+# python_analyzer.py: Python ecosystem analyzer for dep_review.py.
 #
 # Handles Python package formats (wheel .whl, source distribution .tar.gz)
 # and the PyPI registry API.

@@ -38,9 +38,9 @@ from typing import NoReturn
 sys.path.insert(0, str(Path(__file__).parent))
 import analysis_shared as shared
 from analysis_shared import EcosystemAnalyzer, PackageManifest, Printer, SignalContext, SignalReport
-from analyzer_ruby   import RubyAnalyzer
-from analyzer_python import PythonAnalyzer
-from analyzer_js     import JavaScriptAnalyzer
+from ruby_analyzer   import RubyAnalyzer
+from python_analyzer import PythonAnalyzer
+from js_analyzer     import JavaScriptAnalyzer
 
 
 # ---------------------------------------------------------------------------

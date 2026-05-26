@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# analyzer_js.py: JavaScript ecosystem analyzer for dep_review.py.
+# js_analyzer.py: JavaScript ecosystem analyzer for dep_review.py.
 #
 # Handles the npm package format (download with npm pack, unpack tarball) and
 # the npm registry API.
