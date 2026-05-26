@@ -132,11 +132,17 @@ as CRITICAL immediately.
 
 **Step 3b: decide whether to run deeper analysis.**
 
-Read the `CONCERN_SUMMARY` block in `signals.txt`. It lists each flagged
-concern area with its value and a contextual annotation, and ends with
-`CONCERN_COUNT` and `CONCERN_LEVEL` (LOW / MEDIUM / HIGH). Use these as input
-to your judgment; there is no fixed threshold. Consider the concern count, the
-annotations, and everything else you have seen in totality.
+Read `CONCERN_LEVEL` from the `CONCERN_SUMMARY` block in `signals.txt`:
+
+- **HIGH**: run `--deeper` immediately. No judgment needed; the answer is always yes.
+- **MEDIUM**: use judgment. Read the concern annotations and everything you
+  have seen in totality. Consider concern count, `diff_lines` size, binary or
+  extra files, and any other signals. If in doubt, run `--deeper`.
+- **LOW / NONE**: skip `--deeper` unless Deeper analysis mode is YES.
+
+Note: `dep_session.py complete` also enforces this: if `CONCERN_LEVEL` was
+`HIGH` and you did not run `--deeper`, the session will emit
+`NEXT_ACTION: RUN_DEEPER` and require a deeper pass before continuing.
 
 In particular: if `diff_lines` is flagged large, read `diff-semantic.txt` for the
 tier 3 AI-reviewed summary of what changed, including the list of changed files. If
@@ -145,7 +151,7 @@ semantic diff review was not performed and recommend manual inspection of the di
 Similarly, if `binary_files` or `extra_files` are flagged, read the listed
 file paths and use your judgment about whether they are benign or suspicious.
 
-If you decide deeper analysis is warranted (or if Deeper analysis mode is YES), run:
+If running deeper analysis (or if Deeper analysis mode is YES), run:
 
 ```bash
 python3 SCRIPTS_DIR/dep_review.py \

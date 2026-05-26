@@ -678,6 +678,7 @@ def cmd_complete(args: argparse.Namespace) -> None:
     alternatives_critical = False
     install_time_code = False
     install_time_code_reason = ''
+    concern_level = 'NONE'
 
     if update_file.is_file():
         try:
@@ -686,6 +687,7 @@ def cmd_complete(args: argparse.Namespace) -> None:
             alternatives_critical = upd.get('alternatives_critical', False)
             install_time_code = upd.get('install_time_code', False)
             install_time_code_reason = upd.get('install_time_code_reason', '')
+            concern_level = upd.get('concern_level', 'NONE')
         except (json.JSONDecodeError, OSError) as e:
             print(f'Warning: could not read {update_file}: {e}', file=sys.stderr)
 
@@ -708,7 +710,12 @@ def cmd_complete(args: argparse.Namespace) -> None:
     ]
 
     # MEDIUM risk requires --deeper before the package can be approved.
-    deeper_needed = (risk == 'MEDIUM')
+    # HIGH concern_level also triggers deeper if the sub-agent didn't already
+    # run it (evidenced by sandbox-detection.txt, which --deeper always writes).
+    deeper_already_run = (work / 'sandbox-detection.txt').is_file()
+    deeper_needed = (risk == 'MEDIUM') or (
+        concern_level == 'HIGH' and not deeper_already_run
+    )
 
     # Record the result
     analyzed_entry = {

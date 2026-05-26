@@ -1329,6 +1329,7 @@ def _write_session_update(
     alternatives_critical: bool,
     install_time_code: bool,
     install_time_code_reason: str,
+    concern_level: str = 'NONE',
 ) -> None:
     """Write session-update.json for dep_session.py complete to consume."""
     data = {
@@ -1336,6 +1337,7 @@ def _write_session_update(
         'alternatives_critical': alternatives_critical,
         'install_time_code': install_time_code,
         'install_time_code_reason': install_time_code_reason,
+        'concern_level': concern_level,
     }
     work.mkdir(parents=True, exist_ok=True)
     (work / 'session-update.json').write_text(
@@ -2004,6 +2006,7 @@ def run_analysis(  # noqa: C901
             alternatives_critical=False,
             install_time_code=install_time,
             install_time_code_reason=install_reason,
+            concern_level=_report.concern_level,
         )
         print(f'Session update  : {work}/session-update.json')
 

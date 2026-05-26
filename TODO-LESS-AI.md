@@ -105,7 +105,7 @@ consuming AI tokens.
 
 ---
 
-## 5. Deeper analysis trigger: script decides for CONCERN_LEVEL HIGH
+## 5. ~~Deeper analysis trigger: script decides for CONCERN_LEVEL HIGH~~ DONE
 
 **Current behaviour:** Brief Step 5b tells tier 2 to read the `CONCERN_SUMMARY`
 block in `signals.txt` and decide whether to run `--deeper`, with the note
