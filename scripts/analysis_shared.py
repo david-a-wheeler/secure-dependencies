@@ -3861,11 +3861,16 @@ class SignalReport:
     mode: str = ''
     old_version: str = ''
     license_line: str = ''
+    license_note: str = ''
     health_line: str = ''
+    version_stability: str = 'unknown'
+    known_vulnerabilities: int = 0
+    health_concerns: str = 'none'
     clone_url: str = ''
     clone_status: str = ''
     extensions: str = 'NO'
     executables: str = 'NO'
+    install_hooks: str = 'NO'
     new_transitive_deps: str = ''
 
 

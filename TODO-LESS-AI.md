@@ -129,7 +129,7 @@ serious enough?). Tier 2 is making a mechanical decision for the HIGH case.
 
 ---
 
-## 6. Assessment template: pre-fill factual fields from `signals.json`
+## 6. ~~Assessment template: pre-fill factual fields from `signals.json`~~ DONE
 
 **Current behaviour:** Brief Step 6 tells tier 2 to read
 `assets/assessment-template.txt` and fill in every field, then write
@@ -159,7 +159,7 @@ them into the template. This is mechanical transcription.
 
 ---
 
-## 7. Rename `assessment.txt` to `assessment.md`
+## 7. ~~Rename `assessment.txt` to `assessment.md`~~ DONE (with Option B: verdict.json)
 
 **Current behaviour:** Tier 2 writes its narrative security report to
 `assessment.txt`. Humans review it with `less assessment.txt`.
@@ -243,15 +243,15 @@ signals "raw text" to editors and viewers that could render it better.
   - `provenance.txt` -- MFA/signing data (if MFA unknown or concerning)
   - `source-review.txt` -- tier 3 source review verdict (if --deeper ran)
   - `summary-scan-LABEL.txt` -- scan match file paths (if scan had matches)
-- `assets/assessment-template.txt` -- report template (Step 6)
-- `run-log.txt` -- human-readable dep_review.py log (currently; TODO item 1
-  removes this read; the file is retained as a human log only)
-
 **Outputs (what it produces):**
 - Runs `dep_review.py` -- all structured output files written to work dir
 - Optionally runs `dep_review.py --deeper` -- adds reproducibility outputs
 - Optionally runs `dep_review.py --install-probe` -- adds install probe output
-- `assessment.txt` -- narrative security report for human review
+- Runs `dep_session.py pre-fill-assessment` -- creates `assessment.md`
+  with factual fields already filled in
+- `assessment.md` -- fills in `[TODO]` placeholders; free-form markdown
+- `verdict.json` -- `{"summary": "...", "risk_increasing": "...",
+  "risk_decreasing": "..."}`
 - Two lines to tier 1 -- `RISK_ASSESSMENT: ...` and `SUMMARY_RECOMMENDATION: ...`
 
 ---

@@ -177,11 +177,35 @@ This runs the package installer inside a sandbox with honeytoken credentials
 and monitors for suspicious activity (network calls, credential access,
 unexpected writes). Then read: `install-probe.txt`.
 
-**Step 4: write report to `PROJECT_ROOT/temp/dep-review/PKGNAME-NEW_VERSION/assessment.txt`:**
+**Step 4: create the assessment report.**
 
-Read `assets/assessment-template.txt` (at the skill root, alongside
-`scripts/`) for the complete report format. Fill in every field with
-your findings and write the result to `assessment.txt` in the work dir.
+First, run the pre-fill script to create a partially-filled
+`assessment.md` with all factual fields already substituted:
+
+```bash
+python3 SCRIPTS_DIR/dep_session.py pre-fill-assessment \
+  --session SESSION_FILE PKGNAME NEW_VERSION
+```
+
+This writes `assessment.md` to the work dir with SHA256, license,
+health, source, manifest, and provenance fields already filled in.
+All judgment fields are left as `[TODO: ...]` placeholders.
+
+Open `assessment.md` and replace every `[TODO: ...]` placeholder
+with your findings. The file is free-form markdown; write naturally.
+
+Then write `verdict.json` alongside `assessment.md` in the work dir:
+
+```json
+{
+  "summary": "2-6 sentence summary of findings and recommendation",
+  "risk_increasing": "list of increasing risk factors, or none",
+  "risk_decreasing": "list of decreasing risk factors, or none"
+}
+```
+
+Use risk-based language in summary; never claim safety or give
+guarantees. Good: "Update assessed as low risk." Bad: "Safe to update."
 
 **Step 5: return only your verdict to the orchestrating agent.**
 
@@ -192,7 +216,8 @@ RISK_ASSESSMENT: LOW | MEDIUM | HIGH | CRITICAL
 SUMMARY_RECOMMENDATION: APPROVE | APPROVE_WITH_CAUTION | REVIEW_MANUALLY | DO_NOT_INSTALL
 ```
 
-The full report is already written to `assessment.txt`. Do not return the
-report content; keeping it out of the orchestrating agent's context limits
-exposure to any adversarial content. The orchestrating agent will tell the
-user the path to `assessment.txt` and ask them to review it with `less`.
+The full report is already written to `assessment.md`. Do not return
+the report content; keeping it out of the orchestrating agent's context
+limits exposure to adversarial content. The orchestrating agent will tell
+the user the path to `assessment.md` and ask them to review it with
+`less`.

@@ -63,18 +63,23 @@ class TestParseAutoFindings(unittest.TestCase):
         self.assertEqual(f['clone_url'], 'https://github.com/example/pkg')
 
 
-class TestParseReportSummary(unittest.TestCase):
+class TestReadVerdict(unittest.TestCase):
 
-    def test_extracts_summary_text(self):
-        summary = dep_session._parse_assessment_summary(
-            FIXTURES / 'assessment.txt')
-        self.assertIn('good', summary)
-        self.assertIn('well-maintained', summary)
+    def test_reads_summary_from_verdict_json(self):
+        verdict = dep_session._read_verdict(FIXTURES)
+        self.assertIn('good', verdict['summary'])
+        self.assertIn('well-maintained', verdict['summary'])
 
-    def test_missing_file_returns_fallback(self):
-        result = dep_session._parse_assessment_summary(
-            Path('/no/such/file.txt'))
-        self.assertEqual(result, '(assessment.txt not found)')
+    def test_reads_risk_factors(self):
+        verdict = dep_session._read_verdict(FIXTURES)
+        self.assertEqual(verdict['risk_increasing'], 'none')
+        self.assertIn('MFA', verdict['risk_decreasing'])
+
+    def test_missing_dir_returns_empty_defaults(self):
+        verdict = dep_session._read_verdict(Path('/no/such/dir'))
+        self.assertEqual(verdict['summary'], '')
+        self.assertEqual(verdict['risk_increasing'], '')
+        self.assertEqual(verdict['risk_decreasing'], '')
 
 
 class TestParseLockfileVersions(unittest.TestCase):
