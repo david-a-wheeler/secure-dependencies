@@ -549,6 +549,11 @@ def print_next_action(session: dict, session_path: Path) -> None:
     print(f'  {cmd}')
     print()
     print('Step 2: pre-fill assessment.md, fill judgment, write verdict.json')
+    prefill_cmd = (
+        f'python3 {scripts_rel}/dep_session.py pre-fill-assessment'
+        f' --session {session_rel} -- {sname} {sversion}'
+    )
+    print(f'  {prefill_cmd}')
     print()
     print('Step 3: record verdict:')
     _token_flag = f' --token {_tok}' if _tok else ''
