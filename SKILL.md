@@ -308,6 +308,18 @@ file is installed. Resolve `SCRIPTS_DIR` from the absolute path to this
 After confirming which packages to analyze in Phase 1, initialize a session.
 The session file tracks the BFS queue so neither you nor any sub-agent has to.
 
+**If the lockfile was already updated** (Dependabot PR, `bundle update`, etc.)
+and you need to identify which packages changed, run:
+
+```bash
+python3 SCRIPTS_DIR/dep_session.py diff-packages --root PROJECT_ROOT
+# or, to compare against a specific ref:
+python3 SCRIPTS_DIR/dep_session.py diff-packages --root PROJECT_ROOT --since main
+```
+
+This prints `--update PKG OLD NEW` and `--new PKG VER` lines per registry that
+you can pass directly to `init`. Do not read the lockfile diff manually.
+
 ```bash
 SESSION=PROJECT_ROOT/temp/dep-review/session.json
 

@@ -77,7 +77,7 @@ spending tokens on mechanical filesystem inspection.
 
 ---
 
-## 4. Changed-package identification: script parses lockfile diff
+## 4. ~~Changed-package identification: script parses lockfile diff~~ DONE
 
 **Current behaviour (UPDATE mode):** Tier 1 reads the git diff of lockfiles
 (`Gemfile.lock`, `requirements.txt`, etc.) and extracts package names and

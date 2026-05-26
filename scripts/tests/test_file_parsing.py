@@ -77,6 +77,93 @@ class TestParseReportSummary(unittest.TestCase):
         self.assertEqual(result, '(assessment.txt not found)')
 
 
+class TestParseLockfileVersions(unittest.TestCase):
+    """Unit tests for the lockfile version parsers used by diff-packages."""
+
+    def test_gemfile_lock_versions(self):
+        content = (FIXTURES / 'Gemfile.lock').read_text()
+        pkgs = dep_session._parse_gemfile_lock_versions(content)
+        self.assertEqual(pkgs.get('rack'), '3.0.0')
+        self.assertEqual(pkgs.get('rails'), '7.0.0')
+        self.assertEqual(pkgs.get('activesupport'), '7.0.0')
+        # Sub-dep constraint lines (= 7.0.0) must not be included as versions
+        self.assertNotIn('railties', pkgs)
+
+    def test_toml_lock_versions(self):
+        content = """\
+[[package]]
+name = "requests"
+version = "2.28.1"
+description = "HTTP library"
+
+[[package]]
+name = "Flask"
+version = "2.3.0"
+"""
+        pkgs = dep_session._parse_toml_lock_versions(content)
+        self.assertEqual(pkgs.get('requests'), '2.28.1')
+        self.assertEqual(pkgs.get('flask'), '2.3.0')
+
+    def test_requirements_txt_versions(self):
+        content = "requests==2.28.1\nflask>=2.0\ndjango~=4.2\n"
+        pkgs = dep_session._parse_requirements_txt_versions(content)
+        self.assertEqual(pkgs.get('requests'), '2.28.1')
+        self.assertNotIn('flask', pkgs)   # range, not pin
+        self.assertNotIn('django', pkgs)  # range, not pin
+
+    def test_pipfile_lock_versions(self):
+        content = (
+            '{"default": {"requests": {"version": "==2.28.1"}},'
+            ' "develop": {"pytest": {"version": "==7.2.0"}}}'
+        )
+        pkgs = dep_session._parse_pipfile_lock_versions(content)
+        self.assertEqual(pkgs.get('requests'), '2.28.1')
+        self.assertEqual(pkgs.get('pytest'), '7.2.0')
+
+    def test_package_lock_json_versions_v3(self):
+        content = (
+            '{"lockfileVersion":3,"packages":{'
+            '"":{},'
+            '"node_modules/lodash":{"version":"4.17.21"},'
+            '"node_modules/@scope/pkg":{"version":"1.0.0"},'
+            '"node_modules/lodash/node_modules/deep":{"version":"0.1.0"}'
+            '}}'
+        )
+        pkgs = dep_session._parse_package_lock_json_versions(content)
+        self.assertEqual(pkgs.get('lodash'), '4.17.21')
+        self.assertEqual(pkgs.get('@scope/pkg'), '1.0.0')
+        self.assertNotIn('deep', pkgs)   # nested dep, skipped
+
+    def test_yarn_lock_versions(self):
+        content = """\
+# yarn lockfile v1
+
+lodash@^4.17.20, lodash@^4.17.21:
+  version "4.17.21"
+  resolved "https://registry.yarnpkg.com/lodash"
+
+"@scope/pkg@^1.0.0":
+  version "1.0.0"
+"""
+        pkgs = dep_session._parse_yarn_lock_versions(content)
+        self.assertEqual(pkgs.get('lodash'), '4.17.21')
+        self.assertEqual(pkgs.get('@scope/pkg'), '1.0.0')
+
+    def test_pnpm_lock_v6(self):
+        content = """\
+lockfileVersion: '6.0'
+
+packages:
+  /lodash/4.17.21:
+    resolution: {integrity: sha512-xxx}
+  /@scope/pkg/1.0.0:
+    resolution: {integrity: sha512-yyy}
+"""
+        pkgs = dep_session._parse_pnpm_lock_versions(content)
+        self.assertEqual(pkgs.get('lodash'), '4.17.21')
+        self.assertEqual(pkgs.get('@scope/pkg'), '1.0.0')
+
+
 class TestReadLockfileBaseline(unittest.TestCase):
 
     def test_rubygems_extracts_top_level_gems(self):
