@@ -34,11 +34,11 @@ import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import NoReturn
+from typing import NoReturn, cast
 
 sys.path.insert(0, str(Path(__file__).parent))
 import analysis_shared as shared
-from analysis_shared import PackageManifest, Printer, SignalContext, SignalReport
+from analysis_shared import EcosystemAnalyzer, PackageManifest, Printer, SignalContext, SignalReport
 
 
 # ---------------------------------------------------------------------------
@@ -2309,7 +2309,7 @@ def main() -> None:  # noqa: C901 (complexity acceptable for CLI validation)
     # --- Load ecosystem analyzer ---
     hooks_module = REGISTRY_TO_HOOKS[registry]
     try:
-        analyzer = importlib.import_module(hooks_module).Analyzer(registry_url=registry_url)
+        analyzer = cast(EcosystemAnalyzer, importlib.import_module(hooks_module).Analyzer(registry_url=registry_url))
     except ImportError as exc:
         _die(
             f'No analyzer module for registry {registry!r}: {exc}\n'
