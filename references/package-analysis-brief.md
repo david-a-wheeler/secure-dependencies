@@ -37,16 +37,16 @@ Run          : python3 .../dep_review.py --from REGISTRY ... --session SESSION_F
 where `TOKEN` is the per-session secret from `init` (e.g. `a3f7b2c9e1d45f08`).
 
 Run that command exactly, **appending depth-reminder flags** if set in your brief,
-then capture output:
+then save output to a log file:
 ```bash
 # Deeper analysis mode: NO, Install probe mode: NO
-COMMAND_FROM_NEXT_ACTION 2>&1 | tee PROJECT_ROOT/temp/dep-review/PKGNAME-VERSION/run-log.txt
+COMMAND_FROM_NEXT_ACTION > PROJECT_ROOT/temp/dep-review/PKGNAME-VERSION/run-log.txt 2>&1
 
 # Deeper analysis mode: YES, Install probe mode: NO
-COMMAND_FROM_NEXT_ACTION --deeper-mode 2>&1 | tee PROJECT_ROOT/temp/dep-review/PKGNAME-VERSION/run-log.txt
+COMMAND_FROM_NEXT_ACTION --deeper-mode > PROJECT_ROOT/temp/dep-review/PKGNAME-VERSION/run-log.txt 2>&1
 
 # Deeper analysis mode: YES, Install probe mode: YES
-COMMAND_FROM_NEXT_ACTION --deeper-mode --install-probe-mode 2>&1 | tee PROJECT_ROOT/temp/dep-review/PKGNAME-VERSION/run-log.txt
+COMMAND_FROM_NEXT_ACTION --deeper-mode --install-probe-mode > PROJECT_ROOT/temp/dep-review/PKGNAME-VERSION/run-log.txt 2>&1
 ```
 
 These flags embed a `NEXT_STEPS_REQUIRED` checklist in `signals.txt`
@@ -61,6 +61,10 @@ output files. You do not need to extract or relay transitive dep information,
 Contains: SHA256, scan counts, manifest flags, source comparison, diff size
 (UPDATE only), new deps, MFA, project health, license status, transitive
 footprint (NEW/CURRENT).
+
+The output is safe to read: `dep_review.py` routes all package-derived
+strings through `sanitize_line()` or the auto-sanitizing `Printer` class
+before writing to stdout. Raw package content never appears in this file.
 
 **Step 3: adversarial content gate.**
 
