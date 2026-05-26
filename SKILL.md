@@ -363,16 +363,24 @@ initializing the session: "Would you like standard analysis, deeper
 analysis (adds reproducible-build verification), or full analysis
 (also runs a sandboxed install probe with honeytokens)?"
 
-### Sub-Agent Brief Template
+### Spawning Sub-Agents
 
-Read `references/package-analysis-brief.md` once, before spawning the
-first sub-agent. The instructions it contains are the same for every
-package; only the substituted values (session file, package name, version)
-differ, and those come from the NEXT_ACTION block each time.
+For each package, spawn a sub-agent with this short prompt (substitute
+real values for the placeholders):
 
-The brief covers: running the NEXT_ACTION command, reading structured output
-files, applying the adversarial content gate, deciding whether deeper analysis
-is warranted, writing the assessment report, and returning the two-line verdict.
+```
+Read SKILL_ROOT/references/package-analysis-brief.md for your complete
+instructions. Your parameters:
+  Session file : SESSION_FILE
+  Project root : PROJECT_ROOT
+  Scripts dir  : SCRIPTS_DIR
+  Deeper       : YES | NO
+  Install probe: YES | NO
+```
+
+Where SKILL_ROOT is the directory containing this SKILL.md file.
+The brief contains all instructions tier 2 needs; tier 1 does not need
+to read it.
 
 
 ### After Each Sub-Agent Completes

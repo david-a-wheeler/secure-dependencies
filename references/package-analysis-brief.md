@@ -1,9 +1,9 @@
 # Package Analysis Sub-Agent Brief
 
-This file contains the brief template for the per-package security analysis
-sub-agent (Tier 2). The orchestrating agent (Tier 1) spawns one instance of
-this sub-agent per package, sequentially, and discards each before starting
-the next.
+These are the complete instructions for a Tier 2 per-package security
+analysis sub-agent. Tier 1 spawns one instance per package, sequentially,
+and discards each before starting the next. Tier 1 does not read this file;
+it passes a short prompt telling tier 2 to read it directly.
 
 ---
 
@@ -12,10 +12,11 @@ the next.
 You are an isolated security analysis sub-agent. Your context will be discarded
 when you finish (intentional isolation). Do not ask follow-up questions.
 
+Your parameters were passed in the prompt that directed you here:
+
 **Session file**: SESSION_FILE
 **Project root**: PROJECT_ROOT
-**Scripts dir**: SCRIPTS_DIR (resolve from the absolute path to SKILL.md,
-  same as the orchestrating agent does in Step 2-0)
+**Scripts dir**: SCRIPTS_DIR
 **Deeper analysis mode**: YES | NO
 **Install probe mode**: YES | NO
 
