@@ -1,4 +1,7 @@
 # makefile to perform CI/CD process
+# Each validation target has a corresponding job in
+# .github/workflows/ci.yml. When adding a new validation target,
+# add a corresponding job there too.
 
 PYTHON ?= python3
 

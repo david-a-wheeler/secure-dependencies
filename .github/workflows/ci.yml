@@ -3,6 +3,9 @@ name: CI
 # This pins dependencies to counter supply chain attacks.
 # You have to update this file to update dependencies, but that's okay;
 # dependabot will propose them, and we can decide when to accept.
+#
+# Each job here corresponds to a validation target in the Makefile.
+# When adding a new validation target to the Makefile, add a job here too.
 
 on:
   push:
@@ -39,6 +42,37 @@ jobs:
       - name: Run type check
         run: make typecheck
 
+  syntax_valid:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: "3.13"
+          cache: "pip"
+          cache-dependency-path: .github/workflows/ci.yml
+      - name: Check Python syntax
+        run: make syntax_valid
+
+  emdash:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Check for em/en dashes
+        run: make emdash
+
+  validate_skill:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: "3.13"
+          cache: "pip"
+          cache-dependency-path: .github/workflows/ci.yml
+      - name: Validate skill frontmatter
+        run: make validate_skill
+
   test:
     runs-on: ubuntu-latest
     strategy:
@@ -54,5 +88,5 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Run CI/CD validation (tests, linters, etc.)
-        run: make
+      - name: Run tests
+        run: make test
