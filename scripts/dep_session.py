@@ -78,6 +78,9 @@ VALID_RECOMMENDATIONS = frozenset({
 # to explicitly terminate option processing, providing defense-in-depth
 # that is portable across platforms and independent of this regex.
 _DEP_NAME_RE = re.compile(r'^[@A-Za-z0-9][A-Za-z0-9._/:-]{0,213}$')
+# Allows semver, pre-release (+/-/alpha/beta), and build metadata.
+# Excludes spaces, '--', and other text that could confuse arg parsers.
+_RE_SAFE_VER = re.compile(r'^[0-9][A-Za-z0-9._+\-]{0,100}$')
 VALID_RISKS = frozenset({'LOW', 'MEDIUM', 'HIGH', 'CRITICAL'})
 
 # Shell command to install approved packages, per ecosystem.
@@ -1094,7 +1097,17 @@ def _git_show_file(repo_root: Path, ref: str, filepath: str) -> str | None:
 
 
 def _parse_gemfile_lock_versions(content: str) -> dict[str, str]:
-    """Return {lowercase_name: version} for all gems in Gemfile.lock specs sections."""
+    """Return {lowercase_name: version} for all gems in Gemfile.lock specs sections.
+
+    Top-level gems (4-space indent with a bare version) are included; sub-dep
+    constraint lines (6-space indent or constraint syntax like ``= 7.0.0``) are
+    excluded because their version field starts with a letter, not a digit.
+
+    >>> _parse_gemfile_lock_versions('GEM\\n  specs:\\n    rails (7.0.0)\\n      railties (= 7.0.0)\\n    rake (13.0.6)\\n')
+    {'rails': '7.0.0', 'rake': '13.0.6'}
+    >>> _parse_gemfile_lock_versions('')
+    {}
+    """
     pkgs: dict[str, str] = {}
     in_specs = False
     for line in content.splitlines():
@@ -1116,7 +1129,15 @@ def _parse_gemfile_lock_versions(content: str) -> dict[str, str]:
 
 
 def _parse_toml_lock_versions(content: str) -> dict[str, str]:
-    """Return {normalized_name: version} from a poetry.lock or uv.lock file."""
+    """Return {normalized_name: version} from a poetry.lock or uv.lock file.
+
+    >>> _parse_toml_lock_versions('[[package]]\\nname = "requests"\\nversion = "2.28.1"\\n')
+    {'requests': '2.28.1'}
+    >>> _parse_toml_lock_versions('[[package]]\\nname = "Flask"\\nversion = "2.3.0"\\n')
+    {'flask': '2.3.0'}
+    >>> _parse_toml_lock_versions('')
+    {}
+    """
     pkgs: dict[str, str] = {}
     current_name: str | None = None
     in_pkg = False
@@ -1131,7 +1152,8 @@ def _parse_toml_lock_versions(content: str) -> dict[str, str]:
         if m_name:
             current_name = re.sub(r'[-_.]+', '-', m_name.group(1)).lower()
             continue
-        m_ver = re.match(r'^version\s*=\s*"([^"]{1,100})"', line)
+        # Tightened from [^"] to exclude spaces and flag-like text.
+        m_ver = re.match(r'^version\s*=\s*"([0-9][A-Za-z0-9._+\-]{0,100})"', line)
         if m_ver and current_name:
             pkgs[current_name] = m_ver.group(1)
             in_pkg = False
@@ -1140,7 +1162,16 @@ def _parse_toml_lock_versions(content: str) -> dict[str, str]:
 
 
 def _parse_requirements_txt_versions(content: str) -> dict[str, str]:
-    """Return {normalized_name: version} for pinned (==) entries in requirements.txt."""
+    """Return {normalized_name: version} for pinned (==) entries in requirements.txt.
+
+    Unpinned constraints (>=, ~=, etc.) are silently ignored because they do
+    not give a definitive old/new version for a diff.
+
+    >>> _parse_requirements_txt_versions('requests==2.28.1\\nflask>=2.0\\n# comment\\n')
+    {'requests': '2.28.1'}
+    >>> _parse_requirements_txt_versions('Django==4.2.0\\n')
+    {'django': '4.2.0'}
+    """
     pkgs: dict[str, str] = {}
     for line in content.splitlines():
         line = line.strip()
@@ -1154,7 +1185,13 @@ def _parse_requirements_txt_versions(content: str) -> dict[str, str]:
 
 
 def _parse_pipfile_lock_versions(content: str) -> dict[str, str]:
-    """Return {normalized_name: version} from a Pipfile.lock JSON file."""
+    """Return {normalized_name: version} from a Pipfile.lock JSON file.
+
+    >>> _parse_pipfile_lock_versions('{"default": {"requests": {"version": "==2.28.1"}}, "develop": {"pytest": {"version": "==7.2.0"}}}')
+    {'requests': '2.28.1', 'pytest': '7.2.0'}
+    >>> _parse_pipfile_lock_versions('not json')
+    {}
+    """
     pkgs: dict[str, str] = {}
     try:
         data = json.loads(content)
@@ -1165,14 +1202,26 @@ def _parse_pipfile_lock_versions(content: str) -> dict[str, str]:
             if not isinstance(info, dict):
                 continue
             ver = info.get('version', '')
-            if isinstance(ver, str) and ver.startswith('=='):
-                name = re.sub(r'[-_.]+', '-', pkg_name).lower()
-                pkgs[name] = ver[2:]
+            if not (isinstance(ver, str) and ver.startswith('==')):
+                continue
+            name = re.sub(r'[-_.]+', '-', pkg_name).lower()
+            version = ver[2:]
+            # JSON keys and values are unstructured; validate before accepting.
+            if _DEP_NAME_RE.match(name) and _RE_SAFE_VER.match(version):
+                pkgs[name] = version
     return pkgs
 
 
 def _parse_package_lock_json_versions(content: str) -> dict[str, str]:
-    """Return {name: version} from a package-lock.json (v1/v2/v3) file."""
+    """Return {name: version} from a package-lock.json (v1/v2/v3) file.
+
+    Nested deps (e.g. ``node_modules/foo/node_modules/bar``) are excluded.
+
+    >>> _parse_package_lock_json_versions('{"packages": {"node_modules/lodash": {"version": "4.17.21"}, "node_modules/a/node_modules/b": {"version": "1.0.0"}}}')
+    {'lodash': '4.17.21'}
+    >>> _parse_package_lock_json_versions('not json')
+    {}
+    """
     pkgs: dict[str, str] = {}
     try:
         data = json.loads(content)
@@ -1193,18 +1242,30 @@ def _parse_package_lock_json_versions(content: str) -> dict[str, str]:
             else:
                 continue  # nested dep path
             ver = info.get('version', '') if isinstance(info, dict) else ''
-            if ver:
-                pkgs[pkg.lower()] = ver
+            name = pkg.lower()
+            # JSON values are unstructured; validate before accepting.
+            if ver and _DEP_NAME_RE.match(name) and _RE_SAFE_VER.match(ver):
+                pkgs[name] = ver
     else:
         for name, info in data.get('dependencies', {}).items():
             ver = info.get('version', '') if isinstance(info, dict) else ''
-            if ver:
-                pkgs[name.lower()] = ver
+            name = name.lower()
+            if ver and _DEP_NAME_RE.match(name) and _RE_SAFE_VER.match(ver):
+                pkgs[name] = ver
     return pkgs
 
 
 def _parse_yarn_lock_versions(content: str) -> dict[str, str]:
-    """Return {name: version} from a yarn.lock file."""
+    """Return {name: version} from a yarn.lock file.
+
+    Handles multiple constraints for the same package on one header line, and
+    scoped packages (``@scope/pkg@constraint``).
+
+    >>> _parse_yarn_lock_versions('# yarn lockfile v1\\n\\nlodash@^4.17.20, lodash@^4.17.21:\\n  version "4.17.21"\\n')
+    {'lodash': '4.17.21'}
+    >>> _parse_yarn_lock_versions('"@scope/pkg@^1.0.0":\\n  version "1.0.0"\\n')
+    {'@scope/pkg': '1.0.0'}
+    """
     pkgs: dict[str, str] = {}
     current_names: list[str] = []
     for line in content.splitlines():
@@ -1219,19 +1280,29 @@ def _parse_yarn_lock_versions(content: str) -> dict[str, str]:
                 at = part.rfind('@')
                 if at > 0:
                     name = part[:at].lower()
-                    if name not in current_names:
+                    if name not in current_names and _DEP_NAME_RE.match(name):
                         current_names.append(name)
         elif current_names:
-            m = re.match(r'^\s+version\s+"([^"]{1,100})"', line)
+            # Tightened from [^"] to exclude spaces and flag-like text.
+            m = re.match(r'^\s+version\s+"([0-9][A-Za-z0-9._+\-]{0,100})"', line)
             if m:
+                ver = m.group(1)
                 for name in current_names:
-                    pkgs[name] = m.group(1)
+                    pkgs[name] = ver
                 current_names = []
     return pkgs
 
 
 def _parse_pnpm_lock_versions(content: str) -> dict[str, str]:
-    """Return {name: version} from a pnpm-lock.yaml file (v6 and v9 formats)."""
+    """Return {name: version} from a pnpm-lock.yaml file (v6 and v9 formats).
+
+    v6 uses ``/name/version:`` keys; v9 uses ``name@version:`` keys.
+
+    >>> _parse_pnpm_lock_versions('packages:\\n  /lodash/4.17.21:\\n    resolution: {}\\n')
+    {'lodash': '4.17.21'}
+    >>> _parse_pnpm_lock_versions("packages:\\n  lodash@4.17.21:\\n    resolution: {}\\n")
+    {'lodash': '4.17.21'}
+    """
     pkgs: dict[str, str] = {}
     in_packages = False
     for line in content.splitlines():
@@ -1329,10 +1400,17 @@ def cmd_diff_packages(args: argparse.Namespace) -> None:
         news: list[tuple[str, str]] = []
 
         for name, new_ver in sorted(current_pkgs.items()):
+            # Defense-in-depth: re-validate before printing even though parsers
+            # already filter; lockfile content is developer-controlled, not
+            # attacker-controlled, but guard against parser bugs.
+            if not _DEP_NAME_RE.match(name) or not _RE_SAFE_VER.match(new_ver):
+                continue
             old_ver = old_pkgs.get(name)
             if old_ver is None:
                 news.append((name, new_ver))
             elif old_ver != new_ver:
+                if not _RE_SAFE_VER.match(old_ver):
+                    continue
                 updates.append((name, old_ver, new_ver))
 
         if not updates and not news:
@@ -1340,9 +1418,10 @@ def cmd_diff_packages(args: argparse.Namespace) -> None:
 
         print(f'REGISTRY: {eco}  (lockfile: {lockfile_used})')
         for name, old_ver, new_ver in updates:
-            print(f'--update {name} {old_ver} {new_ver}')
+            print(f'--update {shared.sanitize_line(name)} '
+                  f'{shared.sanitize_line(old_ver)} {shared.sanitize_line(new_ver)}')
         for name, new_ver in news:
-            print(f'--new {name} {new_ver}')
+            print(f'--new {shared.sanitize_line(name)} {shared.sanitize_line(new_ver)}')
         print()
 
         total_updates += len(updates)
