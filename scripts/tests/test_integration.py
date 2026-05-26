@@ -1,13 +1,15 @@
 """Integration tests for the full run_analysis() pipeline.
 
-These tests run the complete analysis pipeline against minimal fixture packages,
-replacing only network calls (registry_client.*) and subprocess git operations
-(clone_source_repo). Everything else — manifest parsing, scanning, license
-evaluation, health checks, signals writing — runs for real.
+These tests run the complete analysis pipeline against minimal fixture
+packages, replacing only network calls (registry_client.*) and subprocess
+git operations (clone_source_repo). Everything else (manifest parsing,
+scanning, license evaluation, health checks, and signals writing)
+uns for real.
 
-The primary goal is to catch type mismatches and logic errors that only surface
-when the full pipeline runs end-to-end, such as the PackageManifest/dict
-mismatch that previously crashed dep_review.py --basic at the license step.
+The primary goal is to catch type mismatches and logic errors that only
+surface when the full pipeline runs end-to-end, such as the
+PackageManifest/dict mismatch that previously crashed
+dep_review.py --basic at the license step.
 """
 import json
 import sys
