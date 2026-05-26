@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# analyzer_ruby.py: Ruby language operations for the dependency analysis driver.
+# ruby_analyzer.py: Ruby ecosystem analyzer for dep_review.py.
 #
 # Handles the Ruby gem format (download, unpack, gemspec, Rakefile) and the
-# rubygems.org registry API. Used for --from rubygems; can be reused for other
-# Ruby gem registries (Gemfury, GitHub Packages, etc.) with a different
-# registry entry in REGISTRY_TO_HOOKS pointing here.
+# rubygems.org registry API.
 #
-# Called by dep_review.py; do not invoke directly.
+# Each function accepts a `failures: list[str]` param and calls
+# failures.append(...) on errors rather than raising exceptions.
 # Each function accepts a `failures: list[str]` param and calls
 # failures.append(...) on errors rather than raising exceptions.
 #
@@ -180,7 +179,7 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
         for key in ('source_code_uri', 'homepage_uri'):
             ek = re.escape(key)
             m = re.search(
-                rf'["\']' + ek + r'["\']\s*=>\s*["\']([^"\']+)',
+                r'["\']' + ek + r'["\']\s*=>\s*["\']([^"\']+)',
                 gemspec_text)
             if m:
                 return m.group(1).strip().rstrip('/')
@@ -634,9 +633,9 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
         if not text:
             return []
         return [
-            l for l in text.splitlines()
-            if 'add_runtime_dependency' in l
-            or ('add_dependency' in l and 'development' not in l)
+            ln for ln in text.splitlines()
+            if 'add_runtime_dependency' in ln
+            or ('add_dependency' in ln and 'development' not in ln)
         ]
 
     def fetch_all_registry_data(
@@ -1272,4 +1271,3 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
             diff_out, p, work, _RE_REPRO_CODE, _RE_REPRO_META)
 
 
-Analyzer = RubyAnalyzer   # used by dep_review.py for instantiation

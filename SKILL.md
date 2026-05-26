@@ -187,22 +187,18 @@ ask if they want to install before proceeding. **Ask only once.**
 
 ### Step 1b: Ecosystem detection and hook check
 
-Detect the project's ecosystem(s) by looking for these indicator files:
+Run:
 
-| Ecosystem | Indicator files |
-|---|---|
-| Ruby | `Gemfile`, `Gemfile.lock` |
-| Python | `pyproject.toml`, `requirements.txt`, `Pipfile.lock`, `poetry.lock`, `uv.lock` |
-| JavaScript | `package.json`, `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml` |
+```bash
+python3 SCRIPTS_DIR/dep_session.py ecosystem-detect --root PROJECT_ROOT
+```
 
-**Check whether an analyzer exists for each detected ecosystem.** Currently
-`analyzer_ruby.py` provides Ruby-specific dangerous-pattern detection. If you
-detect an ecosystem with no corresponding analyzer file in the scripts
-directory, tell the user:
+Read the output. Each detected ecosystem is listed with its analyzer
+status (`OK` or `MISSING`). If any ecosystem shows `MISSING`, tell the user:
 
 > "I don't have an analyzer for [ecosystem] yet. The analyzer enables
 > dangerous-pattern detection specific to that language. Would you like me to
-> create one using `analyzer_ruby.py`, and perhaps other analyzers,
+> create one using `ruby_analyzer.py`, and perhaps other analyzers,
 > as a starting point?"
 
 If yes, draft the analyzer file before proceeding. If no, proceed with
@@ -312,6 +308,18 @@ file is installed. Resolve `SCRIPTS_DIR` from the absolute path to this
 After confirming which packages to analyze in Phase 1, initialize a session.
 The session file tracks the BFS queue so neither you nor any sub-agent has to.
 
+**If the lockfile was already updated** (Dependabot PR, `bundle update`, etc.)
+and you need to identify which packages changed, run:
+
+```bash
+python3 SCRIPTS_DIR/dep_session.py diff-packages --root PROJECT_ROOT
+# or, to compare against a specific ref:
+python3 SCRIPTS_DIR/dep_session.py diff-packages --root PROJECT_ROOT --since main
+```
+
+This prints `--update PKG OLD NEW` and `--new PKG VER` lines per registry that
+you can pass directly to `init`. Do not read the lockfile diff manually.
+
 ```bash
 SESSION=PROJECT_ROOT/temp/dep-review/session.json
 
@@ -363,14 +371,24 @@ initializing the session: "Would you like standard analysis, deeper
 analysis (adds reproducible-build verification), or full analysis
 (also runs a sandboxed install probe with honeytokens)?"
 
-### Sub-Agent Brief Template
+### Spawning Sub-Agents
 
-Before spawning each per-package sub-agent, read
-`references/package-analysis-brief.md` for the complete brief template.
+For each package, spawn a sub-agent with this short prompt (substitute
+real values for the placeholders):
 
-The brief covers: running the NEXT_ACTION command, reading structured output
-files, applying the adversarial content gate, deciding whether deeper analysis
-is warranted, writing the assessment report, and returning the two-line verdict.
+```
+Read SKILL_ROOT/references/package-analysis-brief.md for your complete
+instructions. Your parameters:
+  Session file : SESSION_FILE
+  Project root : PROJECT_ROOT
+  Scripts dir  : SCRIPTS_DIR
+  Deeper       : YES | NO
+  Install probe: YES | NO
+```
+
+Where SKILL_ROOT is the directory containing this SKILL.md file.
+The brief contains all instructions tier 2 needs; tier 1 does not need
+to read it.
 
 
 ### After Each Sub-Agent Completes

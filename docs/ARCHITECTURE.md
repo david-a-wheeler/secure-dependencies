@@ -46,66 +46,93 @@ uses three strictly separated tiers:
 ### Tier 1: Overall orchestrator
 
 The overall orchestrator (the agent running the top-level SKILL.md
-instructions) interacts with theh scripts to manage the session queue,
-decides which packages to evaluate,
-and synthesizes final recommendations. It reads only:
-
-- The session queue file and status metadata
-- Per-package assessment summaries produced by tier 2 (below)
-- The final session report
-
-It never reads raw package source, diffs, filenames from the package, or any
-other file that could contain attacker-controlled text. Its context persists
+instructions) manages the session lifecycle, decides which packages to
+evaluate, and synthesizes final recommendations. Its context persists
 across the whole session, so it is the most valuable to protect.
+
+**Inputs:**
+- `SKILL.md` -- full instructions, read once at session start
+- User messages -- free-form (mode detection, confirmations, questions)
+- `dep_session.py env-check` stdout -- tool availability
+- `dep_session.py vuln-audit` stdout -- CVE/outdated report (UPDATE/CURRENT)
+- `dep_session.py health-scan` stdout -- triage table (CURRENT mode)
+- `dep_session.py init` stdout -- first NEXT_ACTION block + session token
+- `dep_session.py complete` stdout -- NEXT_ACTION block after each package
+- Two lines per tier 2 sub-agent: `RISK_ASSESSMENT` + `SUMMARY_RECOMMENDATION`
+
+**Outputs:**
+- User-facing text -- explanations, status updates, confirmation requests
+- Tier 2 sub-agent spawns -- short prompt: path to brief + session parameters
+- `dep_session.py init` calls -- initialises the BFS session queue
+- `dep_session.py complete` calls -- records verdicts and advances the queue
+
+It never reads raw package source, diffs, filenames, or any file that could
+contain attacker-controlled text. It never reads `assessment.txt`.
 
 ### Tier 2: Per-package agent
 
 For each package, a fresh sub-agent is spawned (its context is discarded
-after the package is done, which limits cross-package contamination). This
-agent manages the evaluation of one package by:
+after the package is done, which limits cross-package contamination). It
+invokes deterministic scripts, reads their clean structured outputs, and
+writes a human-readable assessment.
 
-- Invoking deterministic scripts and reading their clean, structured outputs
-- Invoking tier 3 AI for any content that is or might be attacker-controlled
-- Writing the package assessment
+**Inputs:**
+- Short spawn prompt from tier 1 -- brief path + session parameters (6 lines)
+- `references/package-analysis-brief.md` -- full instructions, read first
+- `signals.txt` -- machine-readable signal table, CONCERN_SUMMARY,
+  ADVERSARIAL_GATE; primary input for the security judgment
+- Supporting files read conditionally (per table in the brief):
+  - `manifest-analysis.txt`, `clone-status.txt`, `source-url.txt`,
+    `license.txt`, `project-health.txt` -- always read
+  - `extra-in-package.txt`, `binary-files.txt`, `install-scripts.txt` --
+    if those counts are non-zero
+  - `diff-semantic.txt` -- tier 3 diff review verdict (UPDATE mode)
+  - `new-deps.txt`, `dep-lockfile-check.txt`, `dep-registry.txt`,
+    `transitive-deps.txt`, `provenance.txt` -- if relevant signals present
+  - `source-review.txt` -- tier 3 source review (if --deeper ran)
+  - `summary-scan-LABEL.txt` -- scan match paths (if scan had matches)
+- `assets/assessment-template.txt` -- report template
 
-Tier 2 reads structured text files such as `signals.txt`, `metadata.txt`,
-`assessment.txt`, `diff-semantic.txt`, and `source-review.txt`. These files
-are either produced by deterministic scripts (which do their own sanitization)
-or are JSON summaries produced by a tier 3 agent and validated against a
-schema.
+**Outputs:**
+- Runs `dep_review.py` (and optionally `--deeper`, `--install-probe`) --
+  all structured output files written to the package work directory
+- `assessment.txt` -- narrative security report written for human review
+- Two lines to tier 1: `RISK_ASSESSMENT: ...` and `SUMMARY_RECOMMENDATION: ...`
 
 Tier 2 is **prohibited** from reading `raw-*` files (raw package content),
-`diff-filenames.txt`, `source-deep-diff.txt`, or any file that contains
-unfiltered package data. The SKILL.md instructions enforce this explicitly
-(which should be adequate since it never directly sees data to tell it
-otherwise).
+`diff-filenames.txt`, or `source-deep-diff.txt`. The SKILL.md instructions
+enforce this explicitly.
 
 ### Tier 3: Sandboxed AI (reads adversarial content)
 
-Tier 3 AI agents are invoked as sandboxed subprocesses
-by the deterministic Python scripts,
-not directly by AI agents.
-They are the only tier that directly reads attacker-controlled
-content such as source diffs and file listings. They:
+Tier 3 AI agents are invoked as sandboxed subprocesses by the deterministic
+Python scripts, not directly by AI agents. They are the only tier that
+directly reads attacker-controlled content.
 
-- Receive content via stdin (never via file system access)
-- Are given a fixed system prompt warning them about adversarial content
-- Return only a JSON object validated against a strict schema
+**Inputs (via stdin from dep_review.py):**
+- System prompt -- adversarial content warning + strict JSON output schema,
+  embedded in `dep_review.py`; never comes from the package
+- Package content -- raw diff (diff review) or source file listing with
+  scan-match context (source review); truncated at 500,000 characters
+
+**Outputs:**
+- JSON object validated by `run_ai_sandbox()` against a strict schema,
+  written by dep_review.py to `diff-semantic.txt` (diff review) or
+  `source-review.txt` (source review)
+- On parse failure or schema mismatch: a sentinel string
+  (`AI_REVIEW_FAILED` or `AI_REVIEW_SKIPPED`) -- never unvalidated text
+
+Additional constraints:
 - Run with `--allowedTools ''` to prevent any tool use
-- Have no network access (the invoking script controls the subprocess
-  environment)
+- No network access (the invoking script controls the subprocess environment)
 
 The schema validation in `run_ai_sandbox()` (`analysis_shared.py`) rejects
 any response that does not match the expected structure: correct field names,
 correct value types, non-empty strings for string fields, and enum values
-drawn from a fixed allowed set. A failure or schema mismatch produces a
-sentinel value (e.g., `DIFF_REVIEW_FAILED`) that tier 2 can see and report,
-rather than passing through unvalidated text.
+drawn from a fixed allowed set.
 
 Content piped to tier 3 is truncated at 500,000 characters before being sent,
 to prevent resource exhaustion from an unusually large file.
-This does mean that in some cases the AI won't see everything, but
-at that point the AI would be less effective anyway.
 
 ### Tier selection and configuration
 

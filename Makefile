@@ -1,8 +1,15 @@
+# makefile to perform CI/CD process
+# Each validation target has a corresponding job in
+# .github/workflows/ci.yml. When adding a new validation target,
+# add a corresponding job there too.
+
 PYTHON ?= python3
 
-all: test syntax_valid typecheck emdash validate
+# Default - validate in many different ways to detect problems
+all: test syntax_valid typecheck lint emdash validate_skill
 	@echo Verification complete
 
+# Run unit and integration tests
 test:
 	$(PYTHON) -m unittest discover -s scripts/tests -v
 
@@ -14,10 +21,19 @@ syntax_valid:
 typecheck:
 	@echo "Type-checking Python scripts with pyright:"
 	@if command -v pyright > /dev/null 2>&1; then \
-	    pyright scripts/; \
+	    pyright; \
 	    echo 'OK, no type errors found'; \
 	else \
 	    echo 'WARNING: pyright not found; skipping (install: pip install pyright)'; \
+	fi
+
+lint:
+	@echo "Linting Python scripts with ruff:"
+	@if command -v ruff > /dev/null 2>&1; then \
+	    ruff check scripts/; \
+	    echo 'OK, no lint errors found'; \
+	else \
+	    echo 'WARNING: ruff not found; skipping (install: pip install ruff)'; \
 	fi
 
 emdash:
@@ -32,8 +48,8 @@ emdash:
 	        -e "$$(printf '\342\200\223')"
 	@echo 'OK, no issues found'
 
-validate:
+validate_skill:
 	@echo "Validating SKILL.md frontmatter:"
 	$(PYTHON) scripts/validate_skill.py
 
-.PHONY: all test syntax_valid typecheck emdash validate
+.PHONY: all test syntax_valid typecheck lint emdash validate_skill

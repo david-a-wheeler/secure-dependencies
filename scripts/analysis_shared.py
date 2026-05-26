@@ -36,9 +36,10 @@ import unicodedata
 import subprocess
 import urllib.error
 import urllib.parse
-import urllib.request
 import zipfile
 from abc import ABC, abstractmethod
+import registry_client
+from registry_client import _RE_GITHUB_REPO, github_repo_meta, http_get, http_post
 from dataclasses import dataclass, field
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -195,24 +196,24 @@ def evaluate_license(
 # Cross-ecosystem manifest helpers
 # ---------------------------------------------------------------------------
 
-def get_license_candidates(manifest: dict, registry_data: dict) -> list[str]:
+def get_license_candidates(manifest: 'PackageManifest', registry_data: dict) -> list[str]:
     """Return deduplicated license candidates: manifest_license_raw first, then registry.
 
-    Reads 'manifest_license_raw' from the manifest dict (the canonical key set by
-    all ecosystem hooks) and appends any 'license_from_registry' entries from the
-    registry data dict. Deduplicates while preserving order.
+    Reads manifest_license_raw from the PackageManifest and appends any
+    'license_from_registry' entries from the registry data dict.
+    Deduplicates while preserving order.
 
-    >>> get_license_candidates({'manifest_license_raw': 'MIT'}, {'license_from_registry': ['Apache-2.0']})
+    >>> get_license_candidates(PackageManifest(manifest_license_raw='MIT'), {'license_from_registry': ['Apache-2.0']})
     ['MIT', 'Apache-2.0']
-    >>> get_license_candidates({'manifest_license_raw': 'MIT'}, {'license_from_registry': ['MIT']})
+    >>> get_license_candidates(PackageManifest(manifest_license_raw='MIT'), {'license_from_registry': ['MIT']})
     ['MIT']
-    >>> get_license_candidates({}, {'license_from_registry': ['MIT']})
+    >>> get_license_candidates(PackageManifest(), {'license_from_registry': ['MIT']})
     ['MIT']
-    >>> get_license_candidates({'manifest_license_raw': ''}, {})
+    >>> get_license_candidates(PackageManifest(manifest_license_raw=''), {})
     []
     """
     candidates: list[str] = []
-    raw = manifest.get('manifest_license_raw', '')
+    raw = manifest.manifest_license_raw
     if raw:
         candidates.append(str(raw))
     candidates.extend(str(lc) for lc in registry_data.get('license_from_registry', []) if lc)
@@ -242,8 +243,8 @@ def compute_dep_diff(
     >>> removed
     ['c']
     """
-    dep_lines_new = sorted(sanitize_line(l) for l in runtime_dep_lines)
-    dep_lines_old = sorted(sanitize_line(l) for l in old_dep_lines)
+    dep_lines_new = sorted(sanitize_line(ln) for ln in runtime_dep_lines)
+    dep_lines_old = sorted(sanitize_line(ln) for ln in old_dep_lines)
     added_deps = sorted(set(dep_lines_new) - set(dep_lines_old))
     removed_deps = sorted(set(dep_lines_old) - set(dep_lines_new))
     return dep_lines_new, dep_lines_old, added_deps, removed_deps
@@ -1256,34 +1257,9 @@ def blind_scan(
     return count
 
 
-# 10 MB cap: prevents memory exhaustion from oversized registry responses.
-_HTTP_MAX_BYTES = 10_485_760
-
-
-def http_get(url: str, timeout: int = 15) -> bytes | None:
-    """Fetch a URL; return bytes or None on error."""
-    if not url.startswith('https://'):
-        return None
-    try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp:
-            return resp.read(_HTTP_MAX_BYTES)
-    except Exception:  # noqa: BLE001
-        return None
-
-
 # ---------------------------------------------------------------------------
 # GitHub REST API helper (Ideas 14-16)
 # ---------------------------------------------------------------------------
-# ETag cache: maps URL to (etag, response_body). Prevents re-fetching
-# unchanged repo metadata within a single analysis session, keeping
-# unauthenticated usage within the 60 req/hr rate limit.
-_github_etag_cache: dict[str, tuple[str, bytes]] = {}
-
-# Matches owner/repo in github.com URLs or git@github.com:owner/repo URLs.
-# {1,100} bounds prevent ReDoS on adversarial source_url values.
-_RE_GITHUB_REPO = re.compile(
-    r'github\.com[/:]([A-Za-z0-9_.-]{1,100})/([A-Za-z0-9_.-]{1,100})'
-)
 
 # Matches GitHub tree/blob URLs that embed a subdirectory path.
 # Example: https://github.com/USER/REPO/tree/BRANCH/sub/dir
@@ -1378,88 +1354,6 @@ CAMPAIGN_STRINGS: frozenset[str] = frozenset({
 })
 
 
-def _github_api_get(url: str, timeout: int = 15) -> bytes | None:
-    """Fetch a GitHub API URL with ETag caching; return bytes or None.
-
-    Sends If-None-Match with a cached ETag when available; on HTTP 304
-    returns the cached body without counting as a new request. On success
-    stores the new ETag for future calls.
-    """
-    if not url.startswith('https://'):
-        return None
-    headers: dict[str, str] = {'Accept': 'application/vnd.github+json'}
-    cached = _github_etag_cache.get(url)
-    if cached:
-        etag, _ = cached
-        headers['If-None-Match'] = etag
-    req = urllib.request.Request(url, headers=headers)
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            body = resp.read(_HTTP_MAX_BYTES)
-            new_etag = resp.headers.get('ETag', '')
-            if new_etag:
-                _github_etag_cache[url] = (new_etag, body)
-            return body
-    except urllib.error.HTTPError as exc:
-        if exc.code == 304 and cached:
-            return cached[1]
-        return None
-    except Exception:  # noqa: BLE001
-        return None
-
-
-def github_repo_meta(source_url: str) -> dict | None:
-    """Fetch GitHub repo metadata for a source URL.
-
-    Uses two GitHub REST API calls (repo metadata + contents/results);
-    both use ETag caching to stay within the 60 req/hr rate limit.
-
-    Returns dict with keys:
-      owner (str), repo (str), description (str), has_results_dir (bool)
-    or None if source_url is not a GitHub URL or the metadata request fails.
-    """
-    m = _RE_GITHUB_REPO.search(source_url)
-    if not m:
-        return None
-    owner = m.group(1)
-    repo = re.sub(r'\.git$', '', m.group(2))
-
-    meta_url = f'https://api.github.com/repos/{owner}/{repo}'
-    meta_data = _github_api_get(meta_url)
-    if not meta_data:
-        return None
-    try:
-        meta_json = json.loads(meta_data.decode('utf-8', errors='replace'))
-    except ValueError:
-        return None
-
-    description = str(meta_json.get('description', '') or '')
-
-    # Check for results/ credential-staging directory.
-    # GitHub returns a JSON array for a directory listing (200) and a
-    # JSON object for errors (404 -> None from _github_api_get).
-    contents_url = (
-        f'https://api.github.com/repos/{owner}/{repo}/contents/results'
-    )
-    contents_data = _github_api_get(contents_url)
-    has_results_dir = False
-    if contents_data:
-        try:
-            has_results_dir = isinstance(
-                json.loads(contents_data.decode('utf-8', errors='replace')),
-                list,
-            )
-        except ValueError:
-            pass
-
-    return {
-        'owner': owner,
-        'repo': repo,
-        'description': description,
-        'has_results_dir': has_results_dir,
-    }
-
-
 def emit_github_repo_meta(source_url: str, p: 'Printer') -> None:
     """Emit REPO_CAMPAIGN_MARKER and REPO_RESULTS_DIR signals (Idea 16).
 
@@ -1483,18 +1377,6 @@ def emit_github_repo_meta(source_url: str, p: 'Printer') -> None:
         p('REPO_CAMPAIGN_MARKER: NO')
     if meta['has_results_dir']:
         p('REPO_RESULTS_DIR: YES (credential-staging directory detected)')
-
-
-def http_post(url: str, data: bytes, content_type: str = 'application/json', timeout: int = 15) -> bytes | None:
-    """POST data to url; return response bytes or None on error."""
-    if not url.startswith('https://'):
-        return None
-    req = urllib.request.Request(url, data=data, headers={'Content-Type': content_type})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.read(_HTTP_MAX_BYTES)
-    except Exception:  # noqa: BLE001
-        return None
 
 
 def days_since(date_str: str) -> int | None:
@@ -2897,7 +2779,7 @@ def run_sandboxed(
     when only cmd is used and containers have their own container_shell_cmd.
     IMPORTANT: must never be constructed from attacker-controlled data such as
     filenames discovered via rglob. Use cmd= for that; see the cmd description
-    and analyzer_ruby.py reproducible_build for the canonical pattern.
+    and RubyAnalyzer.reproducible_build for the canonical pattern.
 
     Example using cmd (no shell, safe for attacker-controlled paths):
         run_sandboxed(
@@ -2989,7 +2871,7 @@ def run_sandboxed(
         # data (e.g. filenames from rglob). Callers that need a discovered path
         # for bwrap/firejail must use cmd= (exec list, no shell) and supply a
         # static container_shell_cmd (e.g. a glob like '*.gemspec'). See
-        # analyzer_ruby.py reproducible_build for the canonical pattern.
+        # RubyAnalyzer.reproducible_build for the canonical pattern.
         raw = container_shell_cmd if container_shell_cmd is not None else shell_cmd
         # Use .replace() not .format(): paths may contain '{' or '}'.
         script = raw.replace('{src}', '/src').replace('{out}', '/out')
@@ -3336,12 +3218,8 @@ def lookup_ecosystems_package(registry_key: str, pkgname: str,
     if email:
         headers['From'] = email
 
-    if not url.startswith('https://'):
-        return {}
     try:
-        req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            raw = resp.read()
+        raw = registry_client.http_get_with_headers(url, headers)
         data = json.loads(raw.decode('utf-8', errors='replace'))
     except urllib.error.HTTPError as e:
         if e.code == 429:
@@ -4660,7 +4538,7 @@ def run_ai_sandbox(
         return failure_sentinel
 
     if not isinstance(data, dict) or not _validate_ai_output(data, schema):
-        print(f'  WARNING: AI sandbox output failed schema validation', file=sys.stderr)
+        print('  WARNING: AI sandbox output failed schema validation', file=sys.stderr)
         return failure_sentinel
 
     return data

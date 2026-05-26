@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# analyzer_python.py: Python language operations for the dependency analysis driver.
+# python_analyzer.py: Python ecosystem analyzer for dep_review.py.
 #
 # Handles Python package formats (wheel .whl, source distribution .tar.gz)
-# and the PyPI registry API. Used for --from pypi; can be reused for other
-# Python package indices (DevPI, Artifactory, etc.) with a different registry
-# entry in REGISTRY_TO_HOOKS pointing here.
+# and the PyPI registry API.
 #
-# Called by dep_review.py; do not invoke directly.
+# Each function accepts a `failures: list[str]` param and calls
+# failures.append(...) on errors rather than raising exceptions.
 # Each function accepts a `failures: list[str]` param and calls
 # failures.append(...) on errors rather than raising exceptions.
 #
@@ -1537,4 +1536,3 @@ class PythonAnalyzer(shared.EcosystemAnalyzer):
             diff_out, p, work, _RE_REPRO_CODE, _RE_REPRO_META)
 
 
-Analyzer = PythonAnalyzer   # used by dep_review.py for instantiation

@@ -18,6 +18,8 @@
 #   deeper-done       Mark a MEDIUM-risk package as having completed --deeper analysis.
 #   generate-manifest Regenerate the install manifest from current session state.
 #   env-check         Check for optional install-probe tools; suggest any missing ones.
+#   ecosystem-detect  Detect ecosystems in project root; check analyzer availability.
+#   diff-packages     Compare lockfile versions between git states; print changed packages.
 #   report            Generate Phase 3 summary cards from all analyzed packages.
 #   wrap-up           Generate the session report file.
 #   record-install    Append an installation record to the session report.
@@ -76,6 +78,9 @@ VALID_RECOMMENDATIONS = frozenset({
 # to explicitly terminate option processing, providing defense-in-depth
 # that is portable across platforms and independent of this regex.
 _DEP_NAME_RE = re.compile(r'^[@A-Za-z0-9][A-Za-z0-9._/:-]{0,213}$')
+# Allows semver, pre-release (+/-/alpha/beta), and build metadata.
+# Excludes spaces, '--', and other text that could confuse arg parsers.
+_RE_SAFE_VER = re.compile(r'^[0-9][A-Za-z0-9._+\-]{0,100}$')
 VALID_RISKS = frozenset({'LOW', 'MEDIUM', 'HIGH', 'CRITICAL'})
 
 # Shell command to install approved packages, per ecosystem.
@@ -369,7 +374,6 @@ def print_next_action(session: dict, session_path: Path) -> None:
     The orchestrating agent reads this after every dep_session.py call and
     follows the instruction exactly; no state tracking required on its part.
     """
-    root = Path(session['project_root'])
     # Scripts live wherever this file lives; use that path directly.
     scripts = Path(__file__).parent.resolve()
     try:
@@ -429,7 +433,7 @@ def print_next_action(session: dict, session_path: Path) -> None:
         sversion = shared.sanitize_line(version)
         print(f'=== NEXT_ACTION{_tok_part}: RUN_DEEPER ===')
         print(f'Package  : {sname} {sversion}')
-        print(f'Reason   : MEDIUM risk requires reproducible-build verification before approval.')
+        print('Reason   : MEDIUM risk requires reproducible-build verification before approval.')
         print()
         print('Step 1: run deeper analysis:')
         print(f'  python3 {scripts_rel}/dep_review.py'
@@ -515,7 +519,7 @@ def print_next_action(session: dict, session_path: Path) -> None:
         print(f'Package      : {sname}')
         print(f'Mode         : {mode}')
         print(f'Introduced by: {shared.sanitize_line(introduced_by)}')
-        print(f'Version      : UNKNOWN (registry lookup required)')
+        print('Version      : UNKNOWN (registry lookup required)')
         print()
         print(f'Run: python3 {scripts_rel}/dep_session.py resolve {session_rel} {sname}')
         print('(This will query the registry, update the session, and print the next command.)')
@@ -541,12 +545,12 @@ def print_next_action(session: dict, session_path: Path) -> None:
     print(f'Mode         : {mode}' + (f' (was {old_version})' if old_version else ''))
     print(f'Introduced by: {shared.sanitize_line(introduced_by)}')
     print()
-    print(f'Step 1: run analysis:')
+    print('Step 1: run analysis:')
     print(f'  {cmd}')
     print()
-    print(f'Step 2: read output, make security judgment, write assessment.txt')
+    print('Step 2: read output, make security judgment, write assessment.txt')
     print()
-    print(f'Step 3: record verdict:')
+    print('Step 3: record verdict:')
     _token_flag = f' --token {_tok}' if _tok else ''
     print(f'  python3 {scripts_rel}/dep_session.py complete{_token_flag} -- {session_rel} \\')
     print(f'    {sname} {sversion} RECOMMENDATION RISK')
@@ -654,25 +658,27 @@ def cmd_complete(args: argparse.Namespace) -> None:
     # Read session-update.json written by dep_review.py --session
     root = Path(session['project_root'])
     work = root / 'temp' / 'dep-review' / shared.safe_dir_component(name, version)
-    # Enforce adversarial gate: if dep_review.py found adversarial content,
-    # only DO_NOT_INSTALL/CRITICAL is accepted. This prevents a
-    # compromised sub-agent from approving a malicious package,
-    # even though it was detected by the adversarial gate,
-    # by ignoring the ABORT in signals.txt.
+    # Enforce adversarial gate deterministically: if dep_review.py flagged
+    # adversarial content, override whatever the sub-agent submitted.
+    # This means a compromised sub-agent cannot approve a package that the
+    # deterministic gate already rejected, regardless of what it returns.
     _abort_flag = work / 'adversarial-abort.flag'
-    if _abort_flag.exists() and (
-        recommendation != 'DO_NOT_INSTALL' or risk != 'CRITICAL'
-    ):
-        sys.exit(
-            f'Adversarial gate was triggered for {name} {version}.\n'
-            f'Only DO_NOT_INSTALL / CRITICAL is accepted.\n'
-            f'See {work / "signals.txt"} for details.'
-        )
+    if _abort_flag.exists():
+        if recommendation != 'DO_NOT_INSTALL' or risk != 'CRITICAL':
+            print(
+                f'WARNING: adversarial gate was triggered for {name} {version}. '
+                f'Sub-agent verdict ({recommendation}/{risk}) overridden to '
+                f'DO_NOT_INSTALL/CRITICAL.',
+                file=sys.stderr,
+            )
+        recommendation = 'DO_NOT_INSTALL'
+        risk = 'CRITICAL'
     update_file = work / 'session-update.json'
     new_dep_names: list[str] = []
     alternatives_critical = False
     install_time_code = False
     install_time_code_reason = ''
+    concern_level = 'NONE'
 
     if update_file.is_file():
         try:
@@ -681,6 +687,7 @@ def cmd_complete(args: argparse.Namespace) -> None:
             alternatives_critical = upd.get('alternatives_critical', False)
             install_time_code = upd.get('install_time_code', False)
             install_time_code_reason = upd.get('install_time_code_reason', '')
+            concern_level = upd.get('concern_level', 'NONE')
         except (json.JSONDecodeError, OSError) as e:
             print(f'Warning: could not read {update_file}: {e}', file=sys.stderr)
 
@@ -703,7 +710,12 @@ def cmd_complete(args: argparse.Namespace) -> None:
     ]
 
     # MEDIUM risk requires --deeper before the package can be approved.
-    deeper_needed = (risk == 'MEDIUM')
+    # HIGH concern_level also triggers deeper if the sub-agent didn't already
+    # run it (evidenced by sandbox-detection.txt, which --deeper always writes).
+    deeper_already_run = (work / 'sandbox-detection.txt').is_file()
+    deeper_needed = (risk == 'MEDIUM') or (
+        concern_level == 'HIGH' and not deeper_already_run
+    )
 
     # Record the result
     analyzed_entry = {
@@ -1013,11 +1025,425 @@ ECOSYSTEM_INDICATOR_FILES: dict[str, list[str]] = {
     'npm':      ['package-lock.json', 'yarn.lock', 'pnpm-lock.yaml'],
 }
 
+# Analyzer script file for each ecosystem.
+ECOSYSTEM_ANALYZER_FILES: dict[str, str] = {
+    'rubygems': 'ruby_analyzer.py',
+    'pypi':     'python_analyzer.py',
+    'npm':      'js_analyzer.py',
+}
+
 
 def _detect_ecosystems(root: Path) -> list[str]:
     """Return list of ecosystem names whose lockfile indicators exist under root."""
     return [eco for eco, files in ECOSYSTEM_INDICATOR_FILES.items()
             if any((root / f).is_file() for f in files)]
+
+
+def cmd_ecosystem_detect(args: argparse.Namespace) -> None:
+    """Detect ecosystems in root and report analyzer availability.
+
+    Prints one line per detected ecosystem showing its status. Exits with
+    code 1 if any detected ecosystem is missing an analyzer, so callers
+    can use the exit code as a quick check without parsing text.
+    """
+    root = Path(args.root).resolve()
+    scripts_dir = Path(__file__).parent
+    detected = _detect_ecosystems(root)
+
+    print(f'=== ECOSYSTEM DETECTION: {root} ===')
+    print()
+
+    if not detected:
+        print('NONE_DETECTED: no known lockfile indicator files found.')
+        return
+
+    all_ok = True
+    for eco in detected:
+        analyzer_file = ECOSYSTEM_ANALYZER_FILES.get(eco, '')
+        if not analyzer_file:
+            status = 'MISSING (no analyzer file known for this ecosystem)'
+            all_ok = False
+        elif (scripts_dir / analyzer_file).is_file():
+            status = f'OK ({analyzer_file})'
+        else:
+            status = f'MISSING ({analyzer_file} not found)'
+            all_ok = False
+        print(f'{eco}: DETECTED  analyzer={status}')
+
+    print()
+    n = len(detected)
+    if all_ok:
+        print(f'SUMMARY: {n} ecosystem(s) detected; all analyzers present.')
+    else:
+        print(
+            f'SUMMARY: {n} ecosystem(s) detected; '
+            'one or more are missing an analyzer -- see MISSING lines above.',
+        )
+        sys.exit(1)
+
+
+# Ordered lockfiles to try per ecosystem for version diff (first existing wins).
+ECOSYSTEM_LOCKFILES_ORDERED: dict[str, list[str]] = {
+    'rubygems': ['Gemfile.lock'],
+    'pypi':     ['uv.lock', 'poetry.lock', 'Pipfile.lock', 'requirements.txt'],
+    'npm':      ['package-lock.json', 'yarn.lock', 'pnpm-lock.yaml'],
+}
+
+
+def _git_show_file(repo_root: Path, ref: str, filepath: str) -> str | None:
+    """Return text content of filepath at git ref, or None if absent.
+
+    Uses `git show REF:FILEPATH` object syntax; no shell expansion of ref or path.
+    """
+    # `REF:FILEPATH` is a git object reference, not a path; do not add '--'.
+    result = subprocess.run(  # noqa: S603
+        ['git', 'show', f'{ref}:{filepath}'],
+        cwd=str(repo_root), capture_output=True, text=True,
+    )
+    return result.stdout if result.returncode == 0 else None
+
+
+def _parse_gemfile_lock_versions(content: str) -> dict[str, str]:
+    """Return {lowercase_name: version} for all gems in Gemfile.lock specs sections.
+
+    Top-level gems (4-space indent with a bare version) are included; sub-dep
+    constraint lines (6-space indent or constraint syntax like ``= 7.0.0``) are
+    excluded because their version field starts with a letter, not a digit.
+
+    >>> _parse_gemfile_lock_versions('GEM\\n  specs:\\n    rails (7.0.0)\\n      railties (= 7.0.0)\\n    rake (13.0.6)\\n')
+    {'rails': '7.0.0', 'rake': '13.0.6'}
+    >>> _parse_gemfile_lock_versions('')
+    {}
+    """
+    pkgs: dict[str, str] = {}
+    in_specs = False
+    for line in content.splitlines():
+        if line.strip() == 'specs:':
+            in_specs = True
+            continue
+        if in_specs:
+            # 4-space indent = top-level gem entry; version starts with digit.
+            m = re.match(
+                r'^    ([A-Za-z0-9][A-Za-z0-9_\-\.]{0,200}) '
+                r'\(([0-9][A-Za-z0-9._\-]{0,50})\)$',
+                line,
+            )
+            if m:
+                pkgs[m.group(1).lower()] = m.group(2)
+            elif line and not line[0].isspace():
+                in_specs = False
+    return pkgs
+
+
+def _parse_toml_lock_versions(content: str) -> dict[str, str]:
+    """Return {normalized_name: version} from a poetry.lock or uv.lock file.
+
+    >>> _parse_toml_lock_versions('[[package]]\\nname = "requests"\\nversion = "2.28.1"\\n')
+    {'requests': '2.28.1'}
+    >>> _parse_toml_lock_versions('[[package]]\\nname = "Flask"\\nversion = "2.3.0"\\n')
+    {'flask': '2.3.0'}
+    >>> _parse_toml_lock_versions('')
+    {}
+    """
+    pkgs: dict[str, str] = {}
+    current_name: str | None = None
+    in_pkg = False
+    for line in content.splitlines():
+        if line.strip() == '[[package]]':
+            in_pkg = True
+            current_name = None
+            continue
+        if not in_pkg:
+            continue
+        m_name = re.match(r'^name\s*=\s*"([A-Za-z0-9][A-Za-z0-9._-]{0,200})"', line)
+        if m_name:
+            current_name = re.sub(r'[-_.]+', '-', m_name.group(1)).lower()
+            continue
+        # Tightened from [^"] to exclude spaces and flag-like text.
+        m_ver = re.match(r'^version\s*=\s*"([0-9][A-Za-z0-9._+\-]{0,100})"', line)
+        if m_ver and current_name:
+            pkgs[current_name] = m_ver.group(1)
+            in_pkg = False
+            current_name = None
+    return pkgs
+
+
+def _parse_requirements_txt_versions(content: str) -> dict[str, str]:
+    """Return {normalized_name: version} for pinned (==) entries in requirements.txt.
+
+    Unpinned constraints (>=, ~=, etc.) are silently ignored because they do
+    not give a definitive old/new version for a diff.
+
+    >>> _parse_requirements_txt_versions('requests==2.28.1\\nflask>=2.0\\n# comment\\n')
+    {'requests': '2.28.1'}
+    >>> _parse_requirements_txt_versions('Django==4.2.0\\n')
+    {'django': '4.2.0'}
+    """
+    pkgs: dict[str, str] = {}
+    for line in content.splitlines():
+        line = line.strip()
+        if not line or line.startswith('#') or line.startswith('-'):
+            continue
+        m = re.match(r'^([A-Za-z0-9][A-Za-z0-9._-]{0,200})==([^;\s,]{1,100})', line)
+        if m:
+            name = re.sub(r'[-_.]+', '-', m.group(1)).lower()
+            pkgs[name] = m.group(2)
+    return pkgs
+
+
+def _parse_pipfile_lock_versions(content: str) -> dict[str, str]:
+    """Return {normalized_name: version} from a Pipfile.lock JSON file.
+
+    >>> _parse_pipfile_lock_versions('{"default": {"requests": {"version": "==2.28.1"}}, "develop": {"pytest": {"version": "==7.2.0"}}}')
+    {'requests': '2.28.1', 'pytest': '7.2.0'}
+    >>> _parse_pipfile_lock_versions('not json')
+    {}
+    """
+    pkgs: dict[str, str] = {}
+    try:
+        data = json.loads(content)
+    except (json.JSONDecodeError, ValueError):
+        return pkgs
+    for section in ('default', 'develop'):
+        for pkg_name, info in data.get(section, {}).items():
+            if not isinstance(info, dict):
+                continue
+            ver = info.get('version', '')
+            if not (isinstance(ver, str) and ver.startswith('==')):
+                continue
+            name = re.sub(r'[-_.]+', '-', pkg_name).lower()
+            version = ver[2:]
+            # JSON keys and values are unstructured; validate before accepting.
+            if _DEP_NAME_RE.match(name) and _RE_SAFE_VER.match(version):
+                pkgs[name] = version
+    return pkgs
+
+
+def _parse_package_lock_json_versions(content: str) -> dict[str, str]:
+    """Return {name: version} from a package-lock.json (v1/v2/v3) file.
+
+    Nested deps (e.g. ``node_modules/foo/node_modules/bar``) are excluded.
+
+    >>> _parse_package_lock_json_versions('{"packages": {"node_modules/lodash": {"version": "4.17.21"}, "node_modules/a/node_modules/b": {"version": "1.0.0"}}}')
+    {'lodash': '4.17.21'}
+    >>> _parse_package_lock_json_versions('not json')
+    {}
+    """
+    pkgs: dict[str, str] = {}
+    try:
+        data = json.loads(content)
+    except (json.JSONDecodeError, ValueError):
+        return pkgs
+    pkg_map: dict = data.get('packages', {})
+    if pkg_map:
+        for key, info in pkg_map.items():
+            if not key.startswith('node_modules/'):
+                continue
+            pkg = key[len('node_modules/'):]
+            # Allow "@scope/name" (scoped, one '/') but skip nested paths.
+            parts = pkg.split('/')
+            if pkg.startswith('@') and len(parts) == 2:
+                pass  # valid scoped package
+            elif len(parts) == 1:
+                pass  # valid unscoped package
+            else:
+                continue  # nested dep path
+            ver = info.get('version', '') if isinstance(info, dict) else ''
+            name = pkg.lower()
+            # JSON values are unstructured; validate before accepting.
+            if ver and _DEP_NAME_RE.match(name) and _RE_SAFE_VER.match(ver):
+                pkgs[name] = ver
+    else:
+        for name, info in data.get('dependencies', {}).items():
+            ver = info.get('version', '') if isinstance(info, dict) else ''
+            name = name.lower()
+            if ver and _DEP_NAME_RE.match(name) and _RE_SAFE_VER.match(ver):
+                pkgs[name] = ver
+    return pkgs
+
+
+def _parse_yarn_lock_versions(content: str) -> dict[str, str]:
+    """Return {name: version} from a yarn.lock file.
+
+    Handles multiple constraints for the same package on one header line, and
+    scoped packages (``@scope/pkg@constraint``).
+
+    >>> _parse_yarn_lock_versions('# yarn lockfile v1\\n\\nlodash@^4.17.20, lodash@^4.17.21:\\n  version "4.17.21"\\n')
+    {'lodash': '4.17.21'}
+    >>> _parse_yarn_lock_versions('"@scope/pkg@^1.0.0":\\n  version "1.0.0"\\n')
+    {'@scope/pkg': '1.0.0'}
+    """
+    pkgs: dict[str, str] = {}
+    current_names: list[str] = []
+    for line in content.splitlines():
+        if not line or line.startswith('#'):
+            continue
+        if not line[0].isspace() and line.rstrip().endswith(':'):
+            header = line.rstrip()[:-1]
+            current_names = []
+            for part in header.split(','):
+                part = part.strip().strip('"')
+                # Name is everything before the last '@' (handles @scope/pkg@ver).
+                at = part.rfind('@')
+                if at > 0:
+                    name = part[:at].lower()
+                    if name not in current_names and _DEP_NAME_RE.match(name):
+                        current_names.append(name)
+        elif current_names:
+            # Tightened from [^"] to exclude spaces and flag-like text.
+            m = re.match(r'^\s+version\s+"([0-9][A-Za-z0-9._+\-]{0,100})"', line)
+            if m:
+                ver = m.group(1)
+                for name in current_names:
+                    pkgs[name] = ver
+                current_names = []
+    return pkgs
+
+
+def _parse_pnpm_lock_versions(content: str) -> dict[str, str]:
+    """Return {name: version} from a pnpm-lock.yaml file (v6 and v9 formats).
+
+    v6 uses ``/name/version:`` keys; v9 uses ``name@version:`` keys.
+
+    >>> _parse_pnpm_lock_versions('packages:\\n  /lodash/4.17.21:\\n    resolution: {}\\n')
+    {'lodash': '4.17.21'}
+    >>> _parse_pnpm_lock_versions("packages:\\n  lodash@4.17.21:\\n    resolution: {}\\n")
+    {'lodash': '4.17.21'}
+    """
+    pkgs: dict[str, str] = {}
+    in_packages = False
+    for line in content.splitlines():
+        if line.rstrip() == 'packages:':
+            in_packages = True
+            continue
+        if in_packages:
+            if line and not line[0].isspace():
+                in_packages = False
+                continue
+            # v6 format: /name/version: or /@scope/name/version:
+            m = re.match(
+                r'^\s+/?(@?[A-Za-z0-9][A-Za-z0-9._/-]{0,200})/([0-9][^/:]{0,50}):',
+                line,
+            )
+            if m:
+                pkgs[m.group(1).lstrip('/').lower()] = m.group(2)
+                continue
+            # v9 format: name@version: or '@scope/pkg@version':
+            m2 = re.match(
+                r"^\s+'?(@?[A-Za-z0-9][A-Za-z0-9._/-]{0,200})@([^:' ]{1,50})'?:",
+                line,
+            )
+            if m2:
+                pkgs[m2.group(1).lower()] = m2.group(2)
+    return pkgs
+
+
+def _parse_lockfile_versions(lockfile_name: str, content: str) -> dict[str, str]:
+    """Dispatch to the right parser based on lockfile filename."""
+    if lockfile_name == 'Gemfile.lock':
+        return _parse_gemfile_lock_versions(content)
+    if lockfile_name in ('uv.lock', 'poetry.lock'):
+        return _parse_toml_lock_versions(content)
+    if lockfile_name == 'Pipfile.lock':
+        return _parse_pipfile_lock_versions(content)
+    if lockfile_name == 'requirements.txt':
+        return _parse_requirements_txt_versions(content)
+    if lockfile_name == 'package-lock.json':
+        return _parse_package_lock_json_versions(content)
+    if lockfile_name == 'yarn.lock':
+        return _parse_yarn_lock_versions(content)
+    if lockfile_name == 'pnpm-lock.yaml':
+        return _parse_pnpm_lock_versions(content)
+    return {}
+
+
+def cmd_diff_packages(args: argparse.Namespace) -> None:
+    """Compare lockfile versions between two git states; print changed packages.
+
+    For each ecosystem with changes, prints:
+        REGISTRY: <name>  (lockfile: <filename>)
+        --update <pkg> <old_ver> <new_ver>
+        --new <pkg> <new_ver>
+
+    These lines can be passed directly to `dep_session.py init`.
+    Exits with code 1 if no git repo is found or no ecosystems are detected.
+    """
+    root = Path(args.root).resolve()
+    since = getattr(args, 'since', None) or 'HEAD~1'
+
+    ecosystems = _detect_ecosystems(root)
+    if not ecosystems:
+        print('NO_ECOSYSTEMS: no lockfile indicator files found.')
+        sys.exit(1)
+
+    print(f'=== DIFF PACKAGES: {root} (since {since}) ===')
+    print()
+
+    total_updates = 0
+    total_new = 0
+    active_registries = 0
+
+    for eco in ecosystems:
+        lockfile_candidates = ECOSYSTEM_LOCKFILES_ORDERED.get(eco, [])
+        lockfile_used: str | None = None
+        current_pkgs: dict[str, str] = {}
+        old_pkgs: dict[str, str] = {}
+
+        for lf_name in lockfile_candidates:
+            if not (root / lf_name).is_file():
+                continue
+            lockfile_used = lf_name
+            current_content = (root / lf_name).read_text(encoding='utf-8', errors='replace')
+            current_pkgs = _parse_lockfile_versions(lf_name, current_content)
+            old_content = _git_show_file(root, since, lf_name)
+            old_pkgs = (_parse_lockfile_versions(lf_name, old_content)
+                        if old_content else {})
+            break
+
+        if lockfile_used is None:
+            continue
+
+        updates: list[tuple[str, str, str]] = []
+        news: list[tuple[str, str]] = []
+
+        for name, new_ver in sorted(current_pkgs.items()):
+            # Defense-in-depth: re-validate before printing even though parsers
+            # already filter; lockfile content is developer-controlled, not
+            # attacker-controlled, but guard against parser bugs.
+            if not _DEP_NAME_RE.match(name) or not _RE_SAFE_VER.match(new_ver):
+                continue
+            old_ver = old_pkgs.get(name)
+            if old_ver is None:
+                news.append((name, new_ver))
+            elif old_ver != new_ver:
+                if not _RE_SAFE_VER.match(old_ver):
+                    continue
+                updates.append((name, old_ver, new_ver))
+
+        if not updates and not news:
+            continue
+
+        print(f'REGISTRY: {eco}  (lockfile: {lockfile_used})')
+        for name, old_ver, new_ver in updates:
+            print(f'--update {shared.sanitize_line(name)} '
+                  f'{shared.sanitize_line(old_ver)} {shared.sanitize_line(new_ver)}')
+        for name, new_ver in news:
+            print(f'--new {shared.sanitize_line(name)} {shared.sanitize_line(new_ver)}')
+        print()
+
+        total_updates += len(updates)
+        total_new += len(news)
+        active_registries += 1
+
+    if active_registries == 0:
+        print('NO_CHANGES: no package version differences found.')
+    else:
+        total = total_updates + total_new
+        print(
+            f'SUMMARY: {total} change(s) detected '
+            f'({total_updates} update(s), {total_new} new) '
+            f'across {active_registries} registry(ies) with changes.',
+        )
 
 
 def _run_cmd(cmd: list[str], cwd: Path) -> tuple[int, str, str]:
@@ -1381,7 +1807,6 @@ def cmd_wrap_up(args: argparse.Namespace) -> None:
         fields = _parse_assessment_fields(work_dir / 'assessment.txt')
 
         old_ver = af.get('old_version', fields.get('version', ''))
-        pkg_mode = af.get('mode', fields.get('mode', 'unknown'))
         lic_raw = af.get('license_line', '')
         if '|' in lic_raw:
             spdx = lic_raw.split('|')[0].replace('SPDX:', '').strip()
@@ -1978,7 +2403,7 @@ def cmd_health_scan(args: argparse.Namespace) -> None:
             concerns.append('LICENSE_MISSING')
             lic_display = 'MISSING*'
         elif lic_upper not in _OSI_LICENSES:
-            concerns.append(f'LICENSE_NON_OSI')
+            concerns.append('LICENSE_NON_OSI')
             lic_display = f'{lic[:W_LIC-1]}*'
         else:
             lic_display = lic[:W_LIC]
@@ -2173,6 +2598,24 @@ def main() -> None:
         help='Opt out: no email sent; suppresses future RATE_LIMITED warnings',
     )
 
+    # diff-packages
+    p_diffpkg = sub.add_parser(
+        'diff-packages',
+        help='Compare lockfile versions between git states; print changed packages.',
+    )
+    p_diffpkg.add_argument('--root', required=True, metavar='DIR',
+                           help='Project root directory (must be a git repo)')
+    p_diffpkg.add_argument('--since', metavar='REF', default='HEAD~1',
+                           help='Git ref to compare against (default: HEAD~1)')
+
+    # ecosystem-detect
+    p_ecodetect = sub.add_parser(
+        'ecosystem-detect',
+        help='Detect ecosystems in the project root and check analyzer availability.',
+    )
+    p_ecodetect.add_argument('--root', required=True, metavar='DIR',
+                             help='Project root directory')
+
     # health-scan
     p_health = sub.add_parser(
         'health-scan',
@@ -2196,6 +2639,8 @@ def main() -> None:
         'deeper-done':       cmd_deeper_done,
         'generate-manifest': cmd_generate_manifest,
         'env-check':         cmd_env_check,
+        'ecosystem-detect':  cmd_ecosystem_detect,
+        'diff-packages':     cmd_diff_packages,
         'report':            cmd_report,
         'wrap-up':           cmd_wrap_up,
         'record-install':    cmd_record_install,
