@@ -431,6 +431,12 @@ def print_next_action(session: dict, session_path: Path) -> None:
         registry_url_flag = f' --registry-url {ru}' if ru else ''
         sname = shared.sanitize_line(name)
         sversion = shared.sanitize_line(version)
+        _droot = Path(session['project_root'])
+        _dwork = _droot / 'temp' / 'dep-review' / shared.safe_dir_component(name, version)
+        try:
+            _dwork_rel = _dwork.relative_to(Path.cwd())
+        except ValueError:
+            _dwork_rel = _dwork
         print(f'=== NEXT_ACTION{_tok_part}: RUN_DEEPER ===')
         print(f'Package  : {sname} {sversion}')
         print('Reason   : MEDIUM risk requires reproducible-build verification before approval.')
@@ -439,7 +445,10 @@ def print_next_action(session: dict, session_path: Path) -> None:
         print(f'  python3 {scripts_rel}/dep_review.py'
               f' --from {registry}{registry_url_flag} --deeper --root . {sname} {sversion}')
         print()
-        print('Step 2: read the updated signals.txt (deeper section), make judgment.')
+        print('Step 2: read updated signals, update assessment and verdict:')
+        print(f'  Read  : {_dwork_rel}/signals.txt (see DEEPER ANALYSIS section)')
+        print(f'  Update: {_dwork_rel}/assessment.md (fill deeper-analysis [TODO] placeholders)')
+        print(f'  Update: {_dwork_rel}/verdict.json (revise if verdict changes)')
         print()
         print('Step 3: record deeper result:')
         print(f'  python3 {scripts_rel}/dep_session.py deeper-done {session_rel} {sname} {sversion}')
@@ -548,12 +557,22 @@ def print_next_action(session: dict, session_path: Path) -> None:
     print('Step 1: run analysis:')
     print(f'  {cmd}')
     print()
+    _aroot = Path(session['project_root'])
+    _awork = _aroot / 'temp' / 'dep-review' / shared.safe_dir_component(name, version)
+    try:
+        _awork_rel = _awork.relative_to(Path.cwd())
+    except ValueError:
+        _awork_rel = _awork
     print('Step 2: pre-fill assessment.md, fill judgment, write verdict.json')
     prefill_cmd = (
         f'python3 {scripts_rel}/dep_session.py pre-fill-assessment'
         f' --session {session_rel} -- {sname} {sversion}'
     )
     print(f'  {prefill_cmd}')
+    print(f'  Creates: {_awork_rel}/assessment.md'
+          f'  (open it; fill every [TODO: ...] placeholder)')
+    print(f'  Write  : {_awork_rel}/verdict.json'
+          f'  (summary, risk_increasing, risk_decreasing)')
     print()
     print('Step 3: record verdict:')
     _token_flag = f' --token {_tok}' if _tok else ''
