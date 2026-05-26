@@ -159,11 +159,128 @@ them into the template. This is mechanical transcription.
 
 ---
 
+## 7. Rename `assessment.txt` to `assessment.md`
+
+**Current behaviour:** Tier 2 writes its narrative security report to
+`assessment.txt`. Humans review it with `less assessment.txt`.
+
+**Problem:** Plain text cannot use headings, bold, tables, or code blocks.
+A security assessment with risk ratings, scan findings, and recommendations
+is much easier to review with markdown structure. The `.txt` extension also
+signals "raw text" to editors and viewers that could render it better.
+
+**Fix:** This is a mechanical rename touching several files:
+- `dep_session.py`: update the `assessment.txt` string in `cmd_complete()`
+  (line 764 warning), `_parse_assessment_summary()` (line 1139),
+  `_parse_assessment_fields()` (line 1254), `generate_manifest()` (line 1409),
+  and the `print_next_action()` ANALYZE block (line 546).
+  Note: `_parse_assessment_summary()` and `_parse_assessment_fields()` parse
+  specific text patterns from the file; verify the markdown format remains
+  compatible with these parsers (or update them).
+- `references/package-analysis-brief.md`: update Steps 6 and 7.
+- `SKILL.md`: update the `less assessment.txt` instruction and path references.
+- `assets/assessment-template.txt`: rename to `assessment-template.md` and
+  rewrite using markdown (headings with `##`, bold for labels, fenced code
+  for SHA256/scan output, a table for the risk summary).
+- `docs/ARCHITECTURE.md`: update references.
+- `scripts/tests/test_file_parsing.py`: update fixture path (line 70).
+- `scripts/tests/fixtures/assessment.txt`: rename fixture file.
+
+**Cons to be aware of:**
+- `less assessment.md` still works but shows raw markdown syntax in terminals
+  that do not render it. Users comfortable with markdown will not mind;
+  others may prefer `glow assessment.md` or a rendered view.
+- The two `dep_session.py` parsers (`_parse_assessment_summary`,
+  `_parse_assessment_fields`) extract structured fields by pattern-matching
+  headings and key-value lines. The markdown template must preserve those
+  patterns, or the parsers must be updated alongside.
+
+---
+
+## AI tier inputs and outputs (reference)
+
+### Tier 1: Overall orchestrator
+
+**Inputs (what it reads):**
+- `SKILL.md` -- full instructions, read once at session start
+- User messages -- free-form (mode detection, confirmations, questions)
+- `dep_session.py env-check` stdout -- tool availability; relayed to user
+- `dep_session.py vuln-audit` stdout -- CVE/outdated report (UPDATE/CURRENT)
+- `dep_session.py health-scan` stdout -- triage table (CURRENT mode)
+- `dep_session.py init` stdout -- first NEXT_ACTION block + session token
+- `dep_session.py complete` stdout -- NEXT_ACTION block after each package
+- `dep_session.py status` stdout -- optional, for resuming interrupted sessions
+- Two lines per tier 2 sub-agent -- `RISK_ASSESSMENT` + `SUMMARY_RECOMMENDATION`
+
+**Outputs (what it produces):**
+- User-facing text -- explanations, status updates, confirmation requests
+- Tier 2 sub-agent spawns -- short prompt: path to brief + session parameters
+- `dep_session.py init` calls -- initialises the BFS session queue
+- `dep_session.py complete PKGNAME VERSION RECOMMENDATION RISK` calls -- records verdicts
+
+---
+
+### Tier 2: Per-package sub-agent (one per package, context discarded after)
+
+**Inputs (what it reads):**
+- Short spawn prompt from tier 1 -- brief path + session file, project root,
+  scripts dir, deeper flag, install-probe flag (6 lines)
+- `references/package-analysis-brief.md` -- full instructions, read first
+- `signals.txt` -- machine-readable signal table, CONCERN_SUMMARY,
+  ADVERSARIAL_GATE; the primary input for the security judgment
+- Supporting files read conditionally (per table in brief):
+  - `manifest-analysis.txt` -- parsed manifest fields (always)
+  - `clone-status.txt`, `source-url.txt` -- source repo link (always)
+  - `license.txt` -- license evaluation result (always)
+  - `project-health.txt` -- Scorecard, Best Practices, activity (always)
+  - `extra-in-package.txt` -- unexpected extra files (if count > 0)
+  - `binary-files.txt` -- precompiled executables found (if count > 0)
+  - `install-scripts.txt` -- extracted install-time code (if present)
+  - `diff-semantic.txt` -- tier 3 diff review verdict (UPDATE mode, always)
+  - `new-deps.txt`, `dep-lockfile-check.txt` -- new runtime deps (if any)
+  - `dep-registry.txt` -- registry data for deps not in lockfile (if any)
+  - `transitive-deps.txt` -- transitive footprint (NEW/CURRENT always)
+  - `provenance.txt` -- MFA/signing data (if MFA unknown or concerning)
+  - `source-review.txt` -- tier 3 source review verdict (if --deeper ran)
+  - `summary-scan-LABEL.txt` -- scan match file paths (if scan had matches)
+- `assets/assessment-template.txt` -- report template (Step 6)
+- `run-log.txt` -- human-readable dep_review.py log (currently; TODO item 1
+  removes this read; the file is retained as a human log only)
+
+**Outputs (what it produces):**
+- Runs `dep_review.py` -- all structured output files written to work dir
+- Optionally runs `dep_review.py --deeper` -- adds reproducibility outputs
+- Optionally runs `dep_review.py --install-probe` -- adds install probe output
+- `assessment.txt` -- narrative security report for human review
+- Two lines to tier 1 -- `RISK_ASSESSMENT: ...` and `SUMMARY_RECOMMENDATION: ...`
+
+---
+
+### Tier 3: Sandboxed AI (invoked by dep_review.py, not by AI agents)
+
+**Inputs (received via stdin from dep_review.py):**
+- System prompt -- adversarial content warning + strict JSON output schema,
+  embedded in `dep_review.py`; never comes from the package
+- Package content -- raw diff (for diff review) or source file listing with
+  scan-match context (for source review); truncated at 500,000 characters;
+  this is the only tier that reads attacker-controlled content directly
+
+**Outputs (what it produces):**
+- JSON object -- validated by `run_ai_sandbox()` against a strict schema;
+  written by dep_review.py to:
+  - `diff-semantic.txt` -- diff review verdict (changed files, risk assessment)
+  - `source-review.txt` -- source review verdict (deeper mode only)
+- On parse failure or schema mismatch: sentinel string written instead
+  (`AI_REVIEW_FAILED` or `AI_REVIEW_SKIPPED`), never unvalidated text
+
+---
+
 ## Implementation order (suggested)
 
 1. Item 1 (read signals.txt not run-log.txt) -- brief change only, low risk
 2. Item 2 (adversarial gate auto-enforce) -- dep_session.py + brief change
-3. Item 3 (ecosystem detection script) -- new dep_session.py subcommand
-4. Item 5 (deeper trigger for HIGH) -- dep_session.py + brief change
-5. Item 6 (pre-fill assessment) -- new script/subcommand + brief change
-6. Item 4 (lockfile diff parsing) -- most complex; ecosystem-specific parsers
+3. Item 7 (assessment.txt -> assessment.md) -- mechanical rename, many files
+4. Item 3 (ecosystem detection script) -- new dep_session.py subcommand
+5. Item 5 (deeper trigger for HIGH) -- dep_session.py + brief change
+6. Item 6 (pre-fill assessment) -- new script/subcommand + brief change
+7. Item 4 (lockfile diff parsing) -- most complex; ecosystem-specific parsers
