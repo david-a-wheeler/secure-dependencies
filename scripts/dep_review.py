@@ -1153,11 +1153,18 @@ def write_signals(ctx: SignalContext, p: Printer) -> SignalReport:  # noqa: C901
         mode=mode_label,
         old_version=old_ver if diff_mode else '',
         license_line=license_line_str,
+        license_note=license_note,
         health_line=health_line_str,
+        version_stability=registry.get('version_stability', 'unknown'),
+        known_vulnerabilities=_vuln_count,
+        health_concerns=(
+            ', '.join(health_concerns) if health_concerns else 'none'
+        ),
         clone_url=source_url,
         clone_status=clone_status_str,
         extensions=manifest.extensions,
         executables=manifest.executables,
+        install_hooks=manifest.post_install_msg,
         new_transitive_deps=new_trans_str,
     )
 

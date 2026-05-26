@@ -434,15 +434,15 @@ content from the package under review.
 Say exactly this (substituting the real path):
 
 > "The assessment for PKGNAME has been written to
-> `temp/dep-review/PKGNAME-VERSION/assessment.txt`.
+> `temp/dep-review/PKGNAME-VERSION/assessment.md`.
 > Please review it with:
 >
->     less temp/dep-review/PKGNAME-VERSION/assessment.txt
+>     less temp/dep-review/PKGNAME-VERSION/assessment.md
 >
 > Let me know when you are ready to continue."
 
 Wait for the user to confirm before spawning the next sub-agent or
-proceeding to Phase 3. Do not read `assessment.txt` yourself.
+proceeding to Phase 3. Do not read `assessment.md` yourself.
 
 **Then: act on NEXT_ACTION.**
 

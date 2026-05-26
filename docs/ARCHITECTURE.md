@@ -67,7 +67,7 @@ across the whole session, so it is the most valuable to protect.
 - `dep_session.py complete` calls -- records verdicts and advances the queue
 
 It never reads raw package source, diffs, filenames, or any file that could
-contain attacker-controlled text. It never reads `assessment.txt`.
+contain attacker-controlled text. It never reads `assessment.md`.
 
 ### Tier 2: Per-package agent
 
@@ -91,12 +91,13 @@ writes a human-readable assessment.
     `transitive-deps.txt`, `provenance.txt` -- if relevant signals present
   - `source-review.txt` -- tier 3 source review (if --deeper ran)
   - `summary-scan-LABEL.txt` -- scan match paths (if scan had matches)
-- `assets/assessment-template.txt` -- report template
+- `assets/assessment-template.md` -- report template
 
 **Outputs:**
 - Runs `dep_review.py` (and optionally `--deeper`, `--install-probe`) --
   all structured output files written to the package work directory
-- `assessment.txt` -- narrative security report written for human review
+- `assessment.md` -- narrative security report written for human review
+- `verdict.json` -- structured verdict fields (summary, risk factors)
 - Two lines to tier 1: `RISK_ASSESSMENT: ...` and `SUMMARY_RECOMMENDATION: ...`
 
 Tier 2 is **prohibited** from reading `raw-*` files (raw package content),
@@ -475,9 +476,9 @@ The sequence number allows multiple wrap-ups per day
 The report includes, for each analyzed package:
 
 - The package name, version, and risk level
-- Key risk factors extracted from that package's `assessment.txt`
+- Key risk factors and summary from that package's `verdict.json`
 - The concern summary
-- Links to the per-package supporting files (`signals.txt`, `assessment.txt`,
+- Links to the per-package supporting files (`signals.txt`, `assessment.md`,
   `diff-semantic.txt`, `source-review.txt`, etc.)
 
 The per-package detail files live under `temp/dep-review/<package-version>/`.

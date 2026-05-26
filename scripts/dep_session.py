@@ -5,8 +5,8 @@
 #
 # This script tracks the analysis queue, analyzed packages, depth threshold,
 # and CRITICAL propagation so the orchestrating AI never has to maintain state.
-# The AI's only job is: make security judgments, write assessment.txt,
-# call "dep_session.py complete" with its verdict.
+# The AI's only job is: make security judgments, write assessment.md
+# and verdict.json, call "dep_session.py complete" with its verdict.
 #
 # Subcommands:
 #   init              Create a new session from the project lockfile.
@@ -32,7 +32,7 @@
 #   → prints NEXT_ACTION: ANALYZE with the exact dep_review.py command to run
 #
 #   (sub-agent runs dep_review.py --session FILE ... ; makes security judgment;
-#    writes assessment.txt)
+#    writes assessment.md and verdict.json)
 #
 #   dep_session.py complete SESSION PKGNAME VERSION RECOMMENDATION RISK
 #   → updates session, enqueues newly discovered deps, prints NEXT_ACTION
@@ -305,7 +305,7 @@ def generate_manifest(session: dict, session_path: Path) -> Path:
     lines.append('#')
     lines.append('# HUMAN REVIEW REQUIRED before running the install command:')
     lines.append('#   - Read the AI recommendation and risk for each package.')
-    lines.append('#   - cat any assessment.txt listed below for full detail.')
+    lines.append('#   - cat any assessment.md listed below for full detail.')
     lines.append('#   - Remove a package from the install command if you do not approve it.')
     lines.append('#   - This file, once committed, is the record of human approval.')
     lines.append('#')
@@ -322,7 +322,7 @@ def generate_manifest(session: dict, session_path: Path) -> Path:
         deeper_needed = v.get('deeper_needed', False)
         deeper_done = v.get('deeper_done', False)
         itc = ' [INSTALL-TIME CODE: verify extconf.rb/setup.py]' if v.get('install_time_code') else ''
-        report_path = f'temp/dep-review/{shared.safe_dir_component(name, version)}/assessment.txt'
+        report_path = f'temp/dep-review/{shared.safe_dir_component(name, version)}/assessment.md'
 
         if rec == 'DO_NOT_INSTALL' or risk == 'CRITICAL':
             flagged_lines.append(f'#   {name} {version}  OMITTED: {rec} / {risk} risk (DO NOT install)')
@@ -431,15 +431,25 @@ def print_next_action(session: dict, session_path: Path) -> None:
         registry_url_flag = f' --registry-url {ru}' if ru else ''
         sname = shared.sanitize_line(name)
         sversion = shared.sanitize_line(version)
+        _droot = Path(session['project_root'])
+        _dwork = _droot / 'temp' / 'dep-review' / shared.safe_dir_component(name, version)
+        try:
+            _dwork_rel = _dwork.relative_to(Path.cwd())
+        except ValueError:
+            _dwork_rel = _dwork
         print(f'=== NEXT_ACTION{_tok_part}: RUN_DEEPER ===')
         print(f'Package  : {sname} {sversion}')
+        print(f'Work dir : {_dwork_rel}')
         print('Reason   : MEDIUM risk requires reproducible-build verification before approval.')
         print()
         print('Step 1: run deeper analysis:')
         print(f'  python3 {scripts_rel}/dep_review.py'
               f' --from {registry}{registry_url_flag} --deeper --root . {sname} {sversion}')
         print()
-        print('Step 2: read the updated signals.txt (deeper section), make judgment.')
+        print('Step 2: read updated signals, update assessment and verdict:')
+        print(f'  Read  : {_dwork_rel}/signals.txt (see DEEPER ANALYSIS section)')
+        print(f'  Update: {_dwork_rel}/assessment.md (fill deeper-analysis [TODO] placeholders)')
+        print(f'  Update: {_dwork_rel}/verdict.json (revise if verdict changes)')
         print()
         print('Step 3: record deeper result:')
         print(f'  python3 {scripts_rel}/dep_session.py deeper-done {session_rel} {sname} {sversion}')
@@ -472,7 +482,7 @@ def print_next_action(session: dict, session_path: Path) -> None:
         print()
         print('Next steps:')
         print('  1. Review the manifest (cat the file above).')
-        print('  2. cat any assessment.txt files you want to inspect.')
+        print('  2. cat any assessment.md files you want to inspect.')
         print('  3. Edit the manifest to remove any packages you do not approve.')
         print('  4. Run the install command at the bottom of the manifest.')
         print('  5. Commit the manifest and lockfile changes together.')
@@ -539,16 +549,32 @@ def print_next_action(session: dict, session_path: Path) -> None:
         f' {sname} {sversion}'
     )
 
+    _aroot = Path(session['project_root'])
+    _awork = _aroot / 'temp' / 'dep-review' / shared.safe_dir_component(name, version)
+    try:
+        _awork_rel = _awork.relative_to(Path.cwd())
+    except ValueError:
+        _awork_rel = _awork
     print(f'=== NEXT_ACTION{_tok_part}: ANALYZE ===')
     print(f'Package      : {sname}')
     print(f'Version      : {sversion}')
     print(f'Mode         : {mode}' + (f' (was {old_version})' if old_version else ''))
     print(f'Introduced by: {shared.sanitize_line(introduced_by)}')
+    print(f'Work dir     : {_awork_rel}')
     print()
     print('Step 1: run analysis:')
     print(f'  {cmd}')
     print()
-    print('Step 2: read output, make security judgment, write assessment.txt')
+    print('Step 2: pre-fill assessment.md, fill judgment, write verdict.json')
+    prefill_cmd = (
+        f'python3 {scripts_rel}/dep_session.py pre-fill-assessment'
+        f' --session {session_rel} -- {sname} {sversion}'
+    )
+    print(f'  {prefill_cmd}')
+    print(f'  Creates: {_awork_rel}/assessment.md'
+          f'  (open it; fill every [TODO: ...] placeholder)')
+    print(f'  Write  : {_awork_rel}/verdict.json'
+          f'  (summary, risk_increasing, risk_decreasing)')
     print()
     print('Step 3: record verdict:')
     _token_flag = f' --token {_tok}' if _tok else ''
@@ -774,8 +800,8 @@ def cmd_complete(args: argparse.Namespace) -> None:
 
     save_session(session_path, session)
 
-    if not (work / 'assessment.txt').is_file():
-        print(f'Warning: no assessment.txt found in {work}', file=sys.stderr)
+    if not (work / 'assessment.md').is_file():
+        print(f'Warning: no assessment.md found in {work}', file=sys.stderr)
 
     print_next_action(session, session_path)
 
@@ -1560,25 +1586,53 @@ def _parse_signals(path: Path) -> dict[str, str]:
     return fields
 
 
-def _parse_assessment_summary(path: Path) -> str:
-    """Extract the SUMMARY: paragraph from an AI-written assessment.txt."""
-    if not path.is_file():
-        return '(assessment.txt not found)'
-    summary_lines: list[str] = []
-    in_summary = False
-    for line in path.read_text(encoding='utf-8', errors='replace').splitlines():
-        if line.startswith('SUMMARY:'):
-            in_summary = True
-            rest = line[len('SUMMARY:'):].strip()
-            if rest:
-                summary_lines.append(rest)
-            continue
-        if in_summary:
-            if re.match(r'^[A-Z_]+:', line) and not line.startswith(' '):
-                break
-            summary_lines.append(line.strip())
-    text = ' '.join(p for p in summary_lines if p)
-    return text or '(no SUMMARY in assessment.txt)'
+def _parse_license_line(line: str) -> dict[str, str]:
+    """Parse 'SPDX: X  |  OSI-approved: Y  |  Status: Z' into a dict."""
+    result: dict[str, str] = {}
+    for part in line.split('|'):
+        part = part.strip()
+        if part.startswith('SPDX:'):
+            result['spdx'] = part[5:].strip()
+        elif part.startswith('OSI-approved:'):
+            result['osi_approved'] = part[13:].strip()
+        elif part.startswith('Status:'):
+            result['status'] = part[7:].strip()
+    return result
+
+
+def _parse_health_line(line: str) -> dict[str, str]:
+    """Parse 'Age: X  |  Last release: Y  |  Owners: Z  |  Scorecard: W'."""
+    result: dict[str, str] = {}
+    for part in line.split('|'):
+        part = part.strip()
+        if part.startswith('Age:'):
+            result['age'] = part[4:].strip()
+        elif part.startswith('Last release:'):
+            result['last_release'] = part[13:].strip()
+        elif part.startswith('Owners:'):
+            result['owners'] = part[7:].strip()
+        elif part.startswith('Scorecard:'):
+            result['scorecard'] = part[10:].strip()
+    return result
+
+
+def _read_verdict(work_dir: Path) -> dict[str, str]:
+    """Read verdict.json written by tier 2; return defaults if absent."""
+    defaults: dict[str, str] = {
+        'summary': '', 'risk_increasing': '', 'risk_decreasing': '',
+    }
+    vpath = work_dir / 'verdict.json'
+    if not vpath.is_file():
+        return dict(defaults)
+    try:
+        data = json.loads(vpath.read_text(encoding='utf-8'))
+        result = dict(defaults)
+        for k in defaults:
+            if k in data and data[k] is not None:
+                result[k] = str(data[k])
+        return result
+    except (json.JSONDecodeError, OSError):
+        return dict(defaults)
 
 
 def cmd_report(args: argparse.Namespace) -> None:
@@ -1604,7 +1658,7 @@ def cmd_report(args: argparse.Namespace) -> None:
         risk = v.get('risk', 'UNKNOWN')
         work_dir = root / 'temp' / 'dep-review' / shared.safe_dir_component(name, version)
         af = _parse_signals(work_dir / 'signals.txt')
-        summary = _parse_assessment_summary(work_dir / 'assessment.txt')
+        verdict = _read_verdict(work_dir)
 
         pkg_mode = af.get('mode', 'UNKNOWN')
         old_ver = af.get('old_version', '')
@@ -1622,7 +1676,8 @@ def cmd_report(args: argparse.Namespace) -> None:
         clone_display = (f'OK ({clone_url})' if clone_status.upper().startswith('OK') and clone_url
                          else clone_status)
         new_trans = af.get('new_transitive_deps', 'N/A' if pkg_mode == 'UPDATE' else '?')
-        report_path = f'temp/dep-review/{shared.safe_dir_component(name, version)}/assessment.txt'
+        report_path = f'temp/dep-review/{shared.safe_dir_component(name, version)}/assessment.md'
+        summary = verdict['summary'] or f'(see {report_path})'
 
         version_str = f'{old_ver} → {version}' if old_ver else version
         print(f'## {name} {version_str}: {rec} / {risk} risk')
@@ -1677,108 +1732,6 @@ def _next_report_path(dep_review_dir: Path, today: str) -> Path:
     return dep_review_dir / f'report-{today}-{seq}.md'
 
 
-def _parse_assessment_fields(path: Path) -> dict:
-    """Extract structured fields from an AI-written assessment.txt.
-
-    Returns a dict with keys: name, version, mode, ecosystem, license_spdx,
-    license_osi, license_status, risk, recommendation, risk_increasing,
-    risk_decreasing, summary, work_dir. All values are strings; missing fields
-    fall back to 'unknown' or empty string.
-    """
-    result = {
-        'name': 'unknown', 'version': 'unknown', 'mode': 'unknown',
-        'ecosystem': 'unknown', 'license_spdx': 'unknown',
-        'license_osi': 'unknown', 'license_status': 'unknown',
-        'risk': 'unknown', 'recommendation': 'unknown',
-        'risk_increasing': '', 'risk_decreasing': '', 'summary': '',
-        'work_dir': '',
-    }
-    if not path.is_file():
-        return result
-
-    # Simple section-aware line-by-line parser.
-    # Top-level keys are lines like "KEY: value" with no leading whitespace.
-    # Indented lines (leading spaces) belong to the current section.
-    summary_lines: list[str] = []
-    in_summary = False
-    in_risk_factors = False
-    in_license = False
-    _risk_last = ''  # 'increasing' or 'decreasing': tracks last seen sub-key
-
-    try:
-        lines = path.read_text(encoding='utf-8', errors='replace').splitlines()
-    except OSError:
-        return result
-
-    for line in lines:
-        stripped = line.strip()
-        if not stripped:
-            if in_summary:
-                summary_lines.append('')
-            continue
-
-        is_indented = line.startswith(' ') or line.startswith('\t')
-
-        if not is_indented:
-            in_summary = False
-            in_risk_factors = False
-            in_license = False
-            if ':' in line:
-                key, _, val = line.partition(':')
-                key = key.strip()
-                val = val.strip()
-                if key == 'PACKAGE':
-                    result['name'] = val
-                elif key == 'VERSION':
-                    result['version'] = val
-                elif key == 'MODE':
-                    result['mode'] = val
-                elif key == 'ECOSYSTEM':
-                    result['ecosystem'] = val
-                elif key == 'RISK_ASSESSMENT':
-                    result['risk'] = val
-                elif key == 'SUMMARY_RECOMMENDATION':
-                    result['recommendation'] = val
-                elif key == 'WORK_DIR':
-                    result['work_dir'] = val
-                elif key == 'LICENSE':
-                    in_license = True
-                elif key == 'RISK_FACTORS':
-                    in_risk_factors = True
-                    _risk_last = ''
-                elif key == 'SUMMARY':
-                    in_summary = True
-                    if val:
-                        summary_lines.append(val)
-        else:
-            # Indented: belongs to current section
-            if in_license:
-                if stripped.startswith('spdx:'):
-                    result['license_spdx'] = stripped[len('spdx:'):].strip()
-                elif stripped.startswith('osi_approved:'):
-                    result['license_osi'] = stripped[len('osi_approved:'):].strip()
-                elif stripped.startswith('status:'):
-                    result['license_status'] = stripped[len('status:'):].strip()
-            elif in_risk_factors:
-                if stripped.startswith('increasing:'):
-                    result['risk_increasing'] = stripped[len('increasing:'):].strip()
-                    _risk_last = 'increasing'
-                elif stripped.startswith('decreasing:'):
-                    result['risk_decreasing'] = stripped[len('decreasing:'):].strip()
-                    _risk_last = 'decreasing'
-                elif _risk_last:
-                    # continuation of a multi-line risk factor list
-                    key_name = f'risk_{_risk_last}'
-                    result[key_name] = (result[key_name] + ' ' + stripped).strip()
-            elif in_summary:
-                summary_lines.append(stripped)
-
-    if summary_lines:
-        result['summary'] = ' '.join(s for s in summary_lines if s)
-
-    return result
-
-
 def cmd_wrap_up(args: argparse.Namespace) -> None:
     """Generate the session report file."""
     session_path = Path(args.session).resolve()
@@ -1804,27 +1757,20 @@ def cmd_wrap_up(args: argparse.Namespace) -> None:
         risk = v.get('risk', 'unknown')
         work_dir = root / 'temp' / 'dep-review' / shared.safe_dir_component(name, version)
         af = _parse_signals(work_dir / 'signals.txt')
-        fields = _parse_assessment_fields(work_dir / 'assessment.txt')
+        verdict = _read_verdict(work_dir)
 
-        old_ver = af.get('old_version', fields.get('version', ''))
+        old_ver = af.get('old_version', '')
         lic_raw = af.get('license_line', '')
-        if '|' in lic_raw:
-            spdx = lic_raw.split('|')[0].replace('SPDX:', '').strip()
-            osi = 'approved' if 'YES' in lic_raw else 'not approved'
-            lic_status = ''
-            for part in lic_raw.split('|'):
-                if 'Status:' in part:
-                    lic_status = part.replace('Status:', '').strip()
-        else:
-            spdx = fields.get('license_spdx', 'unknown')
-            osi = fields.get('license_osi', 'unknown')
-            lic_status = fields.get('license_status', 'unknown')
+        lic = _parse_license_line(lic_raw)
+        spdx = lic.get('spdx', 'unknown')
+        osi_raw = lic.get('osi_approved', 'unknown')
+        osi = ('approved' if osi_raw == 'YES' else
+               'not approved' if osi_raw == 'NO' else osi_raw)
+        lic_status = lic.get('status', 'unknown')
 
         lic_display = spdx
-        if osi and lic_status:
+        if lic_status and lic_status not in ('unknown',):
             lic_display = f'{spdx} ({lic_status})'
-        elif osi:
-            lic_display = f'{spdx}'
 
         # Version display using ->
         if old_ver and old_ver != version:
@@ -1832,18 +1778,9 @@ def cmd_wrap_up(args: argparse.Namespace) -> None:
         else:
             ver_display = version
 
-        # Assessment.txt relative path from temp/dep-review/
-        assessment_rel = f'{shared.safe_dir_component(name, version)}/assessment.txt'
-        # Also compute from work_dir field if available
-        wd = fields.get('work_dir', '')
-        if wd:
-            try:
-                wd_path = Path(wd)
-                dep_review_path = dep_review_dir.resolve()
-                if wd_path.is_absolute():
-                    assessment_rel = str(wd_path.relative_to(dep_review_path)) + '/assessment.txt'
-            except (ValueError, OSError):
-                pass
+        assessment_rel = (
+            f'{shared.safe_dir_component(name, version)}/assessment.md'
+        )
 
         pkg_data.append({
             'name': name,
@@ -1851,14 +1788,14 @@ def cmd_wrap_up(args: argparse.Namespace) -> None:
             'ver_display': ver_display,
             'rec': rec,
             'risk': risk,
-            'ecosystem': fields.get('ecosystem', registry),
+            'ecosystem': registry,
             'lic_display': lic_display,
             'spdx': spdx,
             'osi': osi,
             'lic_status': lic_status,
-            'risk_increasing': fields.get('risk_increasing', ''),
-            'risk_decreasing': fields.get('risk_decreasing', ''),
-            'summary': fields.get('summary', ''),
+            'risk_increasing': verdict['risk_increasing'],
+            'risk_decreasing': verdict['risk_decreasing'],
+            'summary': verdict['summary'],
             'assessment_rel': assessment_rel,
             'sort_key': _risk_order.get(risk.upper(), 4),
         })
@@ -1947,6 +1884,116 @@ def cmd_wrap_up(args: argparse.Namespace) -> None:
             print('REMINDER: Add "temp/" to .gitignore to avoid committing analysis artifacts.')
     else:
         print('REMINDER: Create .gitignore with "temp/" to avoid committing analysis artifacts.')
+
+
+def cmd_pre_fill_assessment(args: argparse.Namespace) -> None:
+    """Write a pre-filled assessment.md to the package work directory.
+
+    Reads signals.json and substitutes all factual fields into the
+    assessment template, leaving [TODO: ...] placeholders for the AI
+    to fill in.  Tier 2 runs this after dep_review.py, before writing
+    the narrative.
+    """
+    session_path = Path(args.session).resolve()
+    session = load_session(session_path)
+    root = Path(session['project_root'])
+    registry = session['registry']
+
+    name = args.pkgname
+    version = args.version
+
+    work = root / 'temp' / 'dep-review' / shared.safe_dir_component(
+        name, version
+    )
+    signals = _parse_signals(work / 'signals.txt')
+
+    sha256 = signals.get('sha256', 'UNKNOWN')
+    mode = signals.get('mode', 'UNKNOWN')
+    old_version = signals.get('old_version', '')
+    version_display = f'{old_version} -> {version}' if old_version else version
+
+    lic = _parse_license_line(signals.get('license_line', ''))
+    spdx = lic.get('spdx', 'unknown')
+    osi_approved = lic.get('osi_approved', 'unknown')
+    license_status = lic.get('status', 'unknown')
+
+    health = _parse_health_line(signals.get('health_line', ''))
+    health_age = health.get('age', 'unknown')
+    health_last_release = health.get('last_release', 'unknown')
+    health_owners = health.get('owners', 'unknown')
+    health_scorecard = health.get('scorecard', 'unknown')
+
+    clone_url = signals.get('clone_url', 'not found')
+    clone_status = signals.get('clone_status', 'UNKNOWN')
+    extensions = signals.get('extensions', 'NO')
+    executables = signals.get('executables', 'NO')
+    transitive_total = signals.get('new_transitive_deps', '0') or '0'
+    concern_level = signals.get('concern_level', 'NONE')
+    risk_flags = signals.get('risk_flags', 'NONE')
+    pos_flags = signals.get('positive_flags', '')
+    mfa_status = (
+        'MFA_ENFORCED' if 'MFA_ENFORCED' in pos_flags else 'NOT_ENFORCED'
+    )
+
+    health_version_stability = signals.get('version_stability', 'unknown')
+    health_known_vulns = signals.get('known_vulnerabilities', 'unknown')
+    health_concerns = signals.get('health_concerns', 'none')
+    install_hooks = signals.get('install_hooks', 'unknown')
+
+    license_note_raw = signals.get('license_note', '')
+    if license_note_raw:
+        license_note = license_note_raw
+    elif license_status != 'OK':
+        license_note = (
+            '[TODO: explain security implications; missing license means'
+            ' no legal basis for external audits and predicts abandonment'
+            ' and unpatched vulnerabilities]'
+        )
+    else:
+        license_note = 'none'
+
+    template_path = (
+        Path(__file__).parent.parent / 'assets' / 'assessment-template.md'
+    )
+    if not template_path.is_file():
+        sys.exit(f'Template not found: {template_path}')
+    content = template_path.read_text(encoding='utf-8')
+
+    substitutions = {
+        'PKGNAME':                  shared.sanitize_line(name),
+        'VERSION_DISPLAY':          shared.sanitize_line(version_display),
+        'MODE':                     mode,
+        'ECOSYSTEM':                registry,
+        'WORK_DIR':                 str(work),
+        'SHA256':                   sha256,
+        'SPDX':                     spdx,
+        'OSI_APPROVED':             osi_approved,
+        'LICENSE_STATUS':           license_status,
+        'LICENSE_NOTE':             license_note,
+        'HEALTH_AGE':               health_age,
+        'HEALTH_LAST_RELEASE':      health_last_release,
+        'HEALTH_VERSION_STABILITY': health_version_stability,
+        'HEALTH_OWNERS':            health_owners,
+        'HEALTH_SCORECARD':         health_scorecard,
+        'HEALTH_KNOWN_VULNS':       health_known_vulns,
+        'HEALTH_CONCERNS':          health_concerns,
+        'CLONE_URL':                clone_url,
+        'CLONE_STATUS':             clone_status,
+        'EXTENSIONS':               extensions,
+        'EXECUTABLES':              executables,
+        'INSTALL_TIME_HOOKS':       install_hooks,
+        'TRANSITIVE_TOTAL':         transitive_total,
+        'MFA_STATUS':               mfa_status,
+        'RISK_FLAGS':               risk_flags,
+        'CONCERN_LEVEL':            concern_level,
+    }
+    for key, value in substitutions.items():
+        content = content.replace(f'{{{key}}}', value)
+
+    work.mkdir(parents=True, exist_ok=True)
+    out_path = work / 'assessment.md'
+    out_path.write_text(content, encoding='utf-8')
+    print(f'Pre-filled: {out_path}')
 
 
 def cmd_record_install(args: argparse.Namespace) -> None:
@@ -2616,6 +2663,16 @@ def main() -> None:
     p_ecodetect.add_argument('--root', required=True, metavar='DIR',
                              help='Project root directory')
 
+    # pre-fill-assessment
+    p_prefill = sub.add_parser(
+        'pre-fill-assessment',
+        help='Write a pre-filled assessment.md to the package work directory.',
+    )
+    p_prefill.add_argument('--session', required=True, metavar='FILE',
+                           help='Session file path')
+    p_prefill.add_argument('pkgname')
+    p_prefill.add_argument('version')
+
     # health-scan
     p_health = sub.add_parser(
         'health-scan',
@@ -2642,8 +2699,9 @@ def main() -> None:
         'ecosystem-detect':  cmd_ecosystem_detect,
         'diff-packages':     cmd_diff_packages,
         'report':            cmd_report,
-        'wrap-up':           cmd_wrap_up,
-        'record-install':    cmd_record_install,
+        'wrap-up':              cmd_wrap_up,
+        'pre-fill-assessment':  cmd_pre_fill_assessment,
+        'record-install':       cmd_record_install,
         'vuln-audit':        cmd_vuln_audit,
         'follow-on':         cmd_follow_on,
         'health-scan':       cmd_health_scan,
