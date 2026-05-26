@@ -1013,11 +1013,61 @@ ECOSYSTEM_INDICATOR_FILES: dict[str, list[str]] = {
     'npm':      ['package-lock.json', 'yarn.lock', 'pnpm-lock.yaml'],
 }
 
+# Analyzer script file for each ecosystem.
+ECOSYSTEM_ANALYZER_FILES: dict[str, str] = {
+    'rubygems': 'ruby_analyzer.py',
+    'pypi':     'python_analyzer.py',
+    'npm':      'js_analyzer.py',
+}
+
 
 def _detect_ecosystems(root: Path) -> list[str]:
     """Return list of ecosystem names whose lockfile indicators exist under root."""
     return [eco for eco, files in ECOSYSTEM_INDICATOR_FILES.items()
             if any((root / f).is_file() for f in files)]
+
+
+def cmd_ecosystem_detect(args: argparse.Namespace) -> None:
+    """Detect ecosystems in root and report analyzer availability.
+
+    Prints one line per detected ecosystem showing its status. Exits with
+    code 1 if any detected ecosystem is missing an analyzer, so callers
+    can use the exit code as a quick check without parsing text.
+    """
+    root = Path(args.root).resolve()
+    scripts_dir = Path(__file__).parent
+    detected = _detect_ecosystems(root)
+
+    print(f'=== ECOSYSTEM DETECTION: {root} ===')
+    print()
+
+    if not detected:
+        print('NONE_DETECTED: no known lockfile indicator files found.')
+        return
+
+    all_ok = True
+    for eco in detected:
+        analyzer_file = ECOSYSTEM_ANALYZER_FILES.get(eco, '')
+        if not analyzer_file:
+            status = 'MISSING (no analyzer file known for this ecosystem)'
+            all_ok = False
+        elif (scripts_dir / analyzer_file).is_file():
+            status = f'OK ({analyzer_file})'
+        else:
+            status = f'MISSING ({analyzer_file} not found)'
+            all_ok = False
+        print(f'{eco}: DETECTED  analyzer={status}')
+
+    print()
+    n = len(detected)
+    if all_ok:
+        print(f'SUMMARY: {n} ecosystem(s) detected; all analyzers present.')
+    else:
+        print(
+            f'SUMMARY: {n} ecosystem(s) detected; '
+            'one or more are missing an analyzer -- see MISSING lines above.',
+        )
+        sys.exit(1)
 
 
 def _run_cmd(cmd: list[str], cwd: Path) -> tuple[int, str, str]:
@@ -2172,6 +2222,14 @@ def main() -> None:
         help='Opt out: no email sent; suppresses future RATE_LIMITED warnings',
     )
 
+    # ecosystem-detect
+    p_ecodetect = sub.add_parser(
+        'ecosystem-detect',
+        help='Detect ecosystems in the project root and check analyzer availability.',
+    )
+    p_ecodetect.add_argument('--root', required=True, metavar='DIR',
+                             help='Project root directory')
+
     # health-scan
     p_health = sub.add_parser(
         'health-scan',
@@ -2195,6 +2253,7 @@ def main() -> None:
         'deeper-done':       cmd_deeper_done,
         'generate-manifest': cmd_generate_manifest,
         'env-check':         cmd_env_check,
+        'ecosystem-detect':  cmd_ecosystem_detect,
         'report':            cmd_report,
         'wrap-up':           cmd_wrap_up,
         'record-install':    cmd_record_install,

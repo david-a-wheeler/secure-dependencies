@@ -187,22 +187,18 @@ ask if they want to install before proceeding. **Ask only once.**
 
 ### Step 1b: Ecosystem detection and hook check
 
-Detect the project's ecosystem(s) by looking for these indicator files:
+Run:
 
-| Ecosystem | Indicator files |
-|---|---|
-| Ruby | `Gemfile`, `Gemfile.lock` |
-| Python | `pyproject.toml`, `requirements.txt`, `Pipfile.lock`, `poetry.lock`, `uv.lock` |
-| JavaScript | `package.json`, `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml` |
+```bash
+python3 SCRIPTS_DIR/dep_session.py ecosystem-detect --root PROJECT_ROOT
+```
 
-**Check whether an analyzer exists for each detected ecosystem.** Currently
-`analyzer_ruby.py` provides Ruby-specific dangerous-pattern detection. If you
-detect an ecosystem with no corresponding analyzer file in the scripts
-directory, tell the user:
+Read the output. Each detected ecosystem is listed with its analyzer
+status (`OK` or `MISSING`). If any ecosystem shows `MISSING`, tell the user:
 
 > "I don't have an analyzer for [ecosystem] yet. The analyzer enables
 > dangerous-pattern detection specific to that language. Would you like me to
-> create one using `analyzer_ruby.py`, and perhaps other analyzers,
+> create one using `ruby_analyzer.py`, and perhaps other analyzers,
 > as a starting point?"
 
 If yes, draft the analyzer file before proceeding. If no, proceed with

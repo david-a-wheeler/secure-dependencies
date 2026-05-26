@@ -55,7 +55,7 @@ ambiguity. Also, the gate result is already stored in `session-update.json`
 
 ---
 
-## 3. Ecosystem detection: move from tier 1 to a script
+## 3. ~~Ecosystem detection: move from tier 1 to a script~~ DONE
 
 **Current behaviour:** SKILL.md Step 1b tells tier 1 to look for indicator
 files (`Gemfile`, `package.json`, `pyproject.toml`, etc.) to detect the
