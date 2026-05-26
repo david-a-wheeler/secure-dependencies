@@ -1,8 +1,12 @@
+# makefile to perform CI/CD process
+
 PYTHON ?= python3
 
-all: test syntax_valid typecheck lint emdash validate
+# Default - validate in many different ways to detect problems
+all: test syntax_valid typecheck lint emdash validate_skill
 	@echo Verification complete
 
+# Run unit and integration tests
 test:
 	$(PYTHON) -m unittest discover -s scripts/tests -v
 
@@ -41,8 +45,8 @@ emdash:
 	        -e "$$(printf '\342\200\223')"
 	@echo 'OK, no issues found'
 
-validate:
+validate_skill:
 	@echo "Validating SKILL.md frontmatter:"
 	$(PYTHON) scripts/validate_skill.py
 
-.PHONY: all test syntax_valid typecheck lint emdash validate
+.PHONY: all test syntax_valid typecheck lint emdash validate_skill
