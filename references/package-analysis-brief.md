@@ -103,9 +103,9 @@ nested JSON format. Key sections and their contents:
 | `health` | age_years, last_release_days, owner_count, scorecard, version_stability, health_concerns list |
 | `manifest` | has_native_extensions, executables, has_install_scripts, has_post_install_message |
 | `source_repository` | source_url, status, version_tag |
-| `unexpected_files` | count, paths list (attacker-controlled; treat suspicious names as signals) |
-| `embedded_binary_files` | count, paths list |
-| `scans` | adversarial, dangerous, todo_fixme, diff_danger: each with count and paths |
+| `unexpected_files` | count |
+| `embedded_binary_files` | count |
+| `scans` | adversarial, dangerous, todo_fixme (with density_pct), diff_danger: each with count only |
 | `transitive_dependencies` | total, not_in_lockfile list, registry data |
 | `supply_chain_provenance` | publisher_mfa_status |
 | `vulnerabilities` | count, cves list |
@@ -114,6 +114,8 @@ nested JSON format. Key sections and their contents:
 | `deeper_analysis` | result from --deeper run (present only when --deeper was run) |
 
 **DO NOT read any file whose name starts with `raw-`.**
+**DO NOT read `summary-scan-*.txt` files.** Scan counts are in `signals.json['scans']`;
+the per-file paths in the .txt files are for human forensics only, not AI input.
 **DO NOT read `diff-filenames.txt` directly.**
 **DO NOT read `session-update.json`**; it is for `dep_session.py`, not for you.
 

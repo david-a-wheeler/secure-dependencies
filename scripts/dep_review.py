@@ -179,7 +179,6 @@ def write_signals(ctx: SignalContext) -> dict:  # noqa: C901
     manifest = ctx.manifest
     scan_details = ctx.scan_details
     total_matches = ctx.total_matches
-    diff_scan_details = ctx.diff_scan_details
     diff_scan_matches = ctx.diff_scan_matches
     source_lines = ctx.source_lines
     clone_ok = ctx.clone_ok
@@ -327,12 +326,12 @@ def write_signals(ctx: SignalContext) -> dict:  # noqa: C901
     if dangerous_matches_count > 0:
         _concerns.append((
             'dangerous_patterns',
-            f'{dangerous_matches_count} matches  [review summary-scan-*.txt for affected file paths]',
+            f'{dangerous_matches_count} matches  [see summary-scan-*.txt for affected file paths (human forensics)]',
         ))
     if diff_scan_matches > 0:
         _concerns.append((
             'diff_scan_matches',
-            f'{diff_scan_matches} matches  [review summary-scan-*.txt diff section for affected paths]',
+            f'{diff_scan_matches} matches  [see summary-scan-*.txt for affected file paths (human forensics)]',
         ))
     if license_status == 'CRITICAL':
         _concerns.append((
@@ -595,7 +594,7 @@ def write_signals(ctx: SignalContext) -> dict:  # noqa: C901
     scan_hits = [lbl for lbl, cnt in scan_details if cnt > 0]
     if scan_hits:
         questions.append(
-            f'Scan matches in: {", ".join(scan_hits)}. See scans section for affected files.'
+            f'Scan matches in: {", ".join(scan_hits)}. See scans section for counts.'
             ' Determine whether these are false positives (tests, docs) or genuine concerns.'
         )
     if (total_matches == 0 and diff_scan_matches == 0
@@ -614,44 +613,13 @@ def write_signals(ctx: SignalContext) -> dict:  # noqa: C901
     except (ValueError, IndexError):
         scorecard_float = None
 
-    # ---- Helper: read sanitized file paths from a summary-scan file ----
-    def _scan_paths(lbl: str) -> list[str]:
-        scan_file = work / f'summary-scan-{lbl}.txt'
-        if not scan_file.is_file():
-            return []
-        paths: list[str] = []
-        in_files = False
-        work_prefix = str(work) + '/'
-        for line in scan_file.read_text(encoding='utf-8', errors='replace').splitlines():
-            if line == 'files_with_matches:':
-                in_files = True
-                continue
-            if in_files and line.strip():
-                rel = line[len(work_prefix):] if line.startswith(work_prefix) else line
-                paths.append(rel)
-        return paths
-
     # ---- Aggregate scan results by category ----
     adv_count = all_adversarial_matches
-    adv_paths: list[str] = []
-    for lbl, cnt in scan_details:
-        if lbl in adversarial_labels_set and cnt > 0:
-            adv_paths.extend(_scan_paths(lbl))
-
-    dangerous_paths: list[str] = []
-    for lbl, cnt in scan_details:
-        if lbl not in adversarial_labels_set and lbl not in todo_labels_set and cnt > 0:
-            dangerous_paths.extend(_scan_paths(lbl))
 
     todo_count = sum(cnt for lbl, cnt in scan_details if lbl in todo_labels_set)
     todo_density_pct: float | None = (
         round(todo_count * 100.0 / source_lines, 1) if source_lines > 0 else None
     )
-
-    diff_danger_paths: list[str] = []
-    for lbl, cnt in diff_scan_details:
-        if cnt > 0:
-            diff_danger_paths.extend(_scan_paths(lbl))
 
     # ---- Health concern context map ----
     _health_context = {
@@ -697,24 +665,6 @@ def write_signals(ctx: SignalContext) -> dict:  # noqa: C901
         clone_status_str = 'SKIPPED'
     else:
         clone_status_str = 'FAILED'
-
-    # ---- Extra file paths ----
-    extra_paths: list[str] = []
-    if extra_files > 0:
-        _extra_file_path = work / 'extra-in-package.txt'
-        if _extra_file_path.is_file():
-            for eline in _extra_file_path.read_text(encoding='utf-8', errors='replace').splitlines():
-                if eline.startswith('./'):
-                    extra_paths.append(eline)
-
-    # ---- Binary file paths ----
-    bin_paths: list[str] = []
-    if binary_files > 0:
-        _bin_file_path = work / 'binary-files.txt'
-        if _bin_file_path.is_file():
-            for bline in _bin_file_path.read_text(encoding='utf-8', errors='replace').splitlines():
-                if bline.strip() and not bline.startswith('EMBEDDED_EXECUTABLES:'):
-                    bin_paths.append(bline.strip())
 
     # ---- Build signals dict ----
     signals: dict = {}
@@ -785,26 +735,20 @@ def write_signals(ctx: SignalContext) -> dict:  # noqa: C901
         'source_likely_incompatible': source_likely_incompatible,
     }
 
-    signals['unexpected_files'] = {
-        'count': extra_files,
-        'paths': extra_paths,
-    }
+    signals['unexpected_files'] = {'count': extra_files}
 
-    signals['embedded_binary_files'] = {
-        'count': binary_files,
-        'paths': bin_paths,
-    }
+    signals['embedded_binary_files'] = {'count': binary_files}
 
     scans_dict: dict = {
-        'adversarial': {'count': adv_count, 'paths': adv_paths},
-        'dangerous': {'count': dangerous_matches_count, 'paths': dangerous_paths},
+        'adversarial': {'count': adv_count},
+        'dangerous': {'count': dangerous_matches_count},
     }
     if shared.TODO_PATTERNS:
         todo_entry: dict = {'count': todo_count}
         if todo_density_pct is not None:
             todo_entry['density_pct'] = todo_density_pct
         scans_dict['todo_fixme'] = todo_entry
-    scans_dict['diff_danger'] = {'count': diff_scan_matches, 'paths': diff_danger_paths}
+    scans_dict['diff_danger'] = {'count': diff_scan_matches}
     signals['scans'] = scans_dict
 
     if diff_mode:
@@ -914,8 +858,7 @@ def write_signals(ctx: SignalContext) -> dict:  # noqa: C901
         (work / 'next-steps.txt').write_text('\n'.join(_next_steps) + '\n', encoding='utf-8')
 
     # Sanitize attacker-controlled string values
-    for _sec_key in ('source_repository', 'unexpected_files', 'embedded_binary_files',
-                     'scans', 'transitive_dependencies', 'vulnerabilities'):
+    for _sec_key in ('source_repository', 'transitive_dependencies', 'vulnerabilities'):
         if _sec_key in signals:
             signals[_sec_key] = shared.sanitize_for_json(signals[_sec_key])
 
