@@ -1,17 +1,89 @@
 {
-  "sha256": "abc123def456",
-  "risk_flags": "NATIVE_EXTENSION",
-  "positive_flags": "MFA_REQUIRED",
-  "adversarial_gate": "PASS",
-  "concern_count": 2,
-  "concern_level": "MEDIUM",
-  "mode": "UPDATE",
-  "old_version": "",
-  "license_line": "SPDX: MIT  |  OSI-approved: YES  |  Status: OK",
-  "health_line": "Age: 3.2 yr  |  Last release: 45 days ago  |  Owners: unknown  |  Scorecard: 7.5/10",
-  "clone_url": "https://github.com/example/pkg",
-  "clone_status": "OK",
-  "extensions": "YES",
-  "executables": "NO",
-  "new_transitive_deps": "3"
+  "meta": {
+    "pkgname": "mygem",
+    "version": "1.2.3",
+    "analysis_mode": "UPDATE",
+    "old_version": "",
+    "sha256": "abc123def456",
+    "ecosystem": "rubygems",
+    "timestamp": "2026-01-01T00:00:00"
+  },
+  "gate": {
+    "risk_flags": ["NATIVE_EXTENSION"],
+    "positive_flags": ["MFA_REQUIRED"],
+    "adversarial_gate": "PASS",
+    "concern_level": "MEDIUM",
+    "concern_count": 2,
+    "concerns": []
+  },
+  "open_questions": [],
+  "license": {
+    "spdx_expression": "MIT",
+    "osi_approved": true,
+    "status": "OK",
+    "status_explanation": "none",
+    "spdx_expression_changed": false,
+    "previous_spdx_expression": null
+  },
+  "health": {
+    "age_years": 3.2,
+    "days_since_last_release": 45,
+    "days_since_version_published": 10,
+    "version_stability": "stable",
+    "owner_count": null,
+    "openssf_scorecard_score": 7.5,
+    "scorecard_checks": {},
+    "recent_commits_12_months": null,
+    "commit_activity_trend_12_months": null,
+    "commit_counts_per_30_day_window": null,
+    "has_security_policy": null,
+    "known_vulnerability_count": 0,
+    "health_concerns": [],
+    "package_ecosystem_stats": null
+  },
+  "manifest": {
+    "has_native_extensions": true,
+    "executables_list": null,
+    "has_install_scripts": false,
+    "has_post_install_message": false,
+    "has_build_hooks": false
+  },
+  "source_repository": {
+    "source_url": "https://github.com/example/pkg",
+    "clone_status": "OK",
+    "version_tag": null,
+    "version_tag_commit_was_guessed": false,
+    "source_likely_incompatible": false
+  },
+  "unexpected_files": {
+    "count": 0,
+    "paths": []
+  },
+  "embedded_binary_files": {
+    "count": 0,
+    "paths": []
+  },
+  "scans": {
+    "adversarial": {"count": 0, "paths": []},
+    "dangerous": {"count": 0, "paths": []},
+    "diff_danger": {"count": 0, "paths": []}
+  },
+  "transitive_dependencies": {
+    "total_transitive_dependency_count": 5,
+    "not_in_lockfile": ["dep-a", "dep-b", "dep-c"],
+    "new_dep_registry_metadata": {},
+    "added_direct": [],
+    "removed_direct": []
+  },
+  "supply_chain_provenance": {
+    "publisher_mfa_status": "unknown"
+  },
+  "vulnerabilities": {
+    "count": 0,
+    "cves": []
+  },
+  "oss_reproducible_build": {
+    "reproducibility_verdict": "NOT_CHECKED",
+    "summary": ""
+  }
 }

@@ -1,6 +1,5 @@
 """Tests for file-parsing functions that require fixture files."""
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 
@@ -15,52 +14,40 @@ _signals_cache: dict | None = None
 
 
 def _signals() -> dict:
-    """Return parsed fields from the shared signals fixture (cached)."""
+    """Return signals dict from the shared fixture (cached)."""
     global _signals_cache
     if _signals_cache is None:
-        # signals.json is present alongside signals.txt, so JSON path is used.
-        _signals_cache = dep_session._parse_signals(FIXTURES / 'signals.txt')
+        _signals_cache = dep_session._load_signals(FIXTURES)
     return _signals_cache
 
 
-class TestParseAutoFindings(unittest.TestCase):
+class TestLoadSignals(unittest.TestCase):
 
     def test_top_level_fields(self):
-        f = _signals()
-        self.assertEqual(f['sha256'], 'abc123def456')
-        self.assertEqual(f['adversarial_gate'], 'PASS')
-        self.assertEqual(f['risk_flags'], 'NATIVE_EXTENSION')
-        self.assertEqual(f['concern_count'], '2')
-        self.assertEqual(f['concern_level'], 'MEDIUM')
+        sig = _signals()
+        self.assertEqual(sig.get('meta', {}).get('sha256'), 'abc123def456')
+        gate = sig.get('gate', {})
+        self.assertEqual(gate.get('adversarial_gate'), 'PASS')
+        self.assertIn('NATIVE_EXTENSION', gate.get('risk_flags', []))
+        self.assertEqual(gate.get('concern_count'), 2)
+        self.assertEqual(gate.get('concern_level'), 'MEDIUM')
 
-    def test_concern_summary_transitive_deps(self):
-        self.assertEqual(_signals()['new_transitive_deps'], '3')
+    def test_transitive_deps_count(self):
+        not_in_lock = _signals().get('transitive_dependencies', {}).get(
+            'not_in_lockfile', [])
+        self.assertEqual(len(not_in_lock), 3)
 
     def test_section_license(self):
-        self.assertIn('MIT', _signals()['license_line'])
+        sig = _signals()
+        self.assertIn('MIT', sig.get('license', {}).get('spdx_expression', ''))
 
     def test_section_source_repository(self):
-        f = _signals()
-        self.assertEqual(f['clone_url'], 'https://github.com/example/pkg')
-        self.assertEqual(f['clone_status'], 'OK')
+        repo = _signals().get('source_repository', {})
+        self.assertEqual(repo.get('source_url'), 'https://github.com/example/pkg')
+        self.assertEqual(repo.get('clone_status'), 'OK')
 
-    def test_missing_file_returns_empty_dict(self):
-        self.assertEqual(
-            dep_session._parse_signals(Path('/no/such/file.txt')), {})
-
-    def test_text_fallback_when_no_json(self):
-        """Text parsing is used when only signals.txt exists (no signals.json)."""
-        with tempfile.TemporaryDirectory() as tmp:
-            txt = Path(tmp) / 'signals.txt'
-            txt.write_text(
-                (FIXTURES / 'signals.txt').read_text(encoding='utf-8'),
-                encoding='utf-8',
-            )
-            f = dep_session._parse_signals(txt)
-        self.assertEqual(f['sha256'], 'abc123def456')
-        self.assertEqual(f['risk_flags'], 'NATIVE_EXTENSION')
-        self.assertIn('MIT', f['license_line'])
-        self.assertEqual(f['clone_url'], 'https://github.com/example/pkg')
+    def test_missing_dir_returns_empty_dict(self):
+        self.assertEqual(dep_session._load_signals(Path('/no/such/dir')), {})
 
 
 class TestReadVerdict(unittest.TestCase):

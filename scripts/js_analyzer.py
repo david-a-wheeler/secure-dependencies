@@ -443,7 +443,7 @@ class JavaScriptAnalyzer(shared.EcosystemAnalyzer):
             pack_cmd += ['--registry', self.registry_url]
         pack_cmd += ['--', f'{pkgname}@{version}']
 
-        rc, _out, err = shared.run_cmd(pack_cmd, cwd=work, timeout=180)
+        rc, _out, _err = shared.run_cmd(pack_cmd, cwd=work, timeout=180)
         tgz_file: Path | None = None
         sha256 = ''
 
@@ -453,22 +453,13 @@ class JavaScriptAnalyzer(shared.EcosystemAnalyzer):
                 tgz_file = max(
                     tgz_candidates, key=lambda p: p.stat().st_mtime)
                 sha256 = shared.sha256_file(tgz_file)
-                (work / 'package-hash.txt').write_text(
-                    f'{sha256}  {tgz_file.name}\n', encoding='utf-8'
-                )
                 if not self._unpack_tgz(
                         tgz_file, unpacked_dir, failures, 'unpack-new'):
                     failures.append('unpack-new-failed')
             else:
                 failures.append('npm-pack-no-tgz')
-                (work / 'package-hash.txt').write_text(
-                    'ERROR: no .tgz produced\n', encoding='utf-8')
         else:
             failures.append('npm-pack-new')
-            sanitized_err = shared.sanitize(err[:500]) if err else ''
-            (work / 'package-hash.txt').write_text(
-                f'ERROR: npm pack failed\n{sanitized_err}\n', encoding='utf-8'
-            )
 
         return {
             'unpacked_dir': unpacked_dir,
@@ -489,11 +480,10 @@ class JavaScriptAnalyzer(shared.EcosystemAnalyzer):
         manifest-analysis.txt.
         """
         source_url = ''
-        extensions = 'NO'
-        executables = 'NO'
+        has_native_extensions = False
         executables_list = ''
-        post_install_msg = 'NO'
-        has_build_hooks = 'NO'
+        has_post_install_message = False
+        has_build_hooks = False
         manifest_license_raw = ''
         manifest_text = ''
         runtime_dep_lines: list[str] = []
@@ -525,7 +515,7 @@ class JavaScriptAnalyzer(shared.EcosystemAnalyzer):
                 re.search(r'node-gyp\s+rebuild|prebuild-install', install_val)
             )
             if is_native:
-                extensions = 'YES'
+                has_native_extensions = True
                 p('HAS_EXTENSIONS: YES (native addon)')
             else:
                 p('HAS_EXTENSIONS: NO')
@@ -533,7 +523,6 @@ class JavaScriptAnalyzer(shared.EcosystemAnalyzer):
             # Executables (bin field)
             bin_field = pkg_json.get('bin', None)
             if bin_field:
-                executables = 'YES'
                 if isinstance(bin_field, dict):
                     executables_list = shared.sanitize_line(
                         ', '.join(list(bin_field.keys())[:10]))
@@ -547,14 +536,14 @@ class JavaScriptAnalyzer(shared.EcosystemAnalyzer):
             # Lifecycle scripts: preinstall, install, postinstall
             install_script_content: list[tuple[str, str]] = []
             if preinstall_val:
-                has_build_hooks = 'YES'
+                has_build_hooks = True
                 p('HAS_PREINSTALL: YES')
                 p(f'  preinstall: '
                   f'{shared.sanitize_line(preinstall_val[:300])}')
                 install_script_content.append(('preinstall', preinstall_val))
-                post_install_msg = 'YES'
+                has_post_install_message = True
             if install_val and not is_native:
-                has_build_hooks = 'YES'
+                has_build_hooks = True
                 p('HAS_INSTALL_SCRIPT: YES')
                 p(f'  install: {shared.sanitize_line(install_val[:300])}')
                 install_script_content.append(('install', install_val))
@@ -562,13 +551,13 @@ class JavaScriptAnalyzer(shared.EcosystemAnalyzer):
                 p(f'NATIVE_INSTALL_SCRIPT: '
                   f'{shared.sanitize_line(install_val[:300])}')
             if postinstall_val:
-                has_build_hooks = 'YES'
+                has_build_hooks = True
                 p('HAS_POSTINSTALL: YES')
                 p(f'  postinstall: '
                   f'{shared.sanitize_line(postinstall_val[:300])}')
                 install_script_content.append(
                     ('postinstall', postinstall_val))
-                post_install_msg = 'YES'
+                has_post_install_message = True
             if not (preinstall_val or install_val or postinstall_val):
                 p('HAS_BUILD_HOOKS: NO')
 
@@ -690,17 +679,25 @@ class JavaScriptAnalyzer(shared.EcosystemAnalyzer):
 
             # Write install-time scripts for AI review
             if install_script_content:
-                script_lines: list[str] = [
+                header_lines: list[str] = [
                     '=== Install-time scripts for AI review ===',
                     '',
                     'These lifecycle scripts execute during npm install.',
                     'Review each one for malicious or unexpected behavior.',
                     '',
                 ]
+                raw_script_lines: list[str] = list(header_lines)
+                script_lines: list[str] = list(header_lines)
                 for hook_name, hook_val in install_script_content:
+                    raw_script_lines.append(f'--- {hook_name} ---')
+                    raw_script_lines.append(hook_val)
+                    raw_script_lines.append('')
                     script_lines.append(f'--- {hook_name} ---')
                     script_lines.append(shared.sanitize_line(hook_val))
                     script_lines.append('')
+                (work / 'raw-install-scripts.txt').write_text(
+                    '\n'.join(raw_script_lines), encoding='utf-8', errors='replace'
+                )
                 (work / 'install-scripts.txt').write_text(
                     '\n'.join(script_lines), encoding='utf-8'
                 )
@@ -739,12 +736,11 @@ class JavaScriptAnalyzer(shared.EcosystemAnalyzer):
 
         return shared.PackageManifest(
             source_url=source_url,
-            extensions=extensions,
-            executables=executables,
+            has_native_extensions=has_native_extensions,
             executables_list=executables_list,
-            post_install_msg=post_install_msg,
+            has_post_install_message=has_post_install_message,
             has_build_hooks=has_build_hooks,
-            has_install_scripts='YES' if has_install_scripts else 'NO',
+            has_install_scripts=has_install_scripts,
             runtime_dep_lines=runtime_dep_lines,
             manifest_license_raw=manifest_license_raw,
             manifest_text=manifest_text,
@@ -793,10 +789,6 @@ class JavaScriptAnalyzer(shared.EcosystemAnalyzer):
         else:
             failures.append('npm-pack-old')
 
-        (work / 'old-version-status.txt').write_text(
-            f'OLD_VERSION_SOURCE: {source or "unavailable"}\n',
-            encoding='utf-8',
-        )
         return {'ok': ok, 'source': source, 'unpacked_dir': old_dir}
 
     def _read_old_manifest(self, old_unpacked_dir: Path, pkgname: str) -> dict | None:
@@ -1532,6 +1524,7 @@ class JavaScriptAnalyzer(shared.EcosystemAnalyzer):
         built_dir: Path,
         work: Path,
         p: 'shared.Printer',
+        dist_sha: str = '',
     ) -> tuple[str, int, int]:
         built_tgzs = list(built_dir.glob('*.tgz'))
         if not built_tgzs:
@@ -1540,7 +1533,7 @@ class JavaScriptAnalyzer(shared.EcosystemAnalyzer):
         # Select newest: npm pack timestamps vary across runs.
         built_tgz = max(built_tgzs, key=lambda tgz: tgz.stat().st_mtime)
         built_sha = shared.sha256_file(built_tgz)
-        if (repro := shared.compare_repro_sha256(built_sha, work, p)) is not None:
+        if (repro := shared.compare_repro_sha256(built_sha, dist_sha, work, p)) is not None:
             return repro
         # Hashes nearly always differ (timestamps); compare unpacked contents.
         built_unpacked = work / 'raw-built-unpacked'

@@ -423,7 +423,7 @@ class PythonAnalyzer(shared.EcosystemAnalyzer):
             dl_cmd += ['--index-url', self.registry_url]
         dl_cmd += ['--', f'{pkgname}=={version}']
 
-        rc, _out, err = shared.run_cmd(dl_cmd, cwd=work, timeout=180)
+        rc, _out, _err = shared.run_cmd(dl_cmd, cwd=work, timeout=180)
 
         pkg_file = self._get_pkg_file(work, pkgname, version)
         sha256 = ''
@@ -431,20 +431,11 @@ class PythonAnalyzer(shared.EcosystemAnalyzer):
 
         if pkg_file and pkg_file.is_file():
             sha256 = shared.sha256_file(pkg_file)
-            (work / 'package-hash.txt').write_text(
-                f'{sha256}  {pkg_file.name}\n', encoding='utf-8'
-            )
             dist_type = self._unpack_pkg(pkg_file, unpacked_dir, failures, 'unpack-new')
             if dist_type == 'unknown' and 'unpack-new' not in ' '.join(failures):
                 failures.append('unpack-new')
         else:
             failures.append('pip-download-new')
-            sanitized_err = shared.sanitize(err[:500]) if err else ''
-            (work / 'package-hash.txt').write_text(
-                f'ERROR: pip download failed\n{sanitized_err}\n', encoding='utf-8'
-            )
-
-        (work / 'dist-type.txt').write_text(f'DIST_TYPE: {dist_type}\n', encoding='utf-8')
 
         return {
             'unpacked_dir': unpacked_dir,
@@ -464,11 +455,10 @@ class PythonAnalyzer(shared.EcosystemAnalyzer):
     ) -> shared.PackageManifest:
         """Parse METADATA (wheel) or PKG-INFO (sdist); write manifest-analysis.txt."""
         source_url = ''
-        extensions = 'NO'
-        executables = 'NO'
+        has_native_extensions = False
         executables_list = ''
-        post_install_msg = 'NO'
-        has_build_hooks = 'NO'
+        has_post_install_message = False
+        has_build_hooks = False
         manifest_license_raw = ''
         manifest_text = ''
         runtime_dep_lines: list[str] = []
@@ -514,19 +504,19 @@ class PythonAnalyzer(shared.EcosystemAnalyzer):
         if unpacked_dir.is_dir():
             native_exts = list(unpacked_dir.rglob('*.so')) + list(unpacked_dir.rglob('*.pyd'))
             if native_exts:
-                extensions = 'YES'
-        if extensions == 'NO' and unpacked_dir.is_dir():
+                has_native_extensions = True
+        if not has_native_extensions and unpacked_dir.is_dir():
             if ppt_text and re.search(r'(?i)ext_modules|cffi|Cython|cython|distutils\.extension', ppt_text):
-                extensions = 'YES'
-            if extensions == 'NO':
+                has_native_extensions = True
+            if not has_native_extensions:
                 for fname in ('setup.py', 'setup.cfg', 'meson.build'):
                     fpath = unpacked_dir / fname
                     if fpath.is_file():
                         txt = fpath.read_text(encoding='utf-8', errors='replace')
                         if re.search(r'(?i)ext_modules|cffi|Cython|cython|distutils\.extension', txt):
-                            extensions = 'YES'
+                            has_native_extensions = True
                             break
-        p(f'HAS_EXTENSIONS: {extensions}')
+        p(f'HAS_EXTENSIONS: {"YES" if has_native_extensions else "NO"}')
 
         # Check for entry points (executables installed to PATH)
         entry_points_file: Path | None = None
@@ -540,17 +530,15 @@ class PythonAnalyzer(shared.EcosystemAnalyzer):
         if entry_points_file and entry_points_file.is_file():
             ep_text = entry_points_file.read_text(encoding='utf-8', errors='replace')
             if re.search(r'^\s*\[console_scripts\]', ep_text, re.MULTILINE):
-                executables = 'YES'
                 scripts = re.findall(r'^\s*(\S+)\s*=', ep_text, re.MULTILINE)
                 executables_list = shared.sanitize_line(', '.join(scripts[:10]))
         # Also check pyproject.toml project.scripts
-        if executables == 'NO' and ppt_text:
+        if not executables_list and ppt_text:
             if re.search(r'\[project\.scripts\]|\[project\.gui-scripts\]', ppt_text):
-                executables = 'YES'
                 scripts = re.findall(r'^\s*(\S+)\s*=', ppt_text, re.MULTILINE)
                 executables_list = shared.sanitize_line(', '.join(scripts[:10]))
-        p(f'HAS_EXECUTABLES: {executables}')
-        if executables == 'YES':
+        p(f'HAS_EXECUTABLES: {"YES" if executables_list else "NO"}')
+        if executables_list:
             p(f'EXECUTABLES: {executables_list}')
 
         # Check for build hooks / install-time code:
@@ -577,16 +565,15 @@ class PythonAnalyzer(shared.EcosystemAnalyzer):
                 if _sp_size_warn:
                     install_cmd_warnings.append(_sp_size_warn)
                 if suspicious:
-                    has_build_hooks = 'YES'
+                    has_build_hooks = True
                     install_script_files.append(('setup.py', setup_py))
                 elif has_setup_py:
-                    has_build_hooks = 'MAYBE'
+                    has_build_hooks = True
             # pyproject.toml build-hooks (hatchling, meson-python, etc.)
             if ppt_text and re.search(r'\[tool\.hatch\.build\.hooks\]|build-backend\s*=', ppt_text):
-                if has_build_hooks == 'NO':
-                    has_build_hooks = 'MAYBE'
+                has_build_hooks = True
 
-        p(f'HAS_BUILD_HOOKS: {has_build_hooks}')
+        p(f'HAS_BUILD_HOOKS: {"YES" if has_build_hooks else "NO"}')
         if has_setup_py:
             p('SETUP_PY_PRESENT: YES')
 
@@ -656,18 +643,26 @@ class PythonAnalyzer(shared.EcosystemAnalyzer):
 
         # Extract install-time scripts for AI review
         if install_script_files:
-            script_lines: list[str] = [
+            header_lines: list[str] = [
                 '=== Install-time scripts for AI review ===',
                 '',
                 'These files may execute code during pip install (sdist builds).',
                 'Review each one for malicious or unexpected behavior.',
                 '',
             ]
+            raw_script_lines: list[str] = list(header_lines)
+            script_lines: list[str] = list(header_lines)
             for fname, fpath in install_script_files:
                 raw = fpath.read_text(encoding='utf-8', errors='replace')
+                raw_script_lines.append(f'--- {fname} ---')
+                raw_script_lines.append(raw)
+                raw_script_lines.append('')
                 script_lines.append(f'--- {fname} ---')
                 script_lines.append(shared.sanitize(raw))
                 script_lines.append('')
+            (work / 'raw-install-scripts.txt').write_text(
+                '\n'.join(raw_script_lines), encoding='utf-8', errors='replace'
+            )
             (work / 'install-scripts.txt').write_text(
                 '\n'.join(script_lines), encoding='utf-8'
             )
@@ -680,32 +675,26 @@ class PythonAnalyzer(shared.EcosystemAnalyzer):
 
         # Ecosystem-specific context for the driver's MANIFEST / INSTALL HOOKS section
         install_hook_context: list[str] = []
-        if extensions == 'YES':
+        if has_native_extensions:
             install_hook_context.append(
                 'Context: C/Cython extension modules detected. These are compiled at install '
                 'time from source (for sdists) or pre-compiled (wheels). Verify that setup.py '
                 'and any build scripts in the source are benign.'
             )
-        if has_build_hooks == 'YES':
+        if has_build_hooks:
             install_hook_context.extend([
                 'Context: setup.py contains suspicious code patterns (subprocess, network calls, '
                 'exec/eval). These execute during "pip install" of a source distribution.',
                 '  Review install-scripts.txt for the extracted setup.py content.',
             ])
-        elif has_build_hooks == 'MAYBE':
-            install_hook_context.append(
-                'Context: setup.py is present and may execute code during sdist installation. '
-                'Review install-scripts.txt if present, and confirm the build system is benign.'
-            )
 
         return shared.PackageManifest(
             source_url=source_url,
-            extensions=extensions,
-            executables=executables,
+            has_native_extensions=has_native_extensions,
             executables_list=executables_list,
-            post_install_msg=post_install_msg,
+            has_post_install_message=has_post_install_message,
             has_build_hooks=has_build_hooks,
-            has_install_scripts='YES' if has_install_scripts else 'NO',
+            has_install_scripts=has_install_scripts,
             runtime_dep_lines=runtime_dep_lines,
             manifest_license_raw=manifest_license_raw,
             manifest_text=manifest_text,
@@ -790,10 +779,6 @@ class PythonAnalyzer(shared.EcosystemAnalyzer):
                     failures.append('pip-download-old-file-missing')
             else:
                 failures.append('pip-download-old')
-
-        (work / 'old-version-status.txt').write_text(
-            f'OLD_VERSION_SOURCE: {source or "unavailable"}\n', encoding='utf-8'
-        )
 
         return {'ok': ok, 'source': source, 'unpacked_dir': old_dir}
 
@@ -1503,6 +1488,7 @@ class PythonAnalyzer(shared.EcosystemAnalyzer):
         built_dir: Path,
         work: Path,
         p: 'shared.Printer',
+        dist_sha: str = '',
     ) -> tuple[str, int, int]:
         built_whls = list(built_dir.glob('*.whl'))
         if not built_whls:
@@ -1510,7 +1496,7 @@ class PythonAnalyzer(shared.EcosystemAnalyzer):
                 p, work, 'INCONCLUSIVE (no .whl produced)')
         built_whl = built_whls[0]
         built_sha = shared.sha256_file(built_whl)
-        if (repro := shared.compare_repro_sha256(built_sha, work, p)) is not None:
+        if (repro := shared.compare_repro_sha256(built_sha, dist_sha, work, p)) is not None:
             return repro
         built_unpacked = work / 'raw-built-unpacked'
         built_unpacked.mkdir(exist_ok=True)

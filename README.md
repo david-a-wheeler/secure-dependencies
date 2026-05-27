@@ -13,6 +13,8 @@ is intended to comply with the [Agent Skills Standard](https://agentskills.io).
 It takes various steps to protect itself from malicious packages
 (though we presume it will be run in a sandboxed environment).
 
+The video [Secure-dependencies presentation by David A. Wheeler](https://www.youtube.com/watch?v=8DzOV-yArRE) presents this in more detail.
+
 ## Ecosystems supported
 
 This skill can support *any* ecosystem.

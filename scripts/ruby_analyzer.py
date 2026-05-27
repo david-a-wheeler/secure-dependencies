@@ -263,9 +263,6 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
 
         if rc == 0 and gem_file.is_file():
             sha256 = shared.sha256_file(gem_file)
-            (work / 'package-hash.txt').write_text(
-                f'{sha256}  {gem_file.name}\n', encoding='utf-8'
-            )
             rc2, _, _ = shared.run_cmd(
                 ['gem', 'unpack', '--target', str(unpacked_dir_base),
                  str(gem_file)]
@@ -274,8 +271,6 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
                 failures.append('gem-unpack-new')
         else:
             failures.append('gem-fetch-new')
-            (work / 'package-hash.txt').write_text(
-                'ERROR: gem fetch failed\n', encoding='utf-8')
 
         unpacked_dir = unpacked_dir_base / f'{pkgname}-{version}'
         # Platform-specific gems unpack to e.g. ffi-1.17.4-x86_64-linux-gnu/
@@ -328,11 +323,10 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
         p: 'shared.Printer',
     ) -> shared.PackageManifest:
         """Parse gemspec; write manifest-analysis.txt and gemspec.txt."""
-        extensions = 'NO'
-        executables = 'NO'
+        has_native_extensions = False
         executables_list = ''
-        post_install_msg = 'NO'
-        has_rakefile_tasks = 'NO'
+        has_post_install_message = False
+        has_rakefile_tasks = False
         gemspec_license_raw = ''
         source_url = ''
         gemspec_text = ''
@@ -358,7 +352,7 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
             p('')
 
             if 'extensions' in gemspec_text:
-                extensions = 'YES'
+                has_native_extensions = True
                 p('HAS_EXTENSIONS: YES')
             else:
                 p('HAS_EXTENSIONS: NO')
@@ -367,7 +361,6 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
                 el for el in gemspec_text.splitlines()
                 if 'executables' in el]
             if exec_lines:
-                executables = 'YES'
                 executables_list = shared.sanitize_line(
                     '; '.join(exec_lines[:3]))
                 p('HAS_EXECUTABLES: YES')
@@ -376,7 +369,7 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
                 p('HAS_EXECUTABLES: NO')
 
             if 'post_install_message' in gemspec_text:
-                post_install_msg = 'YES'
+                has_post_install_message = True
                 p('HAS_POST_INSTALL_MESSAGE: YES')
             else:
                 p('HAS_POST_INSTALL_MESSAGE: NO')
@@ -435,7 +428,7 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
                 rake_text = rakefile.read_text(
                     encoding='utf-8', errors='replace')
                 if re.search(r'(?i)install|post_install', rake_text):
-                    has_rakefile_tasks = 'YES'
+                    has_rakefile_tasks = True
                     p('RAKEFILE_INSTALL_TASKS: YES')
                 else:
                     p('RAKEFILE_INSTALL_TASKS: NO')
@@ -449,12 +442,12 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
             # code that runs) during gem install, so an AI reviewer
             # must read them.
             install_script_files: list[tuple[str, Path]] = []
-            if extensions == 'YES':
+            if has_native_extensions:
                 for name in ('extconf.rb', 'Makefile.in', 'Makefile'):
                     script_fp = unpacked_dir / name
                     if script_fp.is_file():
                         install_script_files.append((name, script_fp))
-            if has_rakefile_tasks == 'YES' and rakefile.is_file():
+            if has_rakefile_tasks and rakefile.is_file():
                 install_script_files.append(('Rakefile', rakefile))
 
             if install_script_files:
@@ -466,6 +459,7 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
                     'Review each one for malicious or unexpected behavior.',
                     '',
                 ]
+                raw_script_lines: list[str] = []
                 for fname, fpath in install_script_files:
                     raw = fpath.read_text(encoding='utf-8', errors='replace')
                     warn_b, warn_l = self.INSTALL_SCRIPT_WARN.get(
@@ -474,9 +468,16 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
                         raw, fname, p, warn_b, warn_l)
                     if _sz_warn:
                         install_cmd_warnings.append(_sz_warn)
+                    raw_script_lines.append(f'--- {fname} ---')
+                    raw_script_lines.append(raw)
+                    raw_script_lines.append('')
                     script_lines.append(f'--- {fname} ---')
                     script_lines.append(shared.sanitize_line(raw))
                     script_lines.append('')
+                raw_content = '\n'.join(raw_script_lines)
+                (work / 'raw-install-scripts.txt').write_text(
+                    raw_content, encoding='utf-8', errors='replace'
+                )
                 (work / 'install-scripts.txt').write_text(
                     '\n'.join(script_lines), encoding='utf-8'
                 )
@@ -493,14 +494,14 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
         # Build ecosystem-specific context for the driver's MANIFEST
         # / INSTALL HOOKS section
         install_hook_context: list[str] = []
-        if extensions == 'YES':
+        if has_native_extensions:
             install_hook_context.extend([
                 'Context: Compiled code runs during gem install.'
                 ' The build process can execute',
                 '  arbitrary code. Verify extconf.rb and Makefile'
                 ' in the source are benign.',
             ])
-        if has_rakefile_tasks == 'YES':
+        if has_rakefile_tasks:
             install_hook_context.extend([
                 'Context: Rakefile install tasks were found.'
                 ' These execute during gem install.',
@@ -510,12 +511,11 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
 
         return shared.PackageManifest(
             source_url=source_url,
-            extensions=extensions,
-            executables=executables,
+            has_native_extensions=has_native_extensions,
             executables_list=executables_list,
-            post_install_msg=post_install_msg,
+            has_post_install_message=has_post_install_message,
             has_build_hooks=has_rakefile_tasks,
-            has_install_scripts='YES' if has_install_scripts else 'NO',
+            has_install_scripts=has_install_scripts,
             runtime_dep_lines=runtime_dep_lines,
             manifest_license_raw=gemspec_license_raw,
             manifest_text=gemspec_text,
@@ -608,11 +608,6 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
             failures.append(
                 f'SECURITY_VIOLATION:symlinks-in-old-gem({_n_old} symlinks removed)'
             )
-        (work / 'old-version-status.txt').write_text(
-            f'OLD_VERSION_SOURCE: {source or "unavailable"}\n',
-            encoding='utf-8'
-        )
-
         unpacked_dir = old_dir_base / f'{pkgname}-{old_ver}'
         # Platform-specific gem unpacks to a directory
         # with the platform suffix
@@ -1231,6 +1226,7 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
         built_dir: Path,
         work: Path,
         p: 'shared.Printer',
+        dist_sha: str = '',
     ) -> tuple[str, int, int]:
         built_gems = list(built_dir.glob('*.gem'))
         if not built_gems:
@@ -1238,7 +1234,7 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
                 p, work, 'INCONCLUSIVE (no .gem produced)')
         built_gem = built_gems[0]
         built_sha = shared.sha256_file(built_gem)
-        if (repro := shared.compare_repro_sha256(built_sha, work, p)) is not None:
+        if (repro := shared.compare_repro_sha256(built_sha, dist_sha, work, p)) is not None:
             return repro
         built_unpacked_parent = work / 'raw-built-unpacked'
         built_unpacked_parent.mkdir(exist_ok=True)
