@@ -2360,7 +2360,7 @@ def git_diff_between_tags(
     # Raw diff goes to a 'raw-' prefixed file. Sub-agents are instructed
     # never to read raw- files, so a large or adversarial diff cannot
     # overflow the sub-agent's context window. Only the sanitized scan
-    # summary in signals.txt is surfaced to the AI.
+    # summary in signals.json is surfaced to the AI.
     rc_diff, diff_out, _ = run_cmd(
         ['git', '-C', str(source_dir), 'diff', f'{old_tag}..HEAD', '--'],
         timeout=60,
@@ -3007,16 +3007,19 @@ def compare_repro_sha256(
     work: Path,
     p: 'Printer',
 ) -> tuple | None:
-    """Read package-hash.txt, write SHA256 lines to p, and check for an exact match.
+    """Read distributed SHA256 from signals.json and check for an exact match.
 
     Returns a finished result tuple if the built and distributed hashes match,
     or None if they differ (caller should proceed to content comparison).
     """
-    pkg_hash_file = work / 'package-hash.txt'
     dist_sha = ''
-    if pkg_hash_file.is_file():
-        first_line = pkg_hash_file.read_text(encoding='utf-8').splitlines()[0]
-        dist_sha = first_line.split()[0] if first_line.split() else ''
+    sig_path = work / 'signals.json'
+    if sig_path.is_file():
+        try:
+            sig = json.loads(sig_path.read_text(encoding='utf-8'))
+            dist_sha = sig.get('meta', {}).get('sha256', '')
+        except (json.JSONDecodeError, OSError):
+            pass
     p(f'BUILT_SHA256: {sanitize_line(built_sha)}')
     p(f'DISTRIBUTED_SHA256: {sanitize_line(dist_sha or "UNKNOWN")}')
     if built_sha and built_sha == dist_sha:

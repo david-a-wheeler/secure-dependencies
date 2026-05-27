@@ -263,9 +263,6 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
 
         if rc == 0 and gem_file.is_file():
             sha256 = shared.sha256_file(gem_file)
-            (work / 'package-hash.txt').write_text(
-                f'{sha256}  {gem_file.name}\n', encoding='utf-8'
-            )
             rc2, _, _ = shared.run_cmd(
                 ['gem', 'unpack', '--target', str(unpacked_dir_base),
                  str(gem_file)]
@@ -274,8 +271,6 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
                 failures.append('gem-unpack-new')
         else:
             failures.append('gem-fetch-new')
-            (work / 'package-hash.txt').write_text(
-                'ERROR: gem fetch failed\n', encoding='utf-8')
 
         unpacked_dir = unpacked_dir_base / f'{pkgname}-{version}'
         # Platform-specific gems unpack to e.g. ffi-1.17.4-x86_64-linux-gnu/
@@ -464,6 +459,7 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
                     'Review each one for malicious or unexpected behavior.',
                     '',
                 ]
+                raw_script_lines: list[str] = []
                 for fname, fpath in install_script_files:
                     raw = fpath.read_text(encoding='utf-8', errors='replace')
                     warn_b, warn_l = self.INSTALL_SCRIPT_WARN.get(
@@ -472,9 +468,16 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
                         raw, fname, p, warn_b, warn_l)
                     if _sz_warn:
                         install_cmd_warnings.append(_sz_warn)
+                    raw_script_lines.append(f'--- {fname} ---')
+                    raw_script_lines.append(raw)
+                    raw_script_lines.append('')
                     script_lines.append(f'--- {fname} ---')
                     script_lines.append(shared.sanitize_line(raw))
                     script_lines.append('')
+                raw_content = '\n'.join(raw_script_lines)
+                (work / 'raw-install-scripts.txt').write_text(
+                    raw_content, encoding='utf-8', errors='replace'
+                )
                 (work / 'install-scripts.txt').write_text(
                     '\n'.join(script_lines), encoding='utf-8'
                 )
@@ -605,11 +608,6 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
             failures.append(
                 f'SECURITY_VIOLATION:symlinks-in-old-gem({_n_old} symlinks removed)'
             )
-        (work / 'old-version-status.txt').write_text(
-            f'OLD_VERSION_SOURCE: {source or "unavailable"}\n',
-            encoding='utf-8'
-        )
-
         unpacked_dir = old_dir_base / f'{pkgname}-{old_ver}'
         # Platform-specific gem unpacks to a directory
         # with the platform suffix

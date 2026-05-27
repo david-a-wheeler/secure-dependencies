@@ -431,20 +431,11 @@ class PythonAnalyzer(shared.EcosystemAnalyzer):
 
         if pkg_file and pkg_file.is_file():
             sha256 = shared.sha256_file(pkg_file)
-            (work / 'package-hash.txt').write_text(
-                f'{sha256}  {pkg_file.name}\n', encoding='utf-8'
-            )
             dist_type = self._unpack_pkg(pkg_file, unpacked_dir, failures, 'unpack-new')
             if dist_type == 'unknown' and 'unpack-new' not in ' '.join(failures):
                 failures.append('unpack-new')
         else:
             failures.append('pip-download-new')
-            sanitized_err = shared.sanitize(err[:500]) if err else ''
-            (work / 'package-hash.txt').write_text(
-                f'ERROR: pip download failed\n{sanitized_err}\n', encoding='utf-8'
-            )
-
-        (work / 'dist-type.txt').write_text(f'DIST_TYPE: {dist_type}\n', encoding='utf-8')
 
         return {
             'unpacked_dir': unpacked_dir,
@@ -652,18 +643,26 @@ class PythonAnalyzer(shared.EcosystemAnalyzer):
 
         # Extract install-time scripts for AI review
         if install_script_files:
-            script_lines: list[str] = [
+            header_lines: list[str] = [
                 '=== Install-time scripts for AI review ===',
                 '',
                 'These files may execute code during pip install (sdist builds).',
                 'Review each one for malicious or unexpected behavior.',
                 '',
             ]
+            raw_script_lines: list[str] = list(header_lines)
+            script_lines: list[str] = list(header_lines)
             for fname, fpath in install_script_files:
                 raw = fpath.read_text(encoding='utf-8', errors='replace')
+                raw_script_lines.append(f'--- {fname} ---')
+                raw_script_lines.append(raw)
+                raw_script_lines.append('')
                 script_lines.append(f'--- {fname} ---')
                 script_lines.append(shared.sanitize(raw))
                 script_lines.append('')
+            (work / 'raw-install-scripts.txt').write_text(
+                '\n'.join(raw_script_lines), encoding='utf-8', errors='replace'
+            )
             (work / 'install-scripts.txt').write_text(
                 '\n'.join(script_lines), encoding='utf-8'
             )
@@ -780,10 +779,6 @@ class PythonAnalyzer(shared.EcosystemAnalyzer):
                     failures.append('pip-download-old-file-missing')
             else:
                 failures.append('pip-download-old')
-
-        (work / 'old-version-status.txt').write_text(
-            f'OLD_VERSION_SOURCE: {source or "unavailable"}\n', encoding='utf-8'
-        )
 
         return {'ok': ok, 'source': source, 'unpacked_dir': old_dir}
 

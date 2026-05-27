@@ -1418,9 +1418,6 @@ def run_analysis(  # noqa: C901
         else:
             print('  Skipped (no diff available)')
     else:
-        (work / 'old-version-status.txt').write_text(
-            'OLD_VERSION_SOURCE: N/A (NEW/CURRENT mode)\n', encoding='utf-8'
-        )
         (work / 'diff-filenames.txt').write_text(
             'DIFF: N/A (NEW/CURRENT mode; no old version)\n', encoding='utf-8'
         )

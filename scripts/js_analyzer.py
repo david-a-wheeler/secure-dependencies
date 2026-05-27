@@ -453,22 +453,13 @@ class JavaScriptAnalyzer(shared.EcosystemAnalyzer):
                 tgz_file = max(
                     tgz_candidates, key=lambda p: p.stat().st_mtime)
                 sha256 = shared.sha256_file(tgz_file)
-                (work / 'package-hash.txt').write_text(
-                    f'{sha256}  {tgz_file.name}\n', encoding='utf-8'
-                )
                 if not self._unpack_tgz(
                         tgz_file, unpacked_dir, failures, 'unpack-new'):
                     failures.append('unpack-new-failed')
             else:
                 failures.append('npm-pack-no-tgz')
-                (work / 'package-hash.txt').write_text(
-                    'ERROR: no .tgz produced\n', encoding='utf-8')
         else:
             failures.append('npm-pack-new')
-            sanitized_err = shared.sanitize(err[:500]) if err else ''
-            (work / 'package-hash.txt').write_text(
-                f'ERROR: npm pack failed\n{sanitized_err}\n', encoding='utf-8'
-            )
 
         return {
             'unpacked_dir': unpacked_dir,
@@ -688,17 +679,25 @@ class JavaScriptAnalyzer(shared.EcosystemAnalyzer):
 
             # Write install-time scripts for AI review
             if install_script_content:
-                script_lines: list[str] = [
+                header_lines: list[str] = [
                     '=== Install-time scripts for AI review ===',
                     '',
                     'These lifecycle scripts execute during npm install.',
                     'Review each one for malicious or unexpected behavior.',
                     '',
                 ]
+                raw_script_lines: list[str] = list(header_lines)
+                script_lines: list[str] = list(header_lines)
                 for hook_name, hook_val in install_script_content:
+                    raw_script_lines.append(f'--- {hook_name} ---')
+                    raw_script_lines.append(hook_val)
+                    raw_script_lines.append('')
                     script_lines.append(f'--- {hook_name} ---')
                     script_lines.append(shared.sanitize_line(hook_val))
                     script_lines.append('')
+                (work / 'raw-install-scripts.txt').write_text(
+                    '\n'.join(raw_script_lines), encoding='utf-8', errors='replace'
+                )
                 (work / 'install-scripts.txt').write_text(
                     '\n'.join(script_lines), encoding='utf-8'
                 )
@@ -790,10 +789,6 @@ class JavaScriptAnalyzer(shared.EcosystemAnalyzer):
         else:
             failures.append('npm-pack-old')
 
-        (work / 'old-version-status.txt').write_text(
-            f'OLD_VERSION_SOURCE: {source or "unavailable"}\n',
-            encoding='utf-8',
-        )
         return {'ok': ok, 'source': source, 'unpacked_dir': old_dir}
 
     def _read_old_manifest(self, old_unpacked_dir: Path, pkgname: str) -> dict | None:
