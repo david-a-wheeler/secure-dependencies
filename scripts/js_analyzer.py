@@ -443,7 +443,7 @@ class JavaScriptAnalyzer(shared.EcosystemAnalyzer):
             pack_cmd += ['--registry', self.registry_url]
         pack_cmd += ['--', f'{pkgname}@{version}']
 
-        rc, _out, err = shared.run_cmd(pack_cmd, cwd=work, timeout=180)
+        rc, _out, _err = shared.run_cmd(pack_cmd, cwd=work, timeout=180)
         tgz_file: Path | None = None
         sha256 = ''
 

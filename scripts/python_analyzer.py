@@ -423,7 +423,7 @@ class PythonAnalyzer(shared.EcosystemAnalyzer):
             dl_cmd += ['--index-url', self.registry_url]
         dl_cmd += ['--', f'{pkgname}=={version}']
 
-        rc, _out, err = shared.run_cmd(dl_cmd, cwd=work, timeout=180)
+        rc, _out, _err = shared.run_cmd(dl_cmd, cwd=work, timeout=180)
 
         pkg_file = self._get_pkg_file(work, pkgname, version)
         sha256 = ''
