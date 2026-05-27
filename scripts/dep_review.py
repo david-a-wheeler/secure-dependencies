@@ -758,7 +758,7 @@ def write_signals(ctx: SignalContext) -> dict:  # noqa: C901
         'openssf_scorecard_score': scorecard_float,
         'scorecard_checks': scorecard_checks or {},
         'recent_commits_12_months': commit_activity['total'] if commit_activity else None,
-        'commit_trend': commit_activity['trend'] if commit_activity else None,
+        'commit_activity_trend_12_months': commit_activity['trend'] if commit_activity else None,
         'commit_counts_per_30_day_window': commit_activity['buckets'] if commit_activity else None,
         'has_security_policy': has_security_policy,
         'known_vulnerability_count': _vuln_count,

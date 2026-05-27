@@ -34,7 +34,7 @@
     "openssf_scorecard_score": 7.5,
     "scorecard_checks": {},
     "recent_commits_12_months": null,
-    "commit_trend": null,
+    "commit_activity_trend_12_months": null,
     "commit_counts_per_30_day_window": null,
     "has_security_policy": null,
     "known_vulnerability_count": 0,
