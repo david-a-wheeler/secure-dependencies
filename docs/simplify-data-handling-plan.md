@@ -60,10 +60,10 @@ sees only the flag and uses judgment based on the manifest metadata
 already in `signals.json`.
 
 **`--deeper` analysis**: reads the existing `signals.json`, adds new
-top-level sections (`deeper`, `source_review`), and rewrites the file.
-Python 3.7+ preserves dict insertion order, so the original sections
-stay first and the deeper sections appear at the end - the natural
-reading order.
+top-level sections (`deeper_analysis`, `source_review`), and rewrites
+the file. Python 3.7+ preserves dict insertion order, so the original
+sections stay first and the deeper sections appear at the end - the
+natural reading order.
 
 **`dep_session.py`**: reads `signals.json` with `json.load()` and
 accesses structured fields directly. No text parsing needed.
@@ -79,7 +79,7 @@ accesses structured fields directly. No text parsing needed.
   "meta": {
     "pkgname": "foo",
     "version": "1.0.0",
-    "mode": "NEW",
+    "analysis_mode": "NEW",
     "old_version": null,
     "sha256": "abc...",
     "ecosystem": "rubygems",
@@ -92,52 +92,59 @@ accesses structured fields directly. No text parsing needed.
     "concern_level": "MEDIUM",
     "concern_count": 3,
     "concerns": [
-      {"label": "scan_matches", "annotation": "3 dangerous pattern matches"},
+      {"label": "dangerous_patterns", "annotation": "3 matches  [review summary-scan-*.txt for affected file paths]"},
       {"label": "native_extension", "annotation": "requires native build"}
     ]
   },
+  "open_questions": [
+    "Single owner with no MFA and no OpenSSF badge: highest account-takeover risk profile. Consider whether the project's track record justifies the risk.",
+    "Large diff (850 lines): automated scans passed, but this volume of change was not semantically reviewed. Consider whether a manual diff review is warranted."
+  ],
   "license": {
-    "spdx": "MIT",
+    "spdx_expression": "MIT",
     "osi_approved": true,
     "status": "OK",
     "note": "none",
-    "changed": false
+    "changed": false,
+    "previous_spdx_expression": null
   },
   "health": {
-    "age_years": 5,
+    "age_years": 5.0,
     "last_release_days": 30,
     "version_published_days": 2,
     "version_stability": "stable",
     "owner_count": 2,
-    "scorecard": 7.5,
+    "openssf_scorecard_score": 7.5,
     "recent_commits_12mo": 45,
     "commit_trend": "stable",
-    "security_policy": false,
-    "known_vulnerabilities": 0,
-    "health_concerns": [],
+    "has_security_policy": false,
+    "known_vulnerability_count": 0,
+    "health_concerns": [
+      {"concern": "single owner: ...", "context": "A single maintainer with no backup is a high-value target for social engineering or account takeover."}
+    ],
     "ecosystems": {"dependents": 1200, "critical": false}
   },
   "manifest": {
-    "extensions": false,
-    "executables": [],
+    "has_native_extensions": false,
+    "executables": "bin/foo, bin/bar",
     "has_install_scripts": true,
     "install_scripts_raw_bytes": 412,
     "install_scripts_stripped_bytes": 398,
-    "post_install_msg": false,
+    "has_post_install_message": false,
     "dist_type": "sdist"
   },
-  "clone": {
-    "url": "https://github.com/foo/foo",
+  "source_repository": {
+    "source_url": "https://github.com/foo/foo",
     "status": "OK",
     "version_tag": "v1.0.0",
     "commit_guessed": false,
     "source_likely_incompatible": false
   },
-  "extra_files": {
+  "unexpected_files": {
     "count": 0,
     "paths": []
   },
-  "binary_files": {
+  "embedded_binary_files": {
     "count": 0,
     "paths": []
   },
@@ -148,7 +155,7 @@ accesses structured fields directly. No text parsing needed.
     "diff_danger":  {"count": 0, "paths": []}
   },
   "diff": {
-    "lines": 45,
+    "lines_changed": 45,
     "files_changed": 3,
     "review": {
       "assessment": "SAFE",
@@ -158,7 +165,7 @@ accesses structured fields directly. No text parsing needed.
       "summary": "Minor refactor, no security-relevant changes."
     }
   },
-  "transitive": {
+  "transitive_dependencies": {
     "total": 5,
     "not_in_lockfile": ["bar", "baz"],
     "registry": {
@@ -166,24 +173,24 @@ accesses structured fields directly. No text parsing needed.
       "baz": {"downloads": 800000,  "first_seen": "2020-11-15"}
     }
   },
-  "provenance": {
-    "mfa": "enforced"
+  "supply_chain_provenance": {
+    "publisher_mfa_status": "enforced"
   },
   "vulnerabilities": {
     "count": 0,
     "cves": []
   },
-  "oss_rebuild": {
+  "oss_reproducible_build": {
     "signal_level": "POSITIVE",
     "summary": "Attested build matches published artifact."
   },
-  "badge": {
+  "openssf_badge": {
     "level": "silver",
     "score": 85
   },
   "alternatives": {
-    "check_run": true,
-    "critical": false,
+    "check_was_run": true,
+    "has_critical_alternative": false,
     "notes": []
   },
   "install_scripts_review": {
@@ -191,10 +198,10 @@ accesses structured fields directly. No text parsing needed.
     "suspicious_patterns": [],
     "summary": "Post-install hook echoes a welcome message; no network or shell exec."
   },
-  "deeper": {
+  "deeper_analysis": {
     "sandbox": "bwrap",
-    "reproducible": "EXACTLY_REPRODUCIBLE",
-    "code_diffs": 0,
+    "reproducible_build_result": "EXACTLY_REPRODUCIBLE",
+    "code_files_with_differences": 0,
     "source_review": {
       "assessment": "SAFE",
       "files_only_in_package": [],
@@ -205,11 +212,105 @@ accesses structured fields directly. No text parsing needed.
 }
 ```
 
-The `diff` and `deeper` sections are omitted when not applicable (NEW mode
-has no `diff`; basic analysis has no `deeper`). `--deeper` appends those
-sections to the dict before rewriting. `install_scripts_review` is written
-during basic analysis whenever install scripts exist and
-`SECURE_DEPS_SANDBOX_AI` is set; omitted otherwise.
+The `diff` and `deeper_analysis` sections are omitted when not applicable
+(NEW mode has no `diff`; basic analysis has no `deeper_analysis`).
+`--deeper` appends those sections to the dict before rewriting.
+`install_scripts_review` is written during basic analysis whenever install
+scripts exist and `SECURE_DEPS_SANDBOX_AI` is set; omitted otherwise.
+
+**Schema notes for specific fields:**
+
+- `gate.concerns`: built from the existing `_concerns: list[tuple[str, str]]`
+  in `write_signals()`. Convert each `(label, annotation)` tuple to
+  `{"label": label, "annotation": annotation}`. The annotation strings are
+  already computed inline (e.g., `"3 matches  [review summary-scan-*.txt
+  for affected file paths]"`).
+
+- `open_questions`: list of strings, one per tailored question, taken
+  directly from the existing "OPEN QUESTIONS FOR AI REVIEW" section in
+  `write_signals()` (the `questions` list, lines ~1013-1088). Omit the
+  section header; each entry is the question text. Empty list when no
+  questions apply. These strings are generated from structured data by our
+  own code, not from attacker-controlled input, so no sanitization is
+  needed.
+
+- `license.previous_spdx_expression`: string if `license.changed` is true
+  (from `license_result['old_raw']`), `null` otherwise.
+
+- `health.health_concerns`: change from `list[str]` to
+  `list[{"concern": str, "context": str}]`. For each concern string,
+  look it up in the existing `health_context` dict (keyed by substring
+  match) and attach the explanation as `context`. If no context matches,
+  omit the `context` key or use `null`. This is the same lookup the
+  current code does inline when writing `signals.txt`.
+
+- `gate.risk_flags` and `gate.positive_flags`: lists of strings (previously
+  space-separated strings in `SignalReport`). In `dep_session.py`, update
+  all string-contains checks such as
+  `'MFA_ENFORCED' in af.get('positive_flags', '')` to list-membership:
+  `'MFA_ENFORCED' in sig.get('gate', {}).get('positive_flags', [])`.
+
+- `health.openssf_scorecard_score`: float. Derived from
+  `SignalContext.scorecard` (a string from the external Scorecard API,
+  e.g. `'7.5/10'` or `'not found'`): parse inline with
+  `float(scorecard.split('/')[0])`, fall back to `null` on `ValueError`.
+  No helper needed; this is the only field with this pattern.
+
+- `health.recent_commits_12mo`: `commit_activity['total'] if commit_activity
+  else null`.
+
+- `health.commit_trend`: `commit_activity['trend'] if commit_activity else
+  null`. Possible values are `'rising'`, `'stable'`, `'declining'`,
+  `'unknown'` (from `count_recent_commits()`).
+
+- `manifest.executables`: **string**, not a list. Set to
+  `ctx.manifest.executables_list` directly (empty string when none). The
+  format varies by ecosystem: Ruby stores semicolon-separated gemspec source
+  lines; Python and JS store comma-separated script names.
+
+- `manifest.has_native_extensions`, `manifest.has_install_scripts`,
+  `manifest.has_post_install_message`, `manifest.has_build_hooks`: already
+  `bool` once `PackageManifest` is updated (no conversion needed at write
+  time). In `dep_session.py`, callers that previously did
+  `signals.get('install_hooks', 'unknown')` now do
+  `sig.get('manifest', {}).get('has_install_scripts', False)`. Where a
+  `'YES'`/`'NO'` string is needed for the assessment template (line 1984),
+  convert explicitly: `'YES' if has_install_scripts else 'NO'`.
+
+**Adversarial gate abort path:**
+
+When the abort gate fires (before full analysis runs), replace the
+`signals.txt` write with a minimal `signals.json`:
+
+```json
+{
+  "meta": {
+    "pkgname": "foo",
+    "version": "1.0.0",
+    "ecosystem": "rubygems",
+    "timestamp": "2026-05-26T14:28:00Z"
+  },
+  "gate": {
+    "adversarial_gate": "ABORT",
+    "abort_labels": ["label1"],
+    "abort_matches": 3,
+    "concern_level": "CRITICAL",
+    "concern_count": 1
+  }
+}
+```
+
+Also remove the two stub writes in the abort path (`source-url.txt` and
+`clone-status.txt`), since those files are eliminated.
+
+**`next-steps.txt` file (replaces the NEXT STEPS REQUIRED section):**
+
+When `deeper_mode` or `install_probe_mode` is set, `write_signals()` writes
+a plain-text `next-steps.txt` to the work directory instead of embedding a
+"NEXT STEPS REQUIRED" section inside `signals.txt`. Content and format are
+identical to the current section. Tier 2 reads this file after `signals.json`
+(the analysis brief update in step 8 adds this instruction). This keeps the
+checklist visible and prominent rather than buried in a large JSON structure.
 
 ---
 
@@ -221,6 +322,14 @@ during basic analysis whenever install scripts exist and
 - **Keep** `Printer` class: still needed for `install-scripts.txt`
   (sanitizer version of attacker-controlled data) and
   `alternatives.txt`. Remove all other uses.
+- **`PackageManifest`**: change the boolean-like fields from `str`
+  (`'YES'`/`'NO'`) to `bool`: `extensions`, `has_install_scripts`,
+  `post_install_msg`, `has_build_hooks`. Rename them at the same time
+  to match the JSON schema: `extensions` -> `has_native_extensions`,
+  `post_install_msg` -> `has_post_install_message`. These are set by our
+  own analyzer code and were strings only to match the old text-report
+  format; no conversion helper is needed once the source is typed
+  correctly.
 - Values going into `signals.json` that originate from attacker-controlled
   sources (file paths, package metadata strings) must be passed through
   `sanitize_line()` before insertion into the dict.
@@ -233,17 +342,30 @@ This is the largest change.
   dict (the `signals.json` schema above) instead of writing `signals.txt`.
   Remove the `Printer` parameter `p`; remove all `p(...)` calls; remove all
   `Printer(work / 'X.txt')` blocks. Return the dict.
+  When `ctx.deeper_mode` or `ctx.install_probe_mode` is set, write the
+  "NEXT STEPS REQUIRED" checklist to `work / 'next-steps.txt'` (plain text,
+  same content as today) instead of into signals.
 - **Final block** (currently writes `signals.txt` then `signals.json`):
   write only `signals.json` using `json.dumps(signals, indent=2)`.
+- **Adversarial gate abort path** (currently writes a minimal `signals.txt`
+  and stub `source-url.txt`/`clone-status.txt`): replace the `signals.txt`
+  write with a minimal `signals.json` (see schema notes above). Remove the
+  two stub-file writes.
 - **`--deeper` pass**: at the start of the deeper analysis block, load the
   existing `signals.json`; add `signals['diff']['review']` (tier 3 diff
-  result, if applicable) and `signals['deeper']` (sandbox, repro, source
+  result, if applicable) and `signals['deeper_analysis']` (sandbox, repro,
   review); write back with `json.dumps(signals, indent=2)`. Use
   write-to-temp-then-rename for crash safety.
 - **Remove** all remaining `Printer(work / 'X.txt')` calls for the ~15
   section files that are being consolidated (keep only `install-scripts.txt`
   and `alternatives.txt`).
 - **Remove** `signals.txt` writing entirely.
+- **Update print/help text** that still references `signals.txt`:
+  - Line 1992: `Verdict file    : {work}/signals.txt` (change to
+    `signals.json`)
+  - Lines 2060/2064: help text mentions "Embeds a NEXT_STEPS_REQUIRED
+    reminder in signals.txt" (update to `next-steps.txt`)
+  - Line 2095: AI agents docstring references `signals.txt`
 
 ### `scripts/dep_session.py`
 
@@ -259,12 +381,22 @@ This is the largest change.
       except (json.JSONDecodeError, OSError):
           return {}
   ```
+  Note: the new function takes a **directory path**, not a file path.
+  All three call sites (`cmd_report` line 1660, `cmd_wrap_up` line 1759,
+  `cmd_pre_fill_assessment` line 1908) currently pass
+  `work_dir / 'signals.txt'`; update each to pass `work_dir`.
 - **Delete** `_parse_license_line()` and `_parse_health_line()`: callers
-  now do e.g. `sig.get('license', {}).get('spdx', 'unknown')`.
+  now do e.g. `sig.get('license', {}).get('spdx_expression', 'unknown')`.
 - **`cmd_pre_fill_assessment`**: update all field lookups to use the new
-  structured paths (e.g. `signals['license']['spdx']` instead of
+  structured paths (e.g. `signals['license']['spdx_expression']` instead of
   `_parse_license_line(signals.get('license_line', ''))`).
 - **`cmd_report`** and **`cmd_wrap_up`**: update field lookups similarly.
+  `cmd_report` currently builds display strings from `license_line` and
+  `health_line` compact strings (lines 1672-1673); replace with values
+  constructed from the new structured fields, e.g.
+  `f'{spdx} ({lic_status})'` for the license display.
+- **Line 450**: update the print statement referencing `signals.txt` to
+  `signals.json`.
 - All callers of the old `_parse_signals` return a flat dict of strings;
   update them to use the new nested dict. The most-used fields and their
   new paths:
@@ -277,22 +409,22 @@ This is the largest change.
   | `adversarial_gate` | `sig['gate']['adversarial_gate']` |
   | `risk_flags` | `sig['gate']['risk_flags']` (now a list) |
   | `positive_flags` | `sig['gate']['positive_flags']` (now a list) |
-  | `mode` | `sig['meta']['mode']` |
+  | `mode` | `sig['meta']['analysis_mode']` |
   | `old_version` | `sig['meta']['old_version']` |
   | `license_line` (parsed) | `sig['license']` (already structured) |
   | `health_line` (parsed) | `sig['health']` (already structured) |
-  | `clone_url` | `sig['clone']['url']` |
-  | `clone_status` | `sig['clone']['status']` |
-  | `extensions` | `sig['manifest']['extensions']` |
-  | `executables` | `sig['manifest']['executables']` |
-  | `install_hooks` | `sig['manifest']['has_install_scripts']` |
-  | `new_transitive_deps` | `sig['transitive']['total']` |
-  | `known_vulnerabilities` | `sig['health']['known_vulnerabilities']` |
+  | `clone_url` | `sig['source_repository']['source_url']` |
+  | `clone_status` | `sig['source_repository']['status']` |
+  | `extensions` | `sig['manifest']['has_native_extensions']` (bool) |
+  | `executables` | `sig['manifest']['executables']` (now string, was YES/NO) |
+  | `install_hooks` | `sig['manifest']['has_install_scripts']` (now bool; convert to `'YES'`/`'NO'` string for template at line 1984) |
+  | `new_transitive_deps` | `sig['transitive_dependencies']['total']` |
+  | `known_vulnerabilities` | `sig['health']['known_vulnerability_count']` |
   | `version_stability` | `sig['health']['version_stability']` |
-  | `health_concerns` | `sig['health']['health_concerns']` |
+  | `health_concerns` | `sig['health']['health_concerns']` (now list of `{"concern", "context"}` dicts) |
   | `license_note` | `sig['license']['note']` |
 
-### Ecosystem analyzers (`ruby_analyzer.py`, `python_analyzer.py`, `js_analyzer.py`)
+### Ecosystem analyzers (`ruby_analyzer.py`, `python_analyzer.py`,  `js_analyzer.py`)
 
 - **`raw-install-scripts.txt`**: new; write the unmodified install
   script content here before sanitizing, following the existing
@@ -306,10 +438,17 @@ This is the largest change.
   concern to `gate.concerns`.
 - **`alternatives.txt`**: keep for now; the alternatives check has its own
   report format that humans read. Add a summary `alternatives` section to
-  `signals.json` (check run: bool, critical: bool, notes: list of str).
+  `signals.json` (`check_was_run`: bool, `has_critical_alternative`: bool,
+  `notes`: list of str).
 - **`package-hash.txt`**: eliminate; SHA256 is already in `meta.sha256`.
 - **`dist-type.txt`** (Python): eliminate; move to `manifest.dist_type`.
 - **`old-version-status.txt`**: eliminate; fold into `meta` section.
+- **`PackageManifest` bool fields**: change `extensions`,
+  `has_install_scripts`, `post_install_msg`, and `has_build_hooks` from
+  `'YES'`/`'NO'` strings to `True`/`False`, and rename `extensions` to
+  `has_native_extensions` and `post_install_msg` to
+  `has_post_install_message`. Update each analyzer's
+  `PackageManifest(...)` call accordingly.
 
 ### Tier 3 install-scripts review (new, ~50 lines)
 
@@ -387,7 +526,9 @@ paths but substitutes the same template tokens.
 ### `references/package-analysis-brief.md`
 
 - Replace the conditional file-reading table (15 rows, 8 condition rules)
-  with: "Read `WORK_DIR/signals.json`. That is the only file to read."
+  with: "Read `WORK_DIR/signals.json`. That is the only required file.
+  If `WORK_DIR/next-steps.txt` exists, read it too (it lists mandatory
+  follow-up steps requested by the human)."
 - Remove the instruction to read `install-scripts.txt` directly. Tier 2
   sees `signals.json["manifest"]["has_install_scripts"]` as a boolean flag
   and uses that in its judgment; the actual script content is handled via
@@ -415,24 +556,24 @@ paths but substitutes the same template tokens.
 |---|---|
 | `signals.txt` | `signals.json` (IS the human-readable output) |
 | `manifest-analysis.txt` | `signals.json["manifest"]` |
-| `clone-status.txt` | `signals.json["clone"]` |
-| `source-url.txt` | `signals.json["clone"]["url"]` |
+| `clone-status.txt` | `signals.json["source_repository"]` |
+| `source-url.txt` | `signals.json["source_repository"]["source_url"]` |
 | `license.txt` | `signals.json["license"]` |
 | `project-health.txt` | `signals.json["health"]` |
-| `extra-in-package.txt` | `signals.json["extra_files"]` |
-| `binary-files.txt` | `signals.json["binary_files"]` |
+| `extra-in-package.txt` | `signals.json["unexpected_files"]` |
+| `binary-files.txt` | `signals.json["embedded_binary_files"]` |
 | `diff-semantic.txt` | `signals.json["diff"]["review"]` |
-| `source-review.txt` | `signals.json["deeper"]["source_review"]` |
-| `sandbox-detection.txt` | `signals.json["deeper"]["sandbox"]` |
-| `reproducible-build.txt` | `signals.json["deeper"]["reproducible"]` |
-| `provenance.txt` | `signals.json["provenance"]` |
+| `source-review.txt` | `signals.json["deeper_analysis"]["source_review"]` |
+| `sandbox-detection.txt` | `signals.json["deeper_analysis"]["sandbox"]` |
+| `reproducible-build.txt` | `signals.json["deeper_analysis"]["reproducible_build_result"]` |
+| `provenance.txt` | `signals.json["supply_chain_provenance"]` |
 | `vulnerabilities.txt` | `signals.json["vulnerabilities"]` |
-| `oss-rebuild.txt` | `signals.json["oss_rebuild"]` |
-| `badge-status.txt` | `signals.json["badge"]` |
-| `new-deps.txt` | `signals.json["transitive"]` |
-| `dep-lockfile-check.txt` | `signals.json["transitive"]` |
-| `dep-registry.txt` | `signals.json["transitive"]["registry"]` |
-| `transitive-deps.txt` | `signals.json["transitive"]` |
+| `oss-rebuild.txt` | `signals.json["oss_reproducible_build"]` |
+| `badge-status.txt` | `signals.json["openssf_badge"]` |
+| `new-deps.txt` | `signals.json["transitive_dependencies"]` |
+| `dep-lockfile-check.txt` | `signals.json["transitive_dependencies"]` |
+| `dep-registry.txt` | `signals.json["transitive_dependencies"]["registry"]` |
+| `transitive-deps.txt` | `signals.json["transitive_dependencies"]` |
 | `summary-scan-{LABEL}.txt` | `signals.json["scans"][label]` |
 | `package-hash.txt` | `signals.json["meta"]["sha256"]` |
 | `dist-type.txt` | `signals.json["manifest"]["dist_type"]` |
@@ -442,6 +583,9 @@ Files **kept**:
 - `raw-install-scripts.txt` (unmodified; read only by tier 3 sandbox)
 - `install-scripts.txt` (sanitized; human browsing only; no AI reads it)
 - `alternatives.txt` (full human-readable alternatives report)
+- `next-steps.txt` (written only when `--deeper-mode`/`--install-probe-mode`
+  is set; plain text checklist for tier 2; replaces the "NEXT STEPS
+  REQUIRED" section previously embedded in `signals.txt`)
 - `session-update.json` (tier 1 plumbing; tier 2 never reads)
 - `verdict.json` (tier 2 output)
 - `assessment.md` (tier 2 output)
@@ -451,9 +595,13 @@ Files **kept**:
 
 ## Implementation Order
 
-1. **Define schema helpers** in `analysis_shared.py`: a `sanitize_for_json()`
-   convenience wrapper (calls `sanitize_line` on string values in a dict
-   recursively) so all dict values entering `signals.json` are clean.
+1. **Define schema helpers** in `analysis_shared.py`:
+   - `sanitize_for_json(d)`: recursively calls `sanitize_line()` on all
+     string leaf values in a dict, so attacker-controlled strings (file
+     paths, package metadata) are clean before entering `signals.json`.
+   - Change `PackageManifest` boolean-like fields to `bool` (see above)
+     and update all three ecosystem analyzers to set them as
+     `True`/`False` instead of `'YES'`/`'NO'`.
 
 2. **Add install-scripts tier 3 infrastructure** in `analysis_shared.py`:
    `INSTALL_SCRIPTS_REVIEW_PROMPT`, `INSTALL_SCRIPTS_REVIEW_SCHEMA`,
@@ -465,14 +613,17 @@ Files **kept**:
    `signals.txt`. Drop the `Printer` parameter `p`; remove all `p(...)`
    calls and `Printer(work / 'X.txt')` blocks. Invoke the tier 3
    install-scripts review here (after `install-scripts.txt` is written)
-   and include the result in the dict.
+   and include the result in the dict. When `ctx.deeper_mode` or
+   `ctx.install_probe_mode` is set, write `next-steps.txt` to the work
+   directory (plain text, same content as the current "NEXT STEPS
+   REQUIRED" section).
 
 4. **Final block** in `dep_review.py`: write only `signals.json` using
    `json.dumps(signals, indent=2)`. Remove `signals.txt` write.
 
 5. **Update `--deeper` block** in `dep_review.py`: load-merge-rewrite
-   pattern; add `diff.review` and `deeper` sections to the loaded dict
-   and rewrite using write-to-temp-then-rename.
+   pattern; add `diff.review` and `deeper_analysis` sections to the
+   loaded dict and rewrite using write-to-temp-then-rename.
 
 6. **Update `dep_session.py`**: replace `_parse_signals` with
    `_load_signals`, delete `_parse_license_line` and `_parse_health_line`,
@@ -508,7 +659,7 @@ import json
 d = json.load(open('temp/dep-review/testgem-2.0.0/signals.json'))
 print('sections:', list(d.keys()))
 print('concern_level:', d['gate']['concern_level'])
-print('license:', d['license']['spdx'])
+print('license:', d['license']['spdx_expression'])
 "
 ls temp/dep-review/testgem-2.0.0/*.txt
 # only install-scripts.txt (if triggered) and alternatives.txt should remain
