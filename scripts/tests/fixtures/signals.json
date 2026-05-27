@@ -21,14 +21,14 @@
     "spdx_expression": "MIT",
     "osi_approved": true,
     "status": "OK",
-    "note": "none",
-    "changed": false,
+    "status_explanation": "none",
+    "spdx_expression_changed": false,
     "previous_spdx_expression": null
   },
   "health": {
     "age_years": 3.2,
-    "last_release_days": 45,
-    "version_published_days": 10,
+    "days_since_last_release": 45,
+    "days_since_version_published": 10,
     "version_stability": "stable",
     "owner_count": null,
     "openssf_scorecard_score": 7.5,
@@ -39,7 +39,7 @@
     "has_security_policy": null,
     "known_vulnerability_count": 0,
     "health_concerns": [],
-    "ecosystems": null
+    "package_ecosystem_stats": null
   },
   "manifest": {
     "has_native_extensions": true,
@@ -50,9 +50,9 @@
   },
   "source_repository": {
     "source_url": "https://github.com/example/pkg",
-    "status": "OK",
+    "clone_status": "OK",
     "version_tag": null,
-    "commit_guessed": false,
+    "version_tag_commit_was_guessed": false,
     "source_likely_incompatible": false
   },
   "unexpected_files": {
@@ -69,9 +69,9 @@
     "diff_danger": {"count": 0, "paths": []}
   },
   "transitive_dependencies": {
-    "total": 5,
+    "total_transitive_dependency_count": 5,
     "not_in_lockfile": ["dep-a", "dep-b", "dep-c"],
-    "registry": {},
+    "new_dep_registry_metadata": {},
     "added_direct": [],
     "removed_direct": []
   },
@@ -83,7 +83,7 @@
     "cves": []
   },
   "oss_reproducible_build": {
-    "signal_level": "NOT_CHECKED",
+    "reproducibility_verdict": "NOT_CHECKED",
     "summary": ""
   }
 }

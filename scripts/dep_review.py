@@ -744,15 +744,15 @@ def write_signals(ctx: SignalContext) -> dict:  # noqa: C901
         'spdx_expression': license_spdx,
         'osi_approved': license_osi == 'YES',
         'status': license_status,
-        'note': license_note,
-        'changed': license_changed,
+        'status_explanation': license_note,
+        'spdx_expression_changed': license_changed,
         'previous_spdx_expression': license_result.get('old_raw') if license_changed else None,
     }
 
     signals['health'] = {
         'age_years': registry.get('age_years_float'),
-        'last_release_days': registry.get('last_release_days'),
-        'version_published_days': registry.get('version_published_days'),
+        'days_since_last_release': registry.get('last_release_days'),
+        'days_since_version_published': registry.get('version_published_days'),
         'version_stability': registry.get('version_stability', 'unknown'),
         'owner_count': registry.get('owner_count_int'),
         'openssf_scorecard_score': scorecard_float,
@@ -763,9 +763,9 @@ def write_signals(ctx: SignalContext) -> dict:  # noqa: C901
         'has_security_policy': has_security_policy,
         'known_vulnerability_count': _vuln_count,
         'health_concerns': health_concerns_list,
-        'ecosystems': {
-            'dependents': eco.get('dependent_repos_count'),
-            'critical': eco.get('critical'),
+        'package_ecosystem_stats': {
+            'dependent_repo_count': eco.get('dependent_repos_count'),
+            'is_critical_package': eco.get('critical'),
         } if eco else None,
     }
 
@@ -779,9 +779,9 @@ def write_signals(ctx: SignalContext) -> dict:  # noqa: C901
 
     signals['source_repository'] = {
         'source_url': source_url,
-        'status': clone_status_str,
+        'clone_status': clone_status_str,
         'version_tag': version_tag,
-        'commit_guessed': commit_guessed,
+        'version_tag_commit_was_guessed': commit_guessed,
         'source_likely_incompatible': source_likely_incompatible,
     }
 
@@ -823,9 +823,9 @@ def write_signals(ctx: SignalContext) -> dict:  # noqa: C901
         }
 
     signals['transitive_dependencies'] = {
-        'total': transitive.get('total', 0),
+        'total_transitive_dependency_count': transitive.get('total', 0),
         'not_in_lockfile': list(not_in_lockfile),
-        'registry': {d: dep_registry.get(d, {}) for d in not_in_lockfile if d in dep_registry},
+        'new_dep_registry_metadata': {d: dep_registry.get(d, {}) for d in not_in_lockfile if d in dep_registry},
         'added_direct': dep_result.get('added_deps', []),
         'removed_direct': dep_result.get('removed_deps', []),
     }
@@ -841,7 +841,7 @@ def write_signals(ctx: SignalContext) -> dict:  # noqa: C901
     }
 
     signals['oss_reproducible_build'] = {
-        'signal_level': _orb_level,
+        'reproducibility_verdict': _orb_level,
         'summary': _orb.get('signal', ''),
     }
 

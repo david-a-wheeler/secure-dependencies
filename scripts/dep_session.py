@@ -1569,7 +1569,7 @@ def cmd_report(args: argparse.Namespace) -> None:
         )
         age_years = health_d.get('age_years')
         age_str = f'{age_years:.1f} yr' if age_years is not None else 'unknown'
-        last_rel = health_d.get('last_release_days')
+        last_rel = health_d.get('days_since_last_release')
         last_rel_str = f'{last_rel} days ago' if last_rel is not None else 'unknown'
         owner_count = health_d.get('owner_count')
         owners_str = str(owner_count) if owner_count is not None else 'unknown'
@@ -1579,7 +1579,7 @@ def cmd_report(args: argparse.Namespace) -> None:
             f'Age: {age_str}  |  Last release: {last_rel_str}'
             f'  |  Owners: {owners_str}  |  Scorecard: {scorecard_str}'
         )
-        clone_status = repo_d.get('status', 'UNKNOWN')
+        clone_status = repo_d.get('clone_status', 'UNKNOWN')
         clone_url = repo_d.get('source_url', '')
         clone_display = (
             f'OK ({clone_url})' if clone_status.upper().startswith('OK') and clone_url
@@ -1841,7 +1841,7 @@ def cmd_pre_fill_assessment(args: argparse.Namespace) -> None:
 
     age_years = health_d.get('age_years')
     health_age = f'{age_years:.1f} yr' if age_years is not None else 'unknown'
-    last_rel_days = health_d.get('last_release_days')
+    last_rel_days = health_d.get('days_since_last_release')
     health_last_release = (
         f'{last_rel_days} days ago' if last_rel_days is not None else 'unknown'
     )
@@ -1853,7 +1853,7 @@ def cmd_pre_fill_assessment(args: argparse.Namespace) -> None:
     clone_url = repo_d.get('source_url', 'not found')
     clone_status = repo_d.get('status', 'UNKNOWN')
     extensions = 'YES' if manifest_d.get('has_native_extensions') else 'NO'
-    executables = 'YES' if manifest_d.get('executables') else 'NO'
+    executables = 'YES' if manifest_d.get('executables_list') else 'NO'
     not_in_lock = trans_d.get('not_in_lockfile', [])
     transitive_total = str(len(not_in_lock)) if isinstance(not_in_lock, list) else '0'
     concern_level = gate_d.get('concern_level', 'NONE')
@@ -1877,7 +1877,7 @@ def cmd_pre_fill_assessment(args: argparse.Namespace) -> None:
         health_concerns = str(health_concerns_raw) or 'none'
     install_hooks = 'YES' if manifest_d.get('has_install_scripts') else 'NO'
 
-    license_note_raw = lic_d.get('note', '')
+    license_note_raw = lic_d.get('status_explanation', '')
     if license_status == 'OK':
         license_note = 'none'
     elif license_note_raw:

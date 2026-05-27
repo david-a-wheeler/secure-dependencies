@@ -44,7 +44,7 @@ class TestLoadSignals(unittest.TestCase):
     def test_section_source_repository(self):
         repo = _signals().get('source_repository', {})
         self.assertEqual(repo.get('source_url'), 'https://github.com/example/pkg')
-        self.assertEqual(repo.get('status'), 'OK')
+        self.assertEqual(repo.get('clone_status'), 'OK')
 
     def test_missing_dir_returns_empty_dict(self):
         self.assertEqual(dep_session._load_signals(Path('/no/such/dir')), {})
