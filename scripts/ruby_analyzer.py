@@ -328,11 +328,10 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
         p: 'shared.Printer',
     ) -> shared.PackageManifest:
         """Parse gemspec; write manifest-analysis.txt and gemspec.txt."""
-        extensions = 'NO'
-        executables = 'NO'
+        has_native_extensions = False
         executables_list = ''
-        post_install_msg = 'NO'
-        has_rakefile_tasks = 'NO'
+        has_post_install_message = False
+        has_rakefile_tasks = False
         gemspec_license_raw = ''
         source_url = ''
         gemspec_text = ''
@@ -358,7 +357,7 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
             p('')
 
             if 'extensions' in gemspec_text:
-                extensions = 'YES'
+                has_native_extensions = True
                 p('HAS_EXTENSIONS: YES')
             else:
                 p('HAS_EXTENSIONS: NO')
@@ -367,7 +366,6 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
                 el for el in gemspec_text.splitlines()
                 if 'executables' in el]
             if exec_lines:
-                executables = 'YES'
                 executables_list = shared.sanitize_line(
                     '; '.join(exec_lines[:3]))
                 p('HAS_EXECUTABLES: YES')
@@ -376,7 +374,7 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
                 p('HAS_EXECUTABLES: NO')
 
             if 'post_install_message' in gemspec_text:
-                post_install_msg = 'YES'
+                has_post_install_message = True
                 p('HAS_POST_INSTALL_MESSAGE: YES')
             else:
                 p('HAS_POST_INSTALL_MESSAGE: NO')
@@ -435,7 +433,7 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
                 rake_text = rakefile.read_text(
                     encoding='utf-8', errors='replace')
                 if re.search(r'(?i)install|post_install', rake_text):
-                    has_rakefile_tasks = 'YES'
+                    has_rakefile_tasks = True
                     p('RAKEFILE_INSTALL_TASKS: YES')
                 else:
                     p('RAKEFILE_INSTALL_TASKS: NO')
@@ -449,12 +447,12 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
             # code that runs) during gem install, so an AI reviewer
             # must read them.
             install_script_files: list[tuple[str, Path]] = []
-            if extensions == 'YES':
+            if has_native_extensions:
                 for name in ('extconf.rb', 'Makefile.in', 'Makefile'):
                     script_fp = unpacked_dir / name
                     if script_fp.is_file():
                         install_script_files.append((name, script_fp))
-            if has_rakefile_tasks == 'YES' and rakefile.is_file():
+            if has_rakefile_tasks and rakefile.is_file():
                 install_script_files.append(('Rakefile', rakefile))
 
             if install_script_files:
@@ -493,14 +491,14 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
         # Build ecosystem-specific context for the driver's MANIFEST
         # / INSTALL HOOKS section
         install_hook_context: list[str] = []
-        if extensions == 'YES':
+        if has_native_extensions:
             install_hook_context.extend([
                 'Context: Compiled code runs during gem install.'
                 ' The build process can execute',
                 '  arbitrary code. Verify extconf.rb and Makefile'
                 ' in the source are benign.',
             ])
-        if has_rakefile_tasks == 'YES':
+        if has_rakefile_tasks:
             install_hook_context.extend([
                 'Context: Rakefile install tasks were found.'
                 ' These execute during gem install.',
@@ -510,12 +508,11 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
 
         return shared.PackageManifest(
             source_url=source_url,
-            extensions=extensions,
-            executables=executables,
+            has_native_extensions=has_native_extensions,
             executables_list=executables_list,
-            post_install_msg=post_install_msg,
+            has_post_install_message=has_post_install_message,
             has_build_hooks=has_rakefile_tasks,
-            has_install_scripts='YES' if has_install_scripts else 'NO',
+            has_install_scripts=has_install_scripts,
             runtime_dep_lines=runtime_dep_lines,
             manifest_license_raw=gemspec_license_raw,
             manifest_text=gemspec_text,

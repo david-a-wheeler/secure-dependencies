@@ -207,24 +207,21 @@ class TestRunAnalysisIntegration(unittest.TestCase):
     def _check_outputs(self, pkgname: str, version: str) -> dict:
         work = self.root / 'temp' / 'dep-review' / f'{pkgname}-{version}'
         self.assertTrue(
-            (work / 'signals.txt').exists(),
-            'signals.txt must be written by run_analysis()',
-        )
-        self.assertTrue(
             (work / 'signals.json').exists(),
             'signals.json must be written by run_analysis()',
         )
         with open(work / 'signals.json', encoding='utf-8') as f:
             report = json.load(f)
-        self.assertIn('risk_flags', report)
-        self.assertIn('sha256', report)
+        self.assertIn('gate', report)
+        self.assertIn('risk_flags', report['gate'])
+        self.assertIn('sha256', report.get('meta', {}))
         return report
 
     def test_python_basic_completes(self) -> None:
         aborted = self._run(FixturePythonAnalyzer(), 'testpkg', '1.0.0')
         self.assertFalse(aborted)
         report = self._check_outputs('testpkg', '1.0.0')
-        self.assertEqual(report.get('adversarial_gate'), 'CLEAR')
+        self.assertEqual(report['gate'].get('adversarial_gate'), 'CLEAR')
 
     def test_ruby_basic_completes(self) -> None:
         aborted = self._run(FixtureRubyAnalyzer(), 'testgem', '2.0.0')
@@ -241,5 +238,5 @@ class TestRunAnalysisIntegration(unittest.TestCase):
         aborted = self._run(FixturePythonAnalyzer(), 'licensedpkg', '1.0.0')
         self.assertFalse(aborted)
         report = self._check_outputs('licensedpkg', '1.0.0')
-        self.assertIn('license_line', report)
-        self.assertIn('MIT', report['license_line'])
+        self.assertIn('license', report)
+        self.assertIn('MIT', report['license'].get('spdx_expression', ''))

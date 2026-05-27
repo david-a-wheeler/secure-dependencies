@@ -489,11 +489,10 @@ class JavaScriptAnalyzer(shared.EcosystemAnalyzer):
         manifest-analysis.txt.
         """
         source_url = ''
-        extensions = 'NO'
-        executables = 'NO'
+        has_native_extensions = False
         executables_list = ''
-        post_install_msg = 'NO'
-        has_build_hooks = 'NO'
+        has_post_install_message = False
+        has_build_hooks = False
         manifest_license_raw = ''
         manifest_text = ''
         runtime_dep_lines: list[str] = []
@@ -525,7 +524,7 @@ class JavaScriptAnalyzer(shared.EcosystemAnalyzer):
                 re.search(r'node-gyp\s+rebuild|prebuild-install', install_val)
             )
             if is_native:
-                extensions = 'YES'
+                has_native_extensions = True
                 p('HAS_EXTENSIONS: YES (native addon)')
             else:
                 p('HAS_EXTENSIONS: NO')
@@ -533,7 +532,6 @@ class JavaScriptAnalyzer(shared.EcosystemAnalyzer):
             # Executables (bin field)
             bin_field = pkg_json.get('bin', None)
             if bin_field:
-                executables = 'YES'
                 if isinstance(bin_field, dict):
                     executables_list = shared.sanitize_line(
                         ', '.join(list(bin_field.keys())[:10]))
@@ -547,14 +545,14 @@ class JavaScriptAnalyzer(shared.EcosystemAnalyzer):
             # Lifecycle scripts: preinstall, install, postinstall
             install_script_content: list[tuple[str, str]] = []
             if preinstall_val:
-                has_build_hooks = 'YES'
+                has_build_hooks = True
                 p('HAS_PREINSTALL: YES')
                 p(f'  preinstall: '
                   f'{shared.sanitize_line(preinstall_val[:300])}')
                 install_script_content.append(('preinstall', preinstall_val))
-                post_install_msg = 'YES'
+                has_post_install_message = True
             if install_val and not is_native:
-                has_build_hooks = 'YES'
+                has_build_hooks = True
                 p('HAS_INSTALL_SCRIPT: YES')
                 p(f'  install: {shared.sanitize_line(install_val[:300])}')
                 install_script_content.append(('install', install_val))
@@ -562,13 +560,13 @@ class JavaScriptAnalyzer(shared.EcosystemAnalyzer):
                 p(f'NATIVE_INSTALL_SCRIPT: '
                   f'{shared.sanitize_line(install_val[:300])}')
             if postinstall_val:
-                has_build_hooks = 'YES'
+                has_build_hooks = True
                 p('HAS_POSTINSTALL: YES')
                 p(f'  postinstall: '
                   f'{shared.sanitize_line(postinstall_val[:300])}')
                 install_script_content.append(
                     ('postinstall', postinstall_val))
-                post_install_msg = 'YES'
+                has_post_install_message = True
             if not (preinstall_val or install_val or postinstall_val):
                 p('HAS_BUILD_HOOKS: NO')
 
@@ -739,12 +737,11 @@ class JavaScriptAnalyzer(shared.EcosystemAnalyzer):
 
         return shared.PackageManifest(
             source_url=source_url,
-            extensions=extensions,
-            executables=executables,
+            has_native_extensions=has_native_extensions,
             executables_list=executables_list,
-            post_install_msg=post_install_msg,
+            has_post_install_message=has_post_install_message,
             has_build_hooks=has_build_hooks,
-            has_install_scripts='YES' if has_install_scripts else 'NO',
+            has_install_scripts=has_install_scripts,
             runtime_dep_lines=runtime_dep_lines,
             manifest_license_raw=manifest_license_raw,
             manifest_text=manifest_text,
