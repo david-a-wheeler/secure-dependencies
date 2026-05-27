@@ -131,6 +131,7 @@ accesses structured fields directly. No text parsing needed.
     "install_scripts_raw_bytes": 412,
     "install_scripts_stripped_bytes": 398,
     "has_post_install_message": false,
+    "has_build_hooks": false,
     "dist_type": "sdist"
   },
   "source_repository": {
@@ -215,8 +216,10 @@ accesses structured fields directly. No text parsing needed.
 The `diff` and `deeper_analysis` sections are omitted when not applicable
 (NEW mode has no `diff`; basic analysis has no `deeper_analysis`).
 `--deeper` appends those sections to the dict before rewriting.
-`install_scripts_review` is written during basic analysis whenever install
-scripts exist and `SECURE_DEPS_SANDBOX_AI` is set; omitted otherwise.
+`install_scripts_review` is always written when `has_install_scripts` is
+true: the `INSTALL_SCRIPTS_REVIEW_SKIPPED` sentinel is used when
+`SECURE_DEPS_SANDBOX_AI` is not set, so tier 2 always finds a predictable
+structure regardless of whether the AI backend is configured.
 
 **Schema notes for specific fields:**
 
@@ -507,11 +510,11 @@ if has_install_scripts and shared.sandbox_ai_available():
 ```
 
 The result is included in `signals.json["install_scripts_review"]`
-when `has_install_scripts` is true. This runs during basic analysis
-(not `--deeper`) because install hooks are always a concern.
-The `INSTALL_SCRIPTS_REVIEW_SKIPPED` sentinel is written when
-`SECURE_DEPS_SANDBOX_AI` is not set, so tier 2 always reads a
-predictable structure.
+whenever `has_install_scripts` is true (using the
+`INSTALL_SCRIPTS_REVIEW_SKIPPED` sentinel when `SECURE_DEPS_SANDBOX_AI`
+is not set, so tier 2 always reads a predictable structure). This runs
+during basic analysis (not `--deeper`) because install hooks are always
+a concern.
 
 Tier 2 reads `signals.json["install_scripts_review"]` as part of
 its normal `signals.json` read. It never reads either install-scripts
