@@ -464,9 +464,9 @@ content. The sanitized version remains for safe human browsing, and for
 comparison to provide a signal of potentially-dangerous content.
 
 Each ecosystem analyzer writes two files:
-- `raw-install-scripts.txt` — completely unmodified content, following
+- `raw-install-scripts.txt`: completely unmodified content, following
   the existing `raw-*` naming convention for unprocessed attacker data.
-- `install-scripts.txt` — sanitized version, unchanged from today.
+- `install-scripts.txt`: sanitized version, unchanged from today.
 
 The deterministic code then computes the size difference and records
 it in `signals.json["manifest"]`:
