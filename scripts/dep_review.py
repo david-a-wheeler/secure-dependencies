@@ -196,7 +196,6 @@ def write_signals(ctx: SignalContext) -> dict:  # noqa: C901
     diff_lines = ctx.diff_lines
     changed_files = ctx.changed_files
     license_result = ctx.license_result
-    dep_result = ctx.dep_result
     dep_registry = ctx.dep_registry
     transitive = ctx.transitive
     deeper_result = ctx.deeper_result
@@ -207,8 +206,6 @@ def write_signals(ctx: SignalContext) -> dict:  # noqa: C901
     install_probe_mode = ctx.install_probe_mode
     vuln_result = ctx.vuln_result
     has_security_policy = ctx.has_security_policy
-    scorecard_checks = ctx.scorecard_checks
-    recent_commits = ctx.recent_commits
     commit_activity = ctx.commit_activity
     ecosystems_data = ctx.ecosystems_data
     oss_rebuild_result = ctx.oss_rebuild_result
