@@ -32,6 +32,7 @@
     "version_stability": "stable",
     "owner_count": null,
     "openssf_scorecard_score": 7.5,
+    "scorecard_checks": {},
     "recent_commits_12mo": null,
     "commit_trend": null,
     "has_security_policy": null,
@@ -69,7 +70,9 @@
   "transitive_dependencies": {
     "total": 5,
     "not_in_lockfile": ["dep-a", "dep-b", "dep-c"],
-    "registry": {}
+    "registry": {},
+    "added_direct": [],
+    "removed_direct": []
   },
   "supply_chain_provenance": {
     "publisher_mfa_status": "unknown"

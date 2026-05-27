@@ -196,6 +196,7 @@ def write_signals(ctx: SignalContext) -> dict:  # noqa: C901
     diff_lines = ctx.diff_lines
     changed_files = ctx.changed_files
     license_result = ctx.license_result
+    dep_result = ctx.dep_result
     dep_registry = ctx.dep_registry
     transitive = ctx.transitive
     deeper_result = ctx.deeper_result
@@ -206,6 +207,7 @@ def write_signals(ctx: SignalContext) -> dict:  # noqa: C901
     install_probe_mode = ctx.install_probe_mode
     vuln_result = ctx.vuln_result
     has_security_policy = ctx.has_security_policy
+    scorecard_checks = ctx.scorecard_checks
     commit_activity = ctx.commit_activity
     ecosystems_data = ctx.ecosystems_data
     oss_rebuild_result = ctx.oss_rebuild_result
@@ -754,6 +756,7 @@ def write_signals(ctx: SignalContext) -> dict:  # noqa: C901
         'version_stability': registry.get('version_stability', 'unknown'),
         'owner_count': registry.get('owner_count_int'),
         'openssf_scorecard_score': scorecard_float,
+        'scorecard_checks': scorecard_checks or {},
         'recent_commits_12mo': commit_activity['total'] if commit_activity else None,
         'commit_trend': commit_activity['trend'] if commit_activity else None,
         'has_security_policy': has_security_policy,
@@ -822,6 +825,8 @@ def write_signals(ctx: SignalContext) -> dict:  # noqa: C901
         'total': transitive.get('total', 0),
         'not_in_lockfile': list(not_in_lockfile),
         'registry': {d: dep_registry.get(d, {}) for d in not_in_lockfile if d in dep_registry},
+        'added_direct': dep_result.get('added_deps', []),
+        'removed_direct': dep_result.get('removed_deps', []),
     }
 
     signals['supply_chain_provenance'] = {
