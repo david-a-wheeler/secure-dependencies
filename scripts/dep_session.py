@@ -447,7 +447,7 @@ def print_next_action(session: dict, session_path: Path) -> None:
               f' --from {registry}{registry_url_flag} --deeper --root . {sname} {sversion}')
         print()
         print('Step 2: read updated signals, update assessment and verdict:')
-        print(f'  Read  : {_dwork_rel}/signals.txt (see DEEPER ANALYSIS section)')
+        print(f'  Read  : {_dwork_rel}/signals.json (see deeper_analysis section)')
         print(f'  Update: {_dwork_rel}/assessment.md (fill deeper-analysis [TODO] placeholders)')
         print(f'  Update: {_dwork_rel}/verdict.json (revise if verdict changes)')
         print()
@@ -1487,133 +1487,15 @@ def _run_cmd(cmd: list[str], cwd: Path) -> tuple[int, str, str]:
         return -3, '', str(e)
 
 
-def _parse_signals(path: Path) -> dict[str, str]:
-    """Extract key fields from signals.json (preferred) or signals.txt (fallback).
-
-    Returns a dict of field_name → string.  Missing fields are absent.
-    Tolerant of old-format files that pre-date ADVERSARIAL_GATE / CONCERN_SUMMARY.
-    """
-    # Prefer machine-written JSON: faster and format-stable.
-    json_path = path.with_suffix('.json')
-    if json_path.is_file():
-        try:
-            data = json.loads(json_path.read_text(encoding='utf-8'))
-            # concern_count is int in SignalReport; convert to str for callers.
-            if 'concern_count' in data:
-                data['concern_count'] = str(data['concern_count'])
-            return {k: str(v) for k, v in data.items() if v is not None and str(v) != ''}
-        except (json.JSONDecodeError, OSError):
-            pass  # fall through to text parsing
-
+def _load_signals(work_dir: Path) -> dict:
+    """Load signals.json from work_dir; return {} if missing or invalid."""
+    path = work_dir / 'signals.json'
     if not path.is_file():
         return {}
-
-    fields: dict[str, str] = {}
-    current_section = ''
-    section_lines: dict[str, list[str]] = {}
-
-    for raw in path.read_text(encoding='utf-8', errors='replace').splitlines():
-        line = raw.rstrip()
-
-        if line.startswith('=== ') and line.endswith(' ==='):
-            current_section = line[4:-4].strip()
-            section_lines.setdefault(current_section, [])
-            continue
-
-        section_lines.setdefault(current_section, []).append(line)
-
-        # Top-level key: value lines in the preamble
-        for prefix, key in (
-            ('SHA256    : ',       'sha256'),
-            ('RISK_FLAGS    : ',   'risk_flags'),
-            ('POSITIVE_FLAGS: ',   'positive_flags'),
-            ('ADVERSARIAL_GATE: ', 'adversarial_gate'),
-            ('CONCERN_COUNT: ',    'concern_count'),
-        ):
-            if line.startswith(prefix):
-                fields[key] = line[len(prefix):].strip()
-                break
-
-        if line.startswith('CONCERN_LEVEL: '):
-            fields['concern_level'] = line[len('CONCERN_LEVEL: '):].split()[0]
-        elif line.startswith('Ecosystem : '):
-            m = re.search(r'Mode:\s*(\S+)', line)
-            if m:
-                fields['mode'] = m.group(1).upper()
-        elif line.startswith('From      : '):
-            fields['old_version'] = line[len('From      : '):].strip()
-
-    # LICENSE section: "SPDX: X  |  OSI-approved: Y  |  Status: Z"
-    for ln in section_lines.get('LICENSE', []):
-        if ln.startswith('SPDX:'):
-            fields['license_line'] = ln
-            break
-
-    # PROJECT HEALTH section: "Age: X yr  |  Last release: Y days ago  |  ..."
-    for ln in section_lines.get('PROJECT HEALTH', []):
-        if ln.startswith('Age:'):
-            fields['health_line'] = ln
-            break
-
-    # SOURCE REPOSITORY section
-    for ln in section_lines.get('SOURCE REPOSITORY', []):
-        if ln.startswith('URL  :'):
-            fields['clone_url'] = ln[len('URL  :'):].strip()
-        elif ln.startswith('Clone:'):
-            fields['clone_status'] = ln[len('Clone:'):].strip()
-
-    # MANIFEST / INSTALL HOOKS section
-    for ln in section_lines.get('MANIFEST / INSTALL HOOKS', []):
-        if ln.startswith('Native extensions'):
-            fields['extensions'] = 'YES' if 'YES' in ln else 'NO'
-        elif ln.startswith('Executables added to PATH'):
-            fields['executables'] = 'YES' if 'YES' in ln else 'NO'
-
-    # new_transitive_deps from CONCERN_SUMMARY (lives in the preamble, section key '')
-    in_concern = False
-    for ln in section_lines.get('', []):
-        stripped = ln.strip()
-        if stripped == 'CONCERN_SUMMARY:':
-            in_concern = True
-            continue
-        if in_concern:
-            if stripped.startswith('new_transitive_deps'):
-                val = stripped.split(':', 1)[1].strip() if ':' in stripped else ''
-                fields['new_transitive_deps'] = val.split()[0] if val else ''
-            if stripped.startswith('CONCERN_') or (stripped and not ln.startswith(' ')):
-                in_concern = False
-
-    return fields
-
-
-def _parse_license_line(line: str) -> dict[str, str]:
-    """Parse 'SPDX: X  |  OSI-approved: Y  |  Status: Z' into a dict."""
-    result: dict[str, str] = {}
-    for part in line.split('|'):
-        part = part.strip()
-        if part.startswith('SPDX:'):
-            result['spdx'] = part[5:].strip()
-        elif part.startswith('OSI-approved:'):
-            result['osi_approved'] = part[13:].strip()
-        elif part.startswith('Status:'):
-            result['status'] = part[7:].strip()
-    return result
-
-
-def _parse_health_line(line: str) -> dict[str, str]:
-    """Parse 'Age: X  |  Last release: Y  |  Owners: Z  |  Scorecard: W'."""
-    result: dict[str, str] = {}
-    for part in line.split('|'):
-        part = part.strip()
-        if part.startswith('Age:'):
-            result['age'] = part[4:].strip()
-        elif part.startswith('Last release:'):
-            result['last_release'] = part[13:].strip()
-        elif part.startswith('Owners:'):
-            result['owners'] = part[7:].strip()
-        elif part.startswith('Scorecard:'):
-            result['scorecard'] = part[10:].strip()
-    return result
+    try:
+        return json.loads(path.read_text(encoding='utf-8'))
+    except (json.JSONDecodeError, OSError):
+        return {}
 
 
 def _read_verdict(work_dir: Path) -> dict[str, str]:
@@ -1657,25 +1539,56 @@ def cmd_report(args: argparse.Namespace) -> None:
         rec = v.get('recommendation', 'UNKNOWN')
         risk = v.get('risk', 'UNKNOWN')
         work_dir = root / 'temp' / 'dep-review' / shared.safe_dir_component(name, version)
-        af = _parse_signals(work_dir / 'signals.txt')
+        sig = _load_signals(work_dir)
         verdict = _read_verdict(work_dir)
 
-        pkg_mode = af.get('mode', 'UNKNOWN')
-        old_ver = af.get('old_version', '')
-        sha = af.get('sha256', '(not found)').split()[0]
-        gate = af.get('adversarial_gate', 'UNKNOWN')
-        concern_count = af.get('concern_count', '?')
-        concern_level = af.get('concern_level', '?')
-        mfa = 'YES' if 'MFA_ENFORCED' in af.get('positive_flags', '') else 'NO'
-        extensions = af.get('extensions', '?')
-        executables = af.get('executables', '?')
-        license_line = af.get('license_line', '(see license.txt)')
-        health_line = af.get('health_line', '(see project-health.txt)')
-        clone_status = af.get('clone_status', 'UNKNOWN')
-        clone_url = af.get('clone_url', '')
-        clone_display = (f'OK ({clone_url})' if clone_status.upper().startswith('OK') and clone_url
-                         else clone_status)
-        new_trans = af.get('new_transitive_deps', 'N/A' if pkg_mode == 'UPDATE' else '?')
+        meta = sig.get('meta', {})
+        gate_d = sig.get('gate', {})
+        lic_d = sig.get('license', {})
+        health_d = sig.get('health', {})
+        manifest_d = sig.get('manifest', {})
+        repo_d = sig.get('source_repository', {})
+        trans_d = sig.get('transitive_dependencies', {})
+
+        pkg_mode = meta.get('analysis_mode', 'UNKNOWN')
+        old_ver = meta.get('old_version') or ''
+        sha = (meta.get('sha256') or '(not found)').split()[0]
+        gate = gate_d.get('adversarial_gate', 'UNKNOWN')
+        concern_count = str(gate_d.get('concern_count', '?'))
+        concern_level = gate_d.get('concern_level', '?')
+        pos_flags = gate_d.get('positive_flags', [])
+        mfa = 'YES' if 'MFA_ENFORCED' in pos_flags else 'NO'
+        extensions = 'YES' if manifest_d.get('has_native_extensions') else 'NO'
+        executables = 'YES' if manifest_d.get('executables') else 'NO'
+        spdx = lic_d.get('spdx_expression', 'unknown')
+        osi_bool = lic_d.get('osi_approved')
+        osi_str = 'YES' if osi_bool is True else 'NO' if osi_bool is False else '?'
+        lic_status = lic_d.get('status', '')
+        license_line = (
+            f'SPDX: {spdx}  |  OSI-approved: {osi_str}  |  Status: {lic_status}'
+        )
+        age_years = health_d.get('age_years')
+        age_str = f'{age_years:.1f} yr' if age_years is not None else 'unknown'
+        last_rel = health_d.get('last_release_days')
+        last_rel_str = f'{last_rel} days ago' if last_rel is not None else 'unknown'
+        owner_count = health_d.get('owner_count')
+        owners_str = str(owner_count) if owner_count is not None else 'unknown'
+        scorecard = health_d.get('openssf_scorecard_score')
+        scorecard_str = f'{scorecard}/10' if scorecard is not None else 'unknown'
+        health_line = (
+            f'Age: {age_str}  |  Last release: {last_rel_str}'
+            f'  |  Owners: {owners_str}  |  Scorecard: {scorecard_str}'
+        )
+        clone_status = repo_d.get('status', 'UNKNOWN')
+        clone_url = repo_d.get('source_url', '')
+        clone_display = (
+            f'OK ({clone_url})' if clone_status.upper().startswith('OK') and clone_url
+            else clone_status
+        )
+        not_in_lock = trans_d.get('not_in_lockfile', [])
+        new_trans = (
+            str(len(not_in_lock)) if pkg_mode != 'UPDATE' else 'N/A'
+        )
         report_path = f'temp/dep-review/{shared.safe_dir_component(name, version)}/assessment.md'
         summary = verdict['summary'] or f'(see {report_path})'
 
@@ -1756,17 +1669,19 @@ def cmd_wrap_up(args: argparse.Namespace) -> None:
         rec = v.get('recommendation', 'pending')
         risk = v.get('risk', 'unknown')
         work_dir = root / 'temp' / 'dep-review' / shared.safe_dir_component(name, version)
-        af = _parse_signals(work_dir / 'signals.txt')
+        sig = _load_signals(work_dir)
         verdict = _read_verdict(work_dir)
 
-        old_ver = af.get('old_version', '')
-        lic_raw = af.get('license_line', '')
-        lic = _parse_license_line(lic_raw)
-        spdx = lic.get('spdx', 'unknown')
-        osi_raw = lic.get('osi_approved', 'unknown')
-        osi = ('approved' if osi_raw == 'YES' else
-               'not approved' if osi_raw == 'NO' else osi_raw)
-        lic_status = lic.get('status', 'unknown')
+        old_ver = sig.get('meta', {}).get('old_version') or ''
+        lic_d = sig.get('license', {})
+        spdx = lic_d.get('spdx_expression', 'unknown')
+        osi_bool = lic_d.get('osi_approved')
+        osi = (
+            'approved' if osi_bool is True
+            else 'not approved' if osi_bool is False
+            else 'unknown'
+        )
+        lic_status = lic_d.get('status', 'unknown')
 
         lic_display = spdx
         if lic_status and lic_status not in ('unknown',):
@@ -1905,43 +1820,65 @@ def cmd_pre_fill_assessment(args: argparse.Namespace) -> None:
     work = root / 'temp' / 'dep-review' / shared.safe_dir_component(
         name, version
     )
-    signals = _parse_signals(work / 'signals.txt')
+    sig = _load_signals(work)
+    meta = sig.get('meta', {})
+    gate_d = sig.get('gate', {})
+    lic_d = sig.get('license', {})
+    health_d = sig.get('health', {})
+    manifest_d = sig.get('manifest', {})
+    repo_d = sig.get('source_repository', {})
+    trans_d = sig.get('transitive_dependencies', {})
 
-    sha256 = signals.get('sha256', 'UNKNOWN')
-    mode = signals.get('mode', 'UNKNOWN')
-    old_version = signals.get('old_version', '')
+    sha256 = meta.get('sha256', 'UNKNOWN')
+    mode = meta.get('analysis_mode', 'UNKNOWN')
+    old_version = meta.get('old_version') or ''
     version_display = f'{old_version} -> {version}' if old_version else version
 
-    lic = _parse_license_line(signals.get('license_line', ''))
-    spdx = lic.get('spdx', 'unknown')
-    osi_approved = lic.get('osi_approved', 'unknown')
-    license_status = lic.get('status', 'unknown')
+    spdx = lic_d.get('spdx_expression', 'unknown')
+    osi_bool = lic_d.get('osi_approved')
+    osi_approved = 'YES' if osi_bool is True else 'NO' if osi_bool is False else 'unknown'
+    license_status = lic_d.get('status', 'unknown')
 
-    health = _parse_health_line(signals.get('health_line', ''))
-    health_age = health.get('age', 'unknown')
-    health_last_release = health.get('last_release', 'unknown')
-    health_owners = health.get('owners', 'unknown')
-    health_scorecard = health.get('scorecard', 'unknown')
+    age_years = health_d.get('age_years')
+    health_age = f'{age_years:.1f} yr' if age_years is not None else 'unknown'
+    last_rel_days = health_d.get('last_release_days')
+    health_last_release = (
+        f'{last_rel_days} days ago' if last_rel_days is not None else 'unknown'
+    )
+    owner_count = health_d.get('owner_count')
+    health_owners = str(owner_count) if owner_count is not None else 'unknown'
+    scorecard = health_d.get('openssf_scorecard_score')
+    health_scorecard = f'{scorecard}/10' if scorecard is not None else 'unknown'
 
-    clone_url = signals.get('clone_url', 'not found')
-    clone_status = signals.get('clone_status', 'UNKNOWN')
-    extensions = signals.get('extensions', 'NO')
-    executables = signals.get('executables', 'NO')
-    transitive_total = signals.get('new_transitive_deps', '0') or '0'
-    concern_level = signals.get('concern_level', 'NONE')
-    risk_flags = signals.get('risk_flags', 'NONE')
-    pos_flags = signals.get('positive_flags', '')
+    clone_url = repo_d.get('source_url', 'not found')
+    clone_status = repo_d.get('status', 'UNKNOWN')
+    extensions = 'YES' if manifest_d.get('has_native_extensions') else 'NO'
+    executables = 'YES' if manifest_d.get('executables') else 'NO'
+    not_in_lock = trans_d.get('not_in_lockfile', [])
+    transitive_total = str(len(not_in_lock)) if isinstance(not_in_lock, list) else '0'
+    concern_level = gate_d.get('concern_level', 'NONE')
+    risk_flags_list = gate_d.get('risk_flags', [])
+    risk_flags = ' '.join(risk_flags_list) if risk_flags_list else 'NONE'
+    pos_flags = gate_d.get('positive_flags', [])
     mfa_status = (
         'MFA_ENFORCED' if 'MFA_ENFORCED' in pos_flags else 'NOT_ENFORCED'
     )
 
-    health_version_stability = signals.get('version_stability', 'unknown')
-    health_known_vulns = signals.get('known_vulnerabilities', 'unknown')
-    health_concerns = signals.get('health_concerns', 'none')
-    install_hooks = signals.get('install_hooks', 'unknown')
+    health_version_stability = health_d.get('version_stability', 'unknown')
+    vuln_count = health_d.get('known_vulnerability_count')
+    health_known_vulns = str(vuln_count) if vuln_count is not None else 'unknown'
+    health_concerns_raw = health_d.get('health_concerns', [])
+    if isinstance(health_concerns_raw, list):
+        health_concerns = ', '.join(
+            c.get('concern', str(c)) if isinstance(c, dict) else str(c)
+            for c in health_concerns_raw
+        ) or 'none'
+    else:
+        health_concerns = str(health_concerns_raw) or 'none'
+    install_hooks = 'YES' if manifest_d.get('has_install_scripts') else 'NO'
 
-    license_note_raw = signals.get('license_note', '')
-    if license_note_raw:
+    license_note_raw = lic_d.get('note', '')
+    if license_note_raw and license_note_raw not in ('none', 'OK', ''):
         license_note = license_note_raw
     elif license_status != 'OK':
         license_note = (
