@@ -16,6 +16,11 @@ or processes to apply.
 As much as practical, we want a lesson learned from any ecosystem
 to be applied to all ecosystems.
 
+## Verification
+
+Run `make` to locally run all verification steps
+(tests, typechecking, linting, etc.).
+
 ## Citations
 
 Record citations of external material, especially when doing research.
