@@ -1524,6 +1524,7 @@ class JavaScriptAnalyzer(shared.EcosystemAnalyzer):
         built_dir: Path,
         work: Path,
         p: 'shared.Printer',
+        dist_sha: str = '',
     ) -> tuple[str, int, int]:
         built_tgzs = list(built_dir.glob('*.tgz'))
         if not built_tgzs:
@@ -1532,7 +1533,7 @@ class JavaScriptAnalyzer(shared.EcosystemAnalyzer):
         # Select newest: npm pack timestamps vary across runs.
         built_tgz = max(built_tgzs, key=lambda tgz: tgz.stat().st_mtime)
         built_sha = shared.sha256_file(built_tgz)
-        if (repro := shared.compare_repro_sha256(built_sha, work, p)) is not None:
+        if (repro := shared.compare_repro_sha256(built_sha, dist_sha, work, p)) is not None:
             return repro
         # Hashes nearly always differ (timestamps); compare unpacked contents.
         built_unpacked = work / 'raw-built-unpacked'

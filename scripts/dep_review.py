@@ -770,7 +770,7 @@ def write_signals(ctx: SignalContext) -> dict:  # noqa: C901
 
     signals['manifest'] = {
         'has_native_extensions': manifest.has_native_extensions,
-        'executables': manifest.executables_list,
+        'executables_list': manifest.executables_list,
         'has_install_scripts': manifest.has_install_scripts,
         'has_post_install_message': manifest.has_post_install_message,
         'has_build_hooks': manifest.has_build_hooks,
@@ -1247,6 +1247,9 @@ def run_analysis(  # noqa: C901
             'meta': {
                 'pkgname': pkgname,
                 'version': new_ver,
+                'analysis_mode': 'UPDATE' if diff_mode else 'NEW',
+                'old_version': old_ver if diff_mode else None,
+                'sha256': sha256 or 'UNKNOWN',
                 'ecosystem': analyzer.ECOSYSTEM,
                 'timestamp': _abort_ts,
             },
@@ -1255,7 +1258,9 @@ def run_analysis(  # noqa: C901
                 'abort_labels': abort_labels,
                 'abort_matches': abort_matches,
                 'concern_level': 'CRITICAL',
-                'concern_count': 1,
+                'concern_count': abort_matches,
+                'risk_flags': [f'ADVERSARIAL_ABORT({lbl})' for lbl in abort_labels],
+                'positive_flags': [],
             },
         }
         (work / 'signals.json').write_text(
@@ -1613,7 +1618,7 @@ def run_analysis(  # noqa: C901
             )
         with Printer(work / 'reproducible-build.txt') as _p_repro:
             repro_result, code_diffs, meta_diffs = analyzer.reproducible_build(
-                pkgname, new_ver, work, sandbox, _p_repro
+                pkgname, new_ver, work, sandbox, _p_repro, sha256
             )
         print(f'  Reproducible build: {repro_result}')
         if code_diffs > 0:

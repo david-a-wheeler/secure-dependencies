@@ -1559,7 +1559,7 @@ def cmd_report(args: argparse.Namespace) -> None:
         pos_flags = gate_d.get('positive_flags', [])
         mfa = 'YES' if 'MFA_ENFORCED' in pos_flags else 'NO'
         extensions = 'YES' if manifest_d.get('has_native_extensions') else 'NO'
-        executables = 'YES' if manifest_d.get('executables') else 'NO'
+        executables = 'YES' if manifest_d.get('executables_list') else 'NO'
         spdx = lic_d.get('spdx_expression', 'unknown')
         osi_bool = lic_d.get('osi_approved')
         osi_str = 'YES' if osi_bool is True else 'NO' if osi_bool is False else '?'
@@ -1601,7 +1601,7 @@ def cmd_report(args: argparse.Namespace) -> None:
         print(f'MFA: {mfa}   Extensions: {extensions}   Executables: {executables}')
         print(f'License: {license_line}')
         print(f'Project health: {health_line}')
-        if pkg_mode not in ('UPDATE',):
+        if pkg_mode not in ('UPDATE', 'UNKNOWN'):
             print(f'New transitive deps: {new_trans}')
         print(f'Adversarial gate: {gate}  |  Concern level: {concern_level} ({concern_count} areas)')
         print(f'Source clone: {clone_display}')
@@ -1878,16 +1878,16 @@ def cmd_pre_fill_assessment(args: argparse.Namespace) -> None:
     install_hooks = 'YES' if manifest_d.get('has_install_scripts') else 'NO'
 
     license_note_raw = lic_d.get('note', '')
-    if license_note_raw and license_note_raw not in ('none', 'OK', ''):
+    if license_status == 'OK':
+        license_note = 'none'
+    elif license_note_raw:
         license_note = license_note_raw
-    elif license_status != 'OK':
+    else:
         license_note = (
             '[TODO: explain security implications; missing license means'
             ' no legal basis for external audits and predicts abandonment'
             ' and unpatched vulnerabilities]'
         )
-    else:
-        license_note = 'none'
 
     template_path = (
         Path(__file__).parent.parent / 'assets' / 'assessment-template.md'

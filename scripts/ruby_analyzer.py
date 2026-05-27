@@ -1226,6 +1226,7 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
         built_dir: Path,
         work: Path,
         p: 'shared.Printer',
+        dist_sha: str = '',
     ) -> tuple[str, int, int]:
         built_gems = list(built_dir.glob('*.gem'))
         if not built_gems:
@@ -1233,7 +1234,7 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
                 p, work, 'INCONCLUSIVE (no .gem produced)')
         built_gem = built_gems[0]
         built_sha = shared.sha256_file(built_gem)
-        if (repro := shared.compare_repro_sha256(built_sha, work, p)) is not None:
+        if (repro := shared.compare_repro_sha256(built_sha, dist_sha, work, p)) is not None:
             return repro
         built_unpacked_parent = work / 'raw-built-unpacked'
         built_unpacked_parent.mkdir(exist_ok=True)

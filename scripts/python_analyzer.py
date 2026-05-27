@@ -1488,6 +1488,7 @@ class PythonAnalyzer(shared.EcosystemAnalyzer):
         built_dir: Path,
         work: Path,
         p: 'shared.Printer',
+        dist_sha: str = '',
     ) -> tuple[str, int, int]:
         built_whls = list(built_dir.glob('*.whl'))
         if not built_whls:
@@ -1495,7 +1496,7 @@ class PythonAnalyzer(shared.EcosystemAnalyzer):
                 p, work, 'INCONCLUSIVE (no .whl produced)')
         built_whl = built_whls[0]
         built_sha = shared.sha256_file(built_whl)
-        if (repro := shared.compare_repro_sha256(built_sha, work, p)) is not None:
+        if (repro := shared.compare_repro_sha256(built_sha, dist_sha, work, p)) is not None:
             return repro
         built_unpacked = work / 'raw-built-unpacked'
         built_unpacked.mkdir(exist_ok=True)

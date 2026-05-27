@@ -41,7 +41,7 @@
   },
   "manifest": {
     "has_native_extensions": true,
-    "executables": null,
+    "executables_list": null,
     "has_install_scripts": false,
     "has_post_install_message": false,
     "has_build_hooks": false

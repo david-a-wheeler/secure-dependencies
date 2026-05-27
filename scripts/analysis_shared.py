@@ -3004,22 +3004,15 @@ def finish_reproducible_build(
 
 def compare_repro_sha256(
     built_sha: str,
+    dist_sha: str,
     work: Path,
     p: 'Printer',
 ) -> tuple | None:
-    """Read distributed SHA256 from signals.json and check for an exact match.
+    """Compare built SHA256 against the distributed SHA256.
 
-    Returns a finished result tuple if the built and distributed hashes match,
-    or None if they differ (caller should proceed to content comparison).
+    Returns a finished result tuple if the hashes match, or None if they
+    differ (caller should proceed to content comparison).
     """
-    dist_sha = ''
-    sig_path = work / 'signals.json'
-    if sig_path.is_file():
-        try:
-            sig = json.loads(sig_path.read_text(encoding='utf-8'))
-            dist_sha = sig.get('meta', {}).get('sha256', '')
-        except (json.JSONDecodeError, OSError):
-            pass
     p(f'BUILT_SHA256: {sanitize_line(built_sha)}')
     p(f'DISTRIBUTED_SHA256: {sanitize_line(dist_sha or "UNKNOWN")}')
     if built_sha and built_sha == dist_sha:
@@ -4265,19 +4258,24 @@ class EcosystemAnalyzer(ABC):
         built_dir: Path,
         work: Path,
         p: 'Printer',
+        dist_sha: str = '',
     ) -> tuple[str, int, int]:
         """Find built artifact, compare with dist, return result tuple.
 
         Returns (repro_result, code_diffs, meta_diffs).
+        dist_sha is the SHA256 of the originally downloaded package file.
         """
 
     def reproducible_build(
         self, pkgname: str, version: str, work: Path, sandbox: str, p: 'Printer',
+        dist_sha: str = '',
     ) -> tuple[str, int, int]:
         """Template method: orchestrate the reproducible-build check.
 
         Common skeleton for all ecosystems; ecosystem-specific steps are
         in _repro_setup, _repro_run_build, and _repro_compare.
+        dist_sha is the SHA256 of the downloaded package file; pass it through
+        so compare_repro_sha256 can fast-path without reading signals.json.
         """
         clone_dir = work / 'source'
         built_dir = work / self.REPRO_BUILT_DIR_SUFFIX
@@ -4303,7 +4301,7 @@ class EcosystemAnalyzer(ABC):
         p(f'BUILD_STATUS: {"yes" if rc_b == 0 else "no"}')
         if rc_b != 0:
             return finish_reproducible_build(p, work, 'INCONCLUSIVE (build failed)')
-        return self._repro_compare(pkgname, version, built_dir, work, p)
+        return self._repro_compare(pkgname, version, built_dir, work, p, dist_sha)
 
 
 # ---------------------------------------------------------------------------
