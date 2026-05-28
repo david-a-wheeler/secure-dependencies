@@ -4312,6 +4312,32 @@ def _invoke_claude(prompt: str, content: str, timeout: int) -> tuple[int, str]:
         return 1, ''
 
 
+def _invoke_gemini(prompt: str, content: str, timeout: int) -> tuple[int, str]:
+    """Invoke gemini CLI in a sandboxed, read-only mode. Returns (returncode, stdout)."""
+    # --sandbox: restricts file access to workspace/temp
+    # --approval-mode plan: read-only mode, blocks shell commands
+    # -p '': triggers headless mode; we prepend prompt to stdin so
+    #   instructions lead the content (Gemini appends -p after stdin,
+    #   which would put instructions last and weaken prompt-injection resistance).
+    cmd = ['gemini', '--sandbox', '--approval-mode', 'plan', '-p', '']
+    combined = prompt + '\n\n' + content
+    try:
+        result = subprocess.run(
+            cmd,
+            input=combined,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        return result.returncode, result.stdout
+    except subprocess.TimeoutExpired:
+        return 1, ''
+    except FileNotFoundError:
+        return 1, ''
+    except Exception:  # noqa: BLE001
+        return 1, ''
+
+
 def _invoke_copilot(prompt: str, content: str, timeout: int) -> tuple[int, str]:
     """Placeholder for GitHub Copilot backend. Not yet implemented."""
     raise NotImplementedError('copilot backend not yet implemented')
@@ -4319,6 +4345,7 @@ def _invoke_copilot(prompt: str, content: str, timeout: int) -> tuple[int, str]:
 
 _AI_BACKENDS: dict[str, Callable[..., tuple[int, str]]] = {
     'claude': _invoke_claude,
+    'gemini': _invoke_gemini,
     'copilot': _invoke_copilot,
 }
 
