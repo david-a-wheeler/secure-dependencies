@@ -69,10 +69,12 @@ def sec(title: str) -> str:
 # Scan orchestration
 # ---------------------------------------------------------------------------
 
-def run_scans(analyzer, unpacked_dir: Path, work: Path) -> tuple[int, list[tuple[str, int]], int]:
+def run_scans(
+    analyzer, unpacked_dir: Path
+) -> tuple[int, list[tuple[str, int]], int, dict[str, list[tuple[str, int, str]]]]:
     """Run adversarial + todo + dangerous-pattern scans on the full package.
 
-    Returns (total_matches, [(label, count), ...], source_lines).
+    Returns (total_matches, [(label, count), ...], source_lines, matches_by_label).
     total_matches counts only adversarial and dangerous patterns; NOT TODO
     patterns. TODO matches are included in scan_details for rendering but
     do not raise SCAN_MATCHES risk flags.
@@ -81,8 +83,9 @@ def run_scans(analyzer, unpacked_dir: Path, work: Path) -> tuple[int, list[tuple
     """
     total = 0
     details: list[tuple[str, int]] = []
+    matches_by_label: dict[str, list[tuple[str, int, str]]] = {}
     if not unpacked_dir.is_dir():
-        return 0, [], 0
+        return 0, [], 0, {}
     todo_labels = {label for label, _ in shared.TODO_PATTERNS}
     scan_patterns = (
         [(lbl, pat) for lbl, pat in shared.ADVERSARIAL_PATTERNS + shared.TODO_PATTERNS]
@@ -90,73 +93,14 @@ def run_scans(analyzer, unpacked_dir: Path, work: Path) -> tuple[int, list[tuple
     )
     for label, pattern in scan_patterns:
         globs = shared.CODE_FILE_GLOBS if label in shared.ADVERSARIAL_CODE_ONLY_LABELS else None
-        with shared.Printer(work / f'summary-scan-{label}.txt') as _p_scan:
-            n = shared.blind_scan(label, pattern, unpacked_dir, work, _p_scan, include_globs=globs)
+        n, matches = shared.blind_scan(label, pattern, unpacked_dir, include_globs=globs)
         if label not in todo_labels:
             total += n
         details.append((label, n))
+        if matches:
+            matches_by_label[label] = matches
     source_lines = shared.count_source_lines(unpacked_dir)
-    return total, details, source_lines
-
-
-def run_diff_scans(analyzer, work: Path, diff_lines: int) -> int:
-    """Run diff security scans on raw-diff-full.txt.
-
-    Returns total diff scan matches.
-    """
-    diff_full_path = work / 'raw-diff-full.txt'
-    if not diff_full_path.is_file() or diff_lines == 0:
-        return 0
-    total = 0
-    for label, pattern in analyzer.DIFF_PATTERNS:
-        with shared.Printer(work / f'summary-scan-{label}.txt') as _p_scan:
-            n = shared.blind_scan(label, pattern, diff_full_path, work, _p_scan)
-        total += n
-    return total
-
-
-# ---------------------------------------------------------------------------
-# Tier 3 AI output writers
-# ---------------------------------------------------------------------------
-
-def _write_diff_semantic(p: 'Printer', result: dict) -> None:
-    """Write diff-semantic.txt content from a run_ai_sandbox result dict."""
-    assessment = result.get('assessment', 'AI_REVIEW_FAILED')
-    if assessment in ('AI_REVIEW_SKIPPED', 'AI_REVIEW_FAILED'):
-        p(f'AI_REVIEW: {assessment}')
-        p(f'SUMMARY: {result.get("summary", "")}')
-        return
-    p('AI_REVIEW: COMPLETE')
-    p(f'ASSESSMENT: {assessment}')
-    p(f'CONFIDENCE: {result.get("confidence", "LOW")}')
-    patterns = result.get('suspicious_patterns', [])
-    p(f'SUSPICIOUS_PATTERNS: {", ".join(patterns) if patterns else "none"}')
-    p(f'FILENAME_INJECTION_ATTEMPTS: {result.get("injection_attempts_in_filenames", 0)}')
-    changed = result.get('changed_files', [])
-    if not changed:
-        p('CHANGED_FILES: (none)')
-    elif len(changed) > 50:
-        p('CHANGED_FILES: (list truncated; more than 50 files changed)')
-    else:
-        p(f'CHANGED_FILES: {", ".join(changed)}')
-    p(f'SUMMARY: {result.get("summary", "")}')
-
-
-def _write_source_review(p: 'Printer', result: dict) -> None:
-    """Write source-review.txt content from a run_ai_sandbox result dict."""
-    assessment = result.get('assessment', 'AI_REVIEW_FAILED')
-    if assessment in ('AI_REVIEW_SKIPPED', 'AI_REVIEW_FAILED'):
-        p(f'AI_REVIEW: {assessment}')
-        p(f'SUMMARY: {result.get("summary", "")}')
-        return
-    p('AI_REVIEW: COMPLETE')
-    p(f'ASSESSMENT: {assessment}')
-    p(f'FILENAME_INJECTION_ATTEMPTS: {result.get("injection_attempts_in_filenames", 0)}')
-    pkg_only = result.get('files_only_in_package', [])
-    p(f'FILES_ONLY_IN_PACKAGE: {", ".join(pkg_only) if pkg_only else "none"}')
-    suspicious = result.get('suspicious_files', [])
-    p(f'SUSPICIOUS_FILES: {", ".join(suspicious) if suspicious else "none"}')
-    p(f'SUMMARY: {result.get("summary", "")}')
+    return total, details, source_lines, matches_by_label
 
 
 # ---------------------------------------------------------------------------
@@ -179,7 +123,6 @@ def write_signals(ctx: SignalContext) -> dict:  # noqa: C901
     manifest = ctx.manifest
     scan_details = ctx.scan_details
     total_matches = ctx.total_matches
-    diff_scan_details = ctx.diff_scan_details
     diff_scan_matches = ctx.diff_scan_matches
     source_lines = ctx.source_lines
     clone_ok = ctx.clone_ok
@@ -213,6 +156,7 @@ def write_signals(ctx: SignalContext) -> dict:  # noqa: C901
     oss_rebuild_result = ctx.oss_rebuild_result
     diff_semantic_result = ctx.diff_semantic_result
     source_review_result = ctx.source_review_result
+    scan_context_result = ctx.scan_context_result
 
     timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 
@@ -327,12 +271,12 @@ def write_signals(ctx: SignalContext) -> dict:  # noqa: C901
     if dangerous_matches_count > 0:
         _concerns.append((
             'dangerous_patterns',
-            f'{dangerous_matches_count} matches  [review summary-scan-*.txt for affected file paths]',
+            f'{dangerous_matches_count} matches  [match context in details.json for Tier 3 review]',
         ))
     if diff_scan_matches > 0:
         _concerns.append((
             'diff_scan_matches',
-            f'{diff_scan_matches} matches  [review summary-scan-*.txt diff section for affected paths]',
+            f'{diff_scan_matches} matches  [match context in details.json for Tier 3 review]',
         ))
     if license_status == 'CRITICAL':
         _concerns.append((
@@ -402,7 +346,7 @@ def write_signals(ctx: SignalContext) -> dict:  # noqa: C901
     if extra_files > 5:
         _concerns.append((
             'extra_files',
-            f'{extra_files}  [unusually high; threshold is 5; review extra-in-package.txt]',
+            f'{extra_files}  [unusually high; threshold is 5; paths in raw-extra-in-package.txt]',
         ))
     if manifest.has_native_extensions:
         _concerns.append((
@@ -595,7 +539,7 @@ def write_signals(ctx: SignalContext) -> dict:  # noqa: C901
     scan_hits = [lbl for lbl, cnt in scan_details if cnt > 0]
     if scan_hits:
         questions.append(
-            f'Scan matches in: {", ".join(scan_hits)}. See scans section for affected files.'
+            f'Scan matches in: {", ".join(scan_hits)}. See scans section for counts.'
             ' Determine whether these are false positives (tests, docs) or genuine concerns.'
         )
     if (total_matches == 0 and diff_scan_matches == 0
@@ -614,44 +558,13 @@ def write_signals(ctx: SignalContext) -> dict:  # noqa: C901
     except (ValueError, IndexError):
         scorecard_float = None
 
-    # ---- Helper: read sanitized file paths from a summary-scan file ----
-    def _scan_paths(lbl: str) -> list[str]:
-        scan_file = work / f'summary-scan-{lbl}.txt'
-        if not scan_file.is_file():
-            return []
-        paths: list[str] = []
-        in_files = False
-        work_prefix = str(work) + '/'
-        for line in scan_file.read_text(encoding='utf-8', errors='replace').splitlines():
-            if line == 'files_with_matches:':
-                in_files = True
-                continue
-            if in_files and line.strip():
-                rel = line[len(work_prefix):] if line.startswith(work_prefix) else line
-                paths.append(rel)
-        return paths
-
     # ---- Aggregate scan results by category ----
     adv_count = all_adversarial_matches
-    adv_paths: list[str] = []
-    for lbl, cnt in scan_details:
-        if lbl in adversarial_labels_set and cnt > 0:
-            adv_paths.extend(_scan_paths(lbl))
-
-    dangerous_paths: list[str] = []
-    for lbl, cnt in scan_details:
-        if lbl not in adversarial_labels_set and lbl not in todo_labels_set and cnt > 0:
-            dangerous_paths.extend(_scan_paths(lbl))
 
     todo_count = sum(cnt for lbl, cnt in scan_details if lbl in todo_labels_set)
     todo_density_pct: float | None = (
         round(todo_count * 100.0 / source_lines, 1) if source_lines > 0 else None
     )
-
-    diff_danger_paths: list[str] = []
-    for lbl, cnt in diff_scan_details:
-        if cnt > 0:
-            diff_danger_paths.extend(_scan_paths(lbl))
 
     # ---- Health concern context map ----
     _health_context = {
@@ -697,24 +610,6 @@ def write_signals(ctx: SignalContext) -> dict:  # noqa: C901
         clone_status_str = 'SKIPPED'
     else:
         clone_status_str = 'FAILED'
-
-    # ---- Extra file paths ----
-    extra_paths: list[str] = []
-    if extra_files > 0:
-        _extra_file_path = work / 'extra-in-package.txt'
-        if _extra_file_path.is_file():
-            for eline in _extra_file_path.read_text(encoding='utf-8', errors='replace').splitlines():
-                if eline.startswith('./'):
-                    extra_paths.append(eline)
-
-    # ---- Binary file paths ----
-    bin_paths: list[str] = []
-    if binary_files > 0:
-        _bin_file_path = work / 'binary-files.txt'
-        if _bin_file_path.is_file():
-            for bline in _bin_file_path.read_text(encoding='utf-8', errors='replace').splitlines():
-                if bline.strip() and not bline.startswith('EMBEDDED_EXECUTABLES:'):
-                    bin_paths.append(bline.strip())
 
     # ---- Build signals dict ----
     signals: dict = {}
@@ -785,26 +680,20 @@ def write_signals(ctx: SignalContext) -> dict:  # noqa: C901
         'source_likely_incompatible': source_likely_incompatible,
     }
 
-    signals['unexpected_files'] = {
-        'count': extra_files,
-        'paths': extra_paths,
-    }
+    signals['unexpected_files'] = {'count': extra_files}
 
-    signals['embedded_binary_files'] = {
-        'count': binary_files,
-        'paths': bin_paths,
-    }
+    signals['embedded_binary_files'] = {'count': binary_files}
 
     scans_dict: dict = {
-        'adversarial': {'count': adv_count, 'paths': adv_paths},
-        'dangerous': {'count': dangerous_matches_count, 'paths': dangerous_paths},
+        'adversarial': {'count': adv_count},
+        'dangerous': {'count': dangerous_matches_count},
     }
     if shared.TODO_PATTERNS:
         todo_entry: dict = {'count': todo_count}
         if todo_density_pct is not None:
             todo_entry['density_pct'] = todo_density_pct
         scans_dict['todo_fixme'] = todo_entry
-    scans_dict['diff_danger'] = {'count': diff_scan_matches, 'paths': diff_danger_paths}
+    scans_dict['diff_danger'] = {'count': diff_scan_matches}
     signals['scans'] = scans_dict
 
     if diff_mode:
@@ -883,6 +772,18 @@ def write_signals(ctx: SignalContext) -> dict:  # noqa: C901
         deeper_sec['source_review'] = sr_entry
         signals['deeper_analysis'] = deeper_sec
 
+    # Scan context review (Tier 3 FP/genuine classification of scan matches)
+    if scan_context_result is not None:
+        _sc = scan_context_result or {}
+        _sc_asmt = _sc.get('assessment', 'NOT_RUN')
+        if _sc_asmt not in ('NOT_RUN', shared.SCAN_CONTEXT_REVIEW_SKIPPED.get('assessment', '')):
+            signals['scan_context_review'] = {
+                'assessment': _sc_asmt,
+                'genuine_concern_count': _sc.get('genuine_concern_count', 0),
+                'false_positive_count': _sc.get('false_positive_count', 0),
+                'summary': _sc.get('summary', ''),
+            }
+
     # Write next-steps.txt when a specific depth was requested for the session
     if deeper_mode or install_probe_mode:
         _next_steps = [
@@ -896,8 +797,8 @@ def write_signals(ctx: SignalContext) -> dict:  # noqa: C901
             else:
                 _next_steps.extend([
                     '[ ] Deeper analysis (--deeper): NOT YET RUN.',
-                    '    Run --deeper now, then read sandbox-detection.txt,',
-                    '    reproducible-build.txt, and source-review.txt.',
+                    '    Run --deeper now, then read sandbox-detection.txt',
+                    '    and reproducible-build.txt.',
                 ])
         if install_probe_mode:
             if install_probe:
@@ -914,8 +815,7 @@ def write_signals(ctx: SignalContext) -> dict:  # noqa: C901
         (work / 'next-steps.txt').write_text('\n'.join(_next_steps) + '\n', encoding='utf-8')
 
     # Sanitize attacker-controlled string values
-    for _sec_key in ('source_repository', 'unexpected_files', 'embedded_binary_files',
-                     'scans', 'transitive_dependencies', 'vulnerabilities'):
+    for _sec_key in ('source_repository', 'transitive_dependencies', 'vulnerabilities'):
         if _sec_key in signals:
             signals[_sec_key] = shared.sanitize_for_json(signals[_sec_key])
 
@@ -923,160 +823,22 @@ def write_signals(ctx: SignalContext) -> dict:  # noqa: C901
 
 
 # ---------------------------------------------------------------------------
-# Write dependency files (new-deps.txt, dep-lockfile-check.txt, dep-registry.txt)
+# Write dependency files (dep-lockfile-check.txt)
 # ---------------------------------------------------------------------------
 
 def write_dep_files(
     work: Path,
-    p_deps: Printer,
     p_lock: Printer,
-    p_reg: Printer,
-    pkgname: str,
-    old_ver: str,
-    new_ver: str,
-    diff_mode: bool,
     dep_result: dict,
-    dep_registry: dict,
 ) -> None:
-    """Write new-deps.txt, dep-lockfile-check.txt, and dep-registry.txt."""
-    added_deps = dep_result.get('added_deps', [])
-    removed_deps = dep_result.get('removed_deps', [])
+    """Write dep-lockfile-check.txt and raw dep files."""
     dep_lines_new = dep_result.get('_dep_lines_new', [])
-
-    if diff_mode:
-        p_deps(f'=== Dependency comparison: {pkgname} {old_ver} -> {new_ver} ===')
-    else:
-        p_deps(f'=== Runtime dependencies: {pkgname} {new_ver} ===')
-    p_deps('')
-    p_deps('ADDED_RUNTIME_DEPS:')
-    if added_deps:
-        for dep_line in added_deps:
-            p_deps(dep_line)
-    elif not diff_mode and dep_lines_new:
-        for dep_line in dep_lines_new:
-            p_deps(dep_line)
-    else:
-        p_deps('  (none)')
-    p_deps('')
-    p_deps('REMOVED_RUNTIME_DEPS:')
-    if removed_deps:
-        for dep_line in removed_deps:
-            p_deps(dep_line)
-    else:
-        p_deps('  (none)')
-
     lockfile_lines = dep_result.get('_lockfile_lines', ['=== Lockfile check ==='])
     for ll in lockfile_lines:
         p_lock(ll)
-
-    p_reg('=== Registry metadata for new-to-lockfile deps ===')
-    not_in_lf = dep_result.get('not_in_lockfile', [])
-    if not_in_lf and dep_registry:
-        for dep_name in not_in_lf:
-            info = dep_registry.get(dep_name, {})
-            p_reg(f'Checking: {dep_name}')
-            p_reg(f'  downloads: {info.get("downloads", "unavailable")}')
-            p_reg(f'  first_seen: {info.get("first_seen", "unavailable")}')
-            p_reg(f'  homepage: {info.get("homepage", "unavailable")}')
-            p_reg('')
-    else:
-        p_reg('(no new-to-lockfile deps)')
-
-    # Also write raw dep files (raw files stay as write_text)
     (work / 'raw-deps-new.txt').write_text('\n'.join(dep_lines_new) + '\n', encoding='utf-8')
     old_dep_lines = dep_result.get('_dep_lines_old', [])
     (work / 'raw-deps-old.txt').write_text('\n'.join(old_dep_lines) + '\n', encoding='utf-8')
-
-
-# ---------------------------------------------------------------------------
-# Write project-health.txt
-# ---------------------------------------------------------------------------
-
-def write_health_file(
-    p: Printer,
-    pkgname: str,
-    new_ver: str,
-    registry: dict,
-    scorecard: str,
-    health_concerns: list[str],
-    recent_commits: int | None = None,
-    has_security_policy: bool | None = None,
-    vuln_count: int = 0,
-    scorecard_checks: dict | None = None,
-    commit_activity: dict | None = None,
-    ecosystems_data: dict | None = None,
-) -> None:
-    """Write project-health.txt."""
-    age_yr = registry.get('age_years_float')
-    age_str = f'{age_yr:.1f}' if age_yr is not None else 'unknown'
-    last_rel = registry.get('last_release_days')
-    owner_count = registry.get('owner_count_int')
-
-    p(f'=== Project health: {pkgname} {new_ver} ===')
-    p('')
-    eco = ecosystems_data or {}
-    dep_pkgs = eco.get('dependent_packages_count')
-    dep_repos = eco.get('dependent_repos_count')
-    eco_critical = eco.get('critical')
-    eco_status = eco.get('status') or 'OK'
-    ver_pub = registry.get('version_published_days')
-    p(f'AGE_YEARS: {age_str}')
-    p(f'LAST_RELEASE_DAYS_AGO: {last_rel if last_rel is not None else "unknown"}')
-    p(f'VERSION_PUBLISHED_DAYS_AGO: {ver_pub if ver_pub is not None else "unknown"}')
-    p(f'VERSION_STABILITY: {registry.get("version_stability", "unknown")}')
-    p(f'OWNER_COUNT: {owner_count if owner_count is not None else "unknown"}')
-    p(f'SCORECARD: {scorecard}')
-    p(f'RECENT_COMMITS_12MO: {recent_commits if recent_commits is not None else "unknown"}')
-    p(f'COMMIT_TREND: {commit_activity["trend"] if commit_activity else "unknown"}')
-    p(f'SECURITY_POLICY: {"YES" if has_security_policy else "NO"}')
-    p(f'KNOWN_VULNERABILITIES: {vuln_count}')
-    p(f'ECOSYSTEMS_DEPENDENT_PACKAGES: {dep_pkgs if dep_pkgs is not None else "unknown"}')
-    p(f'ECOSYSTEMS_DEPENDENT_REPOS: {dep_repos if dep_repos is not None else "unknown"}')
-    p(f'ECOSYSTEMS_CRITICAL: {"YES" if eco_critical else ("NO" if eco_critical is False else "unknown")}')
-    p(f'ECOSYSTEMS_STATUS: {eco_status}')
-    p('')
-    p('HEALTH_CONCERNS:')
-    if health_concerns:
-        for c in health_concerns:
-            p(f'  - {c}')
-    else:
-        p('  none')
-    if commit_activity:
-        p('')
-        p('COMMIT_BUCKETS (most recent first):')
-        buckets = commit_activity['buckets']
-        for i, count in enumerate(buckets):
-            p(f'  {i*30:3d}-{i*30+29:3d} days ago: {count}')
-    if scorecard_checks:
-        p('')
-        p('SCORECARD_CHECKS:')
-        _KEY = ['Branch-Protection', 'CI-Tests', 'Maintained', 'Security-Policy', 'Vulnerabilities', 'Contributors']
-        for name in _KEY:
-            if name in scorecard_checks:
-                p(f'  {name}: {scorecard_checks[name]:.1f}/10')
-
-
-# ---------------------------------------------------------------------------
-# Write license.txt
-# ---------------------------------------------------------------------------
-
-def write_license_file(
-    p: Printer,
-    pkgname: str,
-    new_ver: str,
-    license_result: dict,
-    license_candidates: list[str],
-) -> None:
-    """Write license.txt."""
-    p(f'=== License: {pkgname} {new_ver} ===')
-    p('')
-    p(f'DECLARED: {shared.sanitize_line(", ".join(license_candidates)) if license_candidates else "MISSING"}')
-    p(f'SPDX_NORMALIZED: {shared.sanitize_line(str(license_result.get("spdx", "MISSING")))}')
-    p(f'OSI_APPROVED: {license_result.get("osi", "NO")}')
-    p(f'STATUS: {license_result.get("status", "CRITICAL")}')
-    p(f'NOTE: {license_result.get("note", "")}')
-    if license_result.get('changed'):
-        p('LICENSE_CHANGED: YES')
 
 
 # ---------------------------------------------------------------------------
@@ -1216,13 +978,11 @@ def run_analysis(  # noqa: C901
     # 3. Scans
     print()
     print('--- Adversarial and dangerous-code scans ---')
+    matches_by_label: dict[str, list[tuple[str, int, str]]] = {}
     if unpacked_dir and unpacked_dir.is_dir():
-        total_matches, scan_details, source_lines = run_scans(analyzer, unpacked_dir, work)
+        total_matches, scan_details, source_lines, matches_by_label = run_scans(analyzer, unpacked_dir)
         for label, count in scan_details:
-            if count > 0:
-                print(f'  {label}: {count} matches  [see summary-scan-{label}.txt]')
-            else:
-                print(f'  {label}: 0')
+            print(f'  {label}: {count}' + (' matches' if count > 0 else ''))
         print(f'  Total scan matches: {total_matches}')
     else:
         failures.append('unpacked-dir-missing')
@@ -1281,13 +1041,12 @@ def run_analysis(  # noqa: C901
     # 4. Source clone
     print()
     print('--- Source repository clone ---')
-    with Printer(work / 'clone-status.txt') as _p_clone:
-        clone_ok, version_tag, commit_guessed, source_likely_incompatible = shared.clone_source_repo(source_url, pkgname, new_ver, work, _p_clone)
+    clone_ok, version_tag, commit_guessed, source_likely_incompatible = shared.clone_source_repo(source_url, pkgname, new_ver, work)
     print(f'  Source URL: {shared.sanitize_line(source_url) or "(none)"}')
     if clone_ok and commit_guessed:
         print('  Clone: GUESSED (no version tag; commit inferred from history)')
     elif source_likely_incompatible:
-        print('  Clone: [HIGH RISK] source identified but version unmatched (see clone-status.txt)')
+        print('  Clone: [HIGH RISK] source identified but version unmatched')
     else:
         print(f'  Clone: {"OK" if clone_ok else ("SKIPPED" if not source_url else "FAILED/SKIPPED")}')
     _monorepo, _monorepo_note = shared.detect_monorepo(
@@ -1299,8 +1058,7 @@ def run_analysis(  # noqa: C901
     # 4b. Commit activity (only if clone succeeded)
     raw_clone_dir = work / 'source'
     if clone_ok:
-        with Printer(work / 'recent-commits.txt') as _p_commits:
-            commit_activity = shared.count_recent_commits(raw_clone_dir, _p_commits)
+        commit_activity = shared.count_recent_commits(raw_clone_dir)
     else:
         commit_activity = None
     recent_commits = commit_activity['total'] if commit_activity is not None else None
@@ -1314,8 +1072,7 @@ def run_analysis(  # noqa: C901
 
     # 4c. Security policy
     if clone_ok:
-        with Printer(work / 'security-policy.txt') as _p_secpol:
-            has_security_policy = shared.check_security_policy(raw_clone_dir, _p_secpol)
+        has_security_policy = shared.check_security_policy(raw_clone_dir)
     else:
         has_security_policy = False
     print(f'  Security policy (SECURITY.md): {"found" if has_security_policy else "not found"}')
@@ -1323,8 +1080,7 @@ def run_analysis(  # noqa: C901
     # 5. OpenSSF Badge
     print()
     print('--- OpenSSF Best Practices Badge ---')
-    with Printer(work / 'badge-status.txt') as _p_badge:
-        badge = shared.lookup_openssf_badge(source_url, pkgname, work, _p_badge)
+    badge = shared.lookup_openssf_badge(source_url, pkgname, work)
     if badge['found']:
         tiered_suffix = f' ({badge["tiered"]}/300)' if badge['tiered'] else ''
         print(f'  Metal badge: {badge["level"]}{tiered_suffix}')
@@ -1340,13 +1096,9 @@ def run_analysis(  # noqa: C901
         # Allow the ecosystem analyzer to redirect to a package subdirectory (e.g. in monorepos)
         source_dir = analyzer.find_source_root(source_dir)
         pkg_ex, src_ex = analyzer.get_pkg_src_excludes()
-        with Printer(work / 'extra-in-package.txt') as _p_extra:
-            extra_files = shared.compare_pkg_vs_source(unpacked_dir, source_dir, work, pkg_ex, src_ex, _p_extra)
+        extra_files = shared.compare_pkg_vs_source(unpacked_dir, source_dir, work, pkg_ex, src_ex)
         print(f'  Extra files (package vs source): {extra_files}')
     else:
-        (work / 'extra-in-package.txt').write_text(
-            'EXTRA_FILES_IN_PACKAGE: N/A (no clone)\n', encoding='utf-8'
-        )
         extra_files = 0
         print('  Skipped (no source clone)')
 
@@ -1354,11 +1106,10 @@ def run_analysis(  # noqa: C901
     print()
     print('--- Embedded executable detection ---')
     if unpacked_dir:
-        with Printer(work / 'binary-files.txt') as _p_bin:
-            binary_files = shared.detect_binary_files(
-                unpacked_dir, work, _p_bin,
-                analyzer.NATIVE_BINARY_SUFFIXES,
-            )
+        binary_files = shared.detect_binary_files(
+            unpacked_dir, work,
+            analyzer.NATIVE_BINARY_SUFFIXES,
+        )
     else:
         binary_files = 0
     print(f'  Precompiled executables detected: {binary_files}')
@@ -1413,19 +1164,22 @@ def run_analysis(  # noqa: C901
 
         print()
         print('--- Blind scans on diff ---')
+        diff_matches_by_label: dict[str, list[tuple[str, int, str]]] = {}
         if diff_lines > 0:
             diff_full_path = work / 'raw-diff-full.txt'
             if diff_full_path.is_file():
                 for label, pattern in analyzer.DIFF_PATTERNS:
-                    with shared.Printer(work / f'summary-scan-{label}.txt') as _p_scan:
-                        n = shared.blind_scan(label, pattern, diff_full_path, work, _p_scan)
+                    n, matches = shared.blind_scan(label, pattern, diff_full_path)
                     diff_scan_matches += n
                     diff_scan_details.append((label, n))
-                    print(f'  {label}: {n}' + (f'  [see summary-scan-{label}.txt]' if n > 0 else ''))
+                    if matches:
+                        diff_matches_by_label[label] = matches
+                    print(f'  {label}: {n}' + (' matches' if n > 0 else ''))
             print(f'  Total diff scan matches: {diff_scan_matches}')
         else:
             print('  Skipped (no diff available)')
     else:
+        diff_matches_by_label = {}
         (work / 'diff-filenames.txt').write_text(
             'DIFF: N/A (NEW/CURRENT mode; no old version)\n', encoding='utf-8'
         )
@@ -1448,8 +1202,8 @@ def run_analysis(  # noqa: C901
                 shared.DIFF_REVIEW_SKIPPED,
             )
             print(f'  assessment: {diff_semantic_result.get("assessment", "?")}')
-    with shared.Printer(work / 'diff-semantic.txt') as _p_ds:
-        _write_diff_semantic(_p_ds, diff_semantic_result)
+
+    print(f'  Diff review: {diff_semantic_result.get("assessment", "AI_REVIEW_SKIPPED")}')
 
     # 9. Registry data
     print()
@@ -1464,8 +1218,7 @@ def run_analysis(  # noqa: C901
     # 9b. Vulnerability lookup
     print()
     print('--- Known vulnerabilities (OSV) ---')
-    with Printer(work / 'vulnerabilities.txt') as _p_vuln:
-        vuln_result = shared.lookup_vulnerabilities(pkgname, new_ver, analyzer.OSV_ECOSYSTEM, _p_vuln)
+    vuln_result = shared.lookup_vulnerabilities(pkgname, new_ver, analyzer.OSV_ECOSYSTEM)
     vuln_count = vuln_result['count']
     print(f'  Known vulnerabilities: {vuln_count}')
     for v in vuln_result['vulns'][:5]:
@@ -1473,15 +1226,14 @@ def run_analysis(  # noqa: C901
         summary_preview = v['summary'][:60] if v['summary'] else ''
         print(f'    {v["id"]}  severity={sev}  {summary_preview}')
     if vuln_count > 5:
-        print(f'    ... ({vuln_count - 5} more; see vulnerabilities.txt)')
+        print(f'    ... ({vuln_count - 5} more)')
 
     # 9c. OSS Rebuild reproducibility lookup
     print()
     print('--- OSS Rebuild reproducibility ---')
     _oss_rebuild_ecosystem = getattr(analyzer, 'OSS_REBUILD_ECOSYSTEM', '') or \
         shared._OSS_REBUILD_ECOSYSTEM_FALLBACK.get(analyzer.OSV_ECOSYSTEM, '')
-    with Printer(work / 'oss-rebuild.txt') as _p_orb:
-        oss_rebuild_result = shared.lookup_oss_rebuild(_oss_rebuild_ecosystem, pkgname, new_ver, work, _p_orb)
+    oss_rebuild_result = shared.lookup_oss_rebuild(_oss_rebuild_ecosystem, pkgname, new_ver, work)
     _orb_signal = oss_rebuild_result.get('signal_level', 'NONE')
     if _orb_signal == 'NONE':
         print('  No OSS Rebuild data available for this package/version.')
@@ -1540,17 +1292,6 @@ def run_analysis(  # noqa: C901
     for hc in health_concerns:
         print(f'  [!] {hc}')
 
-    with Printer(work / 'project-health.txt') as _p_health:
-        write_health_file(
-            _p_health, pkgname, new_ver, registry, scorecard, health_concerns,
-            recent_commits=recent_commits,
-            has_security_policy=has_security_policy,
-            vuln_count=vuln_count,
-            scorecard_checks=scorecard_checks,
-            commit_activity=commit_activity,
-            ecosystems_data=ecosystems_data,
-        )
-
     # 12. License
     print()
     print('--- License evaluation ---')
@@ -1564,8 +1305,6 @@ def run_analysis(  # noqa: C901
     if old_license and license_result['changed']:
         license_result['old_raw'] = old_license
         license_result['current_raw'] = license_candidates[0] if license_candidates else ''
-    with Printer(work / 'license.txt') as _p_license:
-        write_license_file(_p_license, pkgname, new_ver, license_result, license_candidates)
     osi_marker = '[OK]' if license_result['osi'] == 'YES' else '[!]'
     print(f'  License: {shared.sanitize_line(str(license_result["spdx"]))}  OSI-approved: {license_result["osi"]}  {osi_marker}')
     if license_result.get('changed'):
@@ -1577,13 +1316,8 @@ def run_analysis(  # noqa: C901
     old_dep_lines = analyzer.get_old_dep_lines(pkgname, old_ver, old_result) if diff_mode else []
     dep_result = analyzer.check_lockfile(manifest.runtime_dep_lines, old_dep_lines, root)
     dep_registry = {d: analyzer.check_dep_registry(d) for d in dep_result.get('not_in_lockfile', [])}
-    with Printer(work / 'new-deps.txt') as _p_deps, \
-         Printer(work / 'dep-lockfile-check.txt') as _p_lock, \
-         Printer(work / 'dep-registry.txt') as _p_reg:
-        write_dep_files(
-            work, _p_deps, _p_lock, _p_reg,
-            pkgname, old_ver, new_ver, diff_mode, dep_result, dep_registry,
-        )
+    with Printer(work / 'dep-lockfile-check.txt') as _p_lock:
+        write_dep_files(work, _p_lock, dep_result)
     not_in_lf = dep_result.get('not_in_lockfile', [])
     print(f'  Not in lockfile: {", ".join(not_in_lf) if not_in_lf else "none"}')
 
@@ -1593,14 +1327,10 @@ def run_analysis(  # noqa: C901
     run_transitive = not diff_mode or bool(not_in_lf)
     lockfile_path = analyzer.get_lockfile_path(root)
     if run_transitive:
-        with Printer(work / 'transitive-deps.txt') as _p_trans:
-            transitive = analyzer.get_transitive_deps(pkgname, new_ver, lockfile_path, work, _p_trans)
+        transitive = analyzer.get_transitive_deps(pkgname, new_ver, lockfile_path, work)
         print(f'  Total transitive deps: {transitive.get("total", 0)}')
         print(f'  New (not in lockfile): {len(transitive.get("not_in_lockfile", []))}')
     else:
-        (work / 'transitive-deps.txt').write_text(
-            'TRANSITIVE_DEPS: N/A (UPDATE mode, no new deps added)\n', encoding='utf-8'
-        )
         (work / 'raw-transitive-deps.txt').write_text('', encoding='utf-8')
         transitive = {'total': 0, 'not_in_lockfile': []}
         print('  Skipped (UPDATE mode with no new unlockfile deps)')
@@ -1653,9 +1383,7 @@ def run_analysis(  # noqa: C901
                 shared.SOURCE_REVIEW_FAILED,
                 shared.SOURCE_REVIEW_SKIPPED,
             )
-            print(f'  assessment: {source_review_result.get("assessment", "?")}')
-    with shared.Printer(work / 'source-review.txt') as _p_sr:
-        _write_source_review(_p_sr, source_review_result)
+        print(f'  Source review: {source_review_result.get("assessment", "AI_REVIEW_SKIPPED")}')
 
     # Install-probe: sandboxed behavioral analysis with honeytokens
     if install_probe:
@@ -1676,6 +1404,41 @@ def run_analysis(  # noqa: C901
             #   strace-only:      strace -f -e trace=network,openat,connect gem install ...
             # In all cases: plant fake AWS_ACCESS_KEY_ID / GITHUB_TOKEN in env,
             # monitor strace output for credential access and outbound connections.
+
+    # Write details.json (Tier 3 input; NOT read by unsandboxed Tier 2)
+    details: dict = {
+        'meta': {'pkgname': pkgname, 'version': new_ver, 'ecosystem': analyzer.ECOSYSTEM},
+        'scan_matches': {
+            lbl: [{'file': f, 'line': ln, 'text': t} for f, ln, t in ms]
+            for lbl, ms in matches_by_label.items()
+        },
+        'diff_scan_matches': {
+            lbl: [{'file': f, 'line': ln, 'text': t} for f, ln, t in ms]
+            for lbl, ms in diff_matches_by_label.items()
+        },
+        'extra_files': (work / 'raw-extra-in-package.txt').read_text(
+            encoding='utf-8', errors='replace'
+        ).splitlines() if (work / 'raw-extra-in-package.txt').is_file() else [],
+        'binary_files': (work / 'raw-binary-in-package.txt').read_text(
+            encoding='utf-8', errors='replace'
+        ).splitlines() if (work / 'raw-binary-in-package.txt').is_file() else [],
+        'diff_filenames': changed_files.splitlines(),
+    }
+    (work / 'details.json').write_text(json.dumps(details, indent=2) + '\n', encoding='utf-8')
+
+    # Tier 3: scan context review (classify matches as FP vs genuine)
+    scan_context_result = shared.SCAN_CONTEXT_REVIEW_SKIPPED
+    if (matches_by_label or diff_matches_by_label) and shared.sandbox_ai_available():
+        print()
+        print('--- Tier 3: scan context review ---')
+        scan_context_result = shared.run_ai_sandbox(
+            json.dumps(details),
+            shared.SCAN_CONTEXT_REVIEW_PROMPT,
+            shared.SCAN_CONTEXT_REVIEW_SCHEMA,
+            shared.SCAN_CONTEXT_REVIEW_FAILED,
+            shared.SCAN_CONTEXT_REVIEW_SKIPPED,
+        )
+        print(f'  assessment: {scan_context_result.get("assessment", "?")}')
 
     # Write signals
     print()
@@ -1710,6 +1473,7 @@ def run_analysis(  # noqa: C901
             oss_rebuild_result=oss_rebuild_result,
             diff_semantic_result=diff_semantic_result,
             source_review_result=source_review_result,
+            scan_context_result=scan_context_result,
         ),
     )
     (work / 'signals.json').write_text(

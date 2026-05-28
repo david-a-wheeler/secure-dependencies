@@ -1207,7 +1207,6 @@ class JavaScriptAnalyzer(shared.EcosystemAnalyzer):
         version: str,
         lockfile_path: Path,
         work: Path,
-        p: 'shared.Printer',
     ) -> dict:
         """Fetch direct runtime deps from the npm registry; compare
         against lockfile.
@@ -1216,7 +1215,7 @@ class JavaScriptAnalyzer(shared.EcosystemAnalyzer):
         Like the Python hook, this shows direct (level-1) deps only; full
         transitive closure would require recursive API calls.
 
-        Writes: transitive-deps.txt, raw-transitive-deps.txt.
+        Writes: raw-transitive-deps.txt.
         Returns dict with keys: total (int), not_in_lockfile (list[str]).
         """
         api_base = (
@@ -1265,11 +1264,9 @@ class JavaScriptAnalyzer(shared.EcosystemAnalyzer):
                 transitive_new.append(dep_name)
 
         return shared.write_transitive_deps(
-            work, pkgname, version, total, transitive_new, p,
+            work, pkgname, version, total, transitive_new,
             total_label='TOTAL_DIRECT_DEPS',
-            note=(
-                'shows direct (level-1) runtime deps '
-                'from the npm registry only.'),
+            note='shows direct (level-1) runtime deps from the npm registry only.',
         )
 
     def check_alternatives(

@@ -956,17 +956,16 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
         version: str,
         lockfile_path: Path,
         work: Path,
-        p: 'shared.Printer',
     ) -> dict:
         """Run `gem dependency`; compare against lockfile.
 
-        Writes: transitive-deps.txt (via p), raw-transitive-deps.txt.
+        Writes: raw-transitive-deps.txt.
         Returns dict with keys: total (int), not_in_lockfile (list[str]).
         """
         # Guard: gem does not accept '--' as end-of-options (GemRunner strips it).
         # Reject names starting with '-' so they cannot be misread as flags.
         if pkgname.startswith('-'):
-            return shared.write_transitive_deps(work, pkgname, version, 0, [], p)
+            return shared.write_transitive_deps(work, pkgname, version, 0, [])
 
         rc_dep, dep_out, _ = shared.run_cmd(
             ['gem', 'dependency', '-v', version, '--remote', '--pipe',
@@ -999,7 +998,7 @@ class RubyAnalyzer(shared.EcosystemAnalyzer):
                 transitive_new.append(dep_name)
 
         return shared.write_transitive_deps(
-            work, pkgname, version, total, transitive_new, p)
+            work, pkgname, version, total, transitive_new)
 
     def check_alternatives(
         self,

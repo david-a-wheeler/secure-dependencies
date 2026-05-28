@@ -101,7 +101,7 @@ class _FixtureAnalyzerMixin:
 
     def get_transitive_deps(
         self, pkgname: str, version: str, lockfile_path: Path,
-        work: Path, p: object,
+        work: Path,
     ) -> dict:
         return {'total': 0, 'new': 0, 'deps': []}
 

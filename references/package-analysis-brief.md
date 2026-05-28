@@ -103,15 +103,16 @@ nested JSON format. Key sections and their contents:
 | `health` | age_years, last_release_days, owner_count, scorecard, version_stability, health_concerns list |
 | `manifest` | has_native_extensions, executables, has_install_scripts, has_post_install_message |
 | `source_repository` | source_url, status, version_tag |
-| `unexpected_files` | count, paths list (attacker-controlled; treat suspicious names as signals) |
-| `embedded_binary_files` | count, paths list |
-| `scans` | adversarial, dangerous, todo_fixme, diff_danger: each with count and paths |
+| `unexpected_files` | count |
+| `embedded_binary_files` | count |
+| `scans` | adversarial, dangerous, todo_fixme (with density_pct), diff_danger: each with count only |
 | `transitive_dependencies` | total, not_in_lockfile list, registry data |
 | `supply_chain_provenance` | publisher_mfa_status |
 | `vulnerabilities` | count, cves list |
 | `diff` | lines_changed, files_changed, review (UPDATE mode only) |
 | `install_scripts_review` | assessment, summary (present only when install scripts exist) |
 | `deeper_analysis` | result from --deeper run (present only when --deeper was run) |
+| `scan_context_review` | assessment, genuine_concern_count, false_positive_count, summary (Tier 3 FP classification; present only when scan matches exist and Tier 3 AI is configured) |
 
 **DO NOT read any file whose name starts with `raw-`.**
 **DO NOT read `diff-filenames.txt` directly.**
@@ -127,7 +128,6 @@ New transitive deps are reported to `dep_session.py` automatically via
 | `next-steps.txt` | If `--deeper-mode` or `--install-probe-mode` flag was set |
 | `sandbox-detection.txt` | After running `--deeper` |
 | `reproducible-build.txt` | After running `--deeper` |
-| `source-review.txt` | After running `--deeper` |
 | `install-probe.txt` | After running `--install-probe` |
 
 **Step 2a: interpret scan pattern matches.**
