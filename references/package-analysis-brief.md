@@ -112,10 +112,9 @@ nested JSON format. Key sections and their contents:
 | `diff` | lines_changed, files_changed, review (UPDATE mode only) |
 | `install_scripts_review` | assessment, summary (present only when install scripts exist) |
 | `deeper_analysis` | result from --deeper run (present only when --deeper was run) |
+| `scan_context_review` | assessment, genuine_concern_count, false_positive_count, summary (Tier 3 FP classification; present only when scan matches exist and Tier 3 AI is configured) |
 
 **DO NOT read any file whose name starts with `raw-`.**
-**DO NOT read `summary-scan-*.txt` files.** Scan counts are in `signals.json['scans']`;
-the per-file paths in the .txt files are for human forensics only, not AI input.
 **DO NOT read `diff-filenames.txt` directly.**
 **DO NOT read `session-update.json`**; it is for `dep_session.py`, not for you.
 
@@ -129,7 +128,6 @@ New transitive deps are reported to `dep_session.py` automatically via
 | `next-steps.txt` | If `--deeper-mode` or `--install-probe-mode` flag was set |
 | `sandbox-detection.txt` | After running `--deeper` |
 | `reproducible-build.txt` | After running `--deeper` |
-| `source-review.txt` | After running `--deeper` |
 | `install-probe.txt` | After running `--install-probe` |
 
 **Step 2a: interpret scan pattern matches.**

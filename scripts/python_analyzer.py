@@ -1144,7 +1144,6 @@ class PythonAnalyzer(shared.EcosystemAnalyzer):
         version: str,
         lockfile_path: Path,
         work: Path,
-        p: 'shared.Printer',
     ) -> dict:
         """Fetch Requires-Dist from PyPI JSON API; compare against lockfile.
 
@@ -1152,7 +1151,7 @@ class PythonAnalyzer(shared.EcosystemAnalyzer):
         would require recursive PyPI API calls; that is deferred to a future
         enhancement.
 
-        Writes: transitive-deps.txt (via p), raw-transitive-deps.txt.
+        Writes: raw-transitive-deps.txt.
         Returns dict with keys: total (int), not_in_lockfile (list[str]).
         """
         # Fetch requires_dist from PyPI for the specific version
@@ -1194,7 +1193,7 @@ class PythonAnalyzer(shared.EcosystemAnalyzer):
                 transitive_new.append(dep_name)
 
         return shared.write_transitive_deps(
-            work, pkgname, version, total, transitive_new, p,
+            work, pkgname, version, total, transitive_new,
             total_label='TOTAL_DIRECT_DEPS',
             note='shows direct (level-1) deps from PyPI metadata only.',
         )
