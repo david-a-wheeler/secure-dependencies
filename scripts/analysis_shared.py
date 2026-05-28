@@ -4153,7 +4153,7 @@ DIFF_REVIEW_SKIPPED: dict = {
     'suspicious_patterns': [],
     'injection_attempts_in_filenames': 0,
     'changed_files': [],
-    'summary': 'Tier 3 AI review skipped (SECURE_DEPS_SANDBOX_AI not set).',
+    'summary': 'Tier 3 AI review skipped (no sandbox AI available).',
 }
 
 DIFF_REVIEW_FAILED: dict = {
@@ -4170,7 +4170,7 @@ SOURCE_REVIEW_SKIPPED: dict = {
     'injection_attempts_in_filenames': 0,
     'files_only_in_package': [],
     'suspicious_files': [],
-    'summary': 'Tier 3 source review skipped (SECURE_DEPS_SANDBOX_AI not set).',
+    'summary': 'Tier 3 source review skipped (no sandbox AI available).',
 }
 
 SOURCE_REVIEW_FAILED: dict = {
@@ -4217,7 +4217,7 @@ SCAN_CONTEXT_REVIEW_SKIPPED: dict = {
     'genuine_concern_count': 0,
     'false_positive_count': 0,
     'concerns': [],
-    'summary': 'Tier 3 scan context review skipped (SECURE_DEPS_SANDBOX_AI not set).',
+    'summary': 'Tier 3 scan context review skipped (no sandbox AI available).',
 }
 
 SCAN_CONTEXT_REVIEW_FAILED: dict = {
@@ -4253,7 +4253,7 @@ INSTALL_SCRIPTS_REVIEW_SCHEMA: dict = {
 INSTALL_SCRIPTS_REVIEW_SKIPPED: dict = {
     'assessment': 'INSTALL_SCRIPTS_REVIEW_SKIPPED',
     'suspicious_patterns': [],
-    'summary': 'Install-scripts review skipped (SECURE_DEPS_SANDBOX_AI not set).',
+    'summary': 'Install-scripts review skipped (no sandbox AI available).',
 }
 
 INSTALL_SCRIPTS_REVIEW_FAILED: dict = {
@@ -4292,9 +4292,28 @@ def _validate_ai_output(data: dict, schema: dict) -> bool:
     return True
 
 
+def _detect_current_ai() -> str | None:
+    """Detect which AI system we are currently running in.
+
+    Returns 'gemini', 'claude', or None.
+    """
+    # Gemini CLI sets GEMINI_CLI=1
+    if os.environ.get('GEMINI_CLI'):
+        return 'gemini'
+    # Claude Code CLI sets CLAUDECODE=1
+    if os.environ.get('CLAUDECODE'):
+        return 'claude'
+    # GitHub Copilot CLI sets COPILOT_CLI=1
+    if os.environ.get('COPILOT_CLI'):
+        return 'copilot'
+    return None
+
+
 def _invoke_claude(prompt: str, content: str, timeout: int) -> tuple[int, str]:
     """Invoke claude CLI with content piped via stdin. Returns (returncode, stdout)."""
-    cmd = ['claude', '-p', prompt, '--allowedTools', '']
+    # --allowedTools "": disables all tools
+    # --permission-mode plan: read-only mode
+    cmd = ['claude', '-p', prompt, '--allowedTools', '', '--permission-mode', 'plan']
     try:
         result = subprocess.run(
             cmd,
@@ -4339,8 +4358,28 @@ def _invoke_gemini(prompt: str, content: str, timeout: int) -> tuple[int, str]:
 
 
 def _invoke_copilot(prompt: str, content: str, timeout: int) -> tuple[int, str]:
-    """Placeholder for GitHub Copilot backend. Not yet implemented."""
-    raise NotImplementedError('copilot backend not yet implemented')
+    """Invoke copilot CLI in plan (read-only) mode. Returns (returncode, stdout)."""
+    # --plan: read-only mode; blocks file writes and shell execution
+    # -p '': triggers headless mode; we prepend prompt to stdin so
+    #   instructions lead the content (copilot appends -p after stdin,
+    #   which would put instructions last and weaken prompt-injection resistance).
+    cmd = ['copilot', '--plan', '-p', '']
+    combined = prompt + '\n\n' + content
+    try:
+        result = subprocess.run(
+            cmd,
+            input=combined,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        return result.returncode, result.stdout
+    except subprocess.TimeoutExpired:
+        return 1, ''
+    except FileNotFoundError:
+        return 1, ''
+    except Exception:  # noqa: BLE001
+        return 1, ''
 
 
 _AI_BACKENDS: dict[str, Callable[..., tuple[int, str]]] = {
@@ -4351,13 +4390,28 @@ _AI_BACKENDS: dict[str, Callable[..., tuple[int, str]]] = {
 
 
 def _get_ai_backend() -> Callable[..., tuple[int, str]] | None:
-    """Return the backend function for SECURE_DEPS_SANDBOX_AI, or None if unset/unknown."""
+    """Return the backend function for SECURE_DEPS_SANDBOX_AI.
+
+    Defaults to the detected current AI system if available.
+    """
     name = os.environ.get('SECURE_DEPS_SANDBOX_AI', '').strip().lower()
-    return _AI_BACKENDS.get(name)
+    if not name:
+        name = _detect_current_ai()
+
+    if not name:
+        return None
+
+    # Verify the CLI tool for the selected backend is available in PATH
+    _cli_map = {'claude': 'claude', 'gemini': 'gemini', 'copilot': 'copilot'}
+    _cli_tool = _cli_map.get(name)
+    if _cli_tool and shutil.which(_cli_tool):
+        return _AI_BACKENDS.get(name)
+
+    return None
 
 
 def sandbox_ai_available() -> bool:
-    """Return True if SECURE_DEPS_SANDBOX_AI is set to a known backend."""
+    """Return True if a sandboxed AI backend is configured or auto-detected."""
     return _get_ai_backend() is not None
 
 
